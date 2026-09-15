@@ -19,8 +19,7 @@ jobs:
           - { name: linux,             os: ubuntu-latest,  bash: bash,      python: "3.12" }
           # The oldest Python the test suite supports (the tool itself needs 3.8+).
           - { name: linux-python-3.10, os: ubuntu-latest,  bash: bash,      python: "3.10" }
-          - { name: macos,             os: macos-latest,   bash: bash,      python: "3.12" }
-          # Stock macOS bash is 3.2 and many users never replace it.
+          # The runner's bash is the stock 3.2, as on most users' Macs.
           - { name: macos-bash-3.2,    os: macos-latest,   bash: /bin/bash, python: "3.12" }
           - { name: windows-git-bash,  os: windows-latest, bash: bash,      python: "3.12" }
     defaults:
@@ -55,7 +54,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install linters
-        run: python -m pip install --disable-pip-version-check ruff shellcheck-py
+        run: python -m pip install --disable-pip-version-check ruff==0.15.12 shellcheck-py
       - name: ruff
         run: ruff check .
       - name: shellcheck

@@ -1,4 +1,6 @@
 [tool.ruff.lint]
+# Pinned explicitly (ruff's defaults change between releases, and CI pins ruff too).
+select = ["E4", "E7", "E9", "F"]
 # Compact `a; b` one-liners and short comprehension names are house style here.
 ignore = ["E702", "E741"]
 
