@@ -17,7 +17,14 @@ run_install() { "$B" "$REPO/install.sh" "$@" >"$FAKE/install.log" 2>&1 || fail "
 SKILL="$FAKE/.claude/skills/local-auditor"
 CFG="$FAKE/.config/qwen-agent/config"
 
+# A forwarder path that is already a symlink (a hand-made install) must be
+# replaced, not written through: the file it points at must survive untouched.
+mkdir -p "$FAKE/.local/bin"
+echo "precious" > "$FAKE/precious.sh"
+ln -s "$FAKE/precious.sh" "$FAKE/.local/bin/qwen-agent" 2>/dev/null || true
+
 run_install --no-preflight
+[ "$(cat "$FAKE/precious.sh")" = "precious" ] || fail "install wrote through a symlinked forwarder"
 if [ -L "$SKILL" ]; then
   LINKED=1
   [ "$(cd -P "$SKILL" && pwd)" = "$(cd -P "$REPO/skill/local-auditor" && pwd)" ] \
