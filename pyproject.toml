@@ -1,0 +1,6 @@
+[tool.ruff.lint]
+# Compact `a; b` one-liners and short comprehension names are house style here.
+ignore = ["E702", "E741"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

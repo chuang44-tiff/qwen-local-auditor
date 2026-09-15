@@ -1,0 +1,3 @@
+# Scripts must keep LF line endings on every platform: a CRLF checkout on
+# Windows breaks bash with $'\r' errors.
+* text=auto eol=lf

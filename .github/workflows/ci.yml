@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux,             os: ubuntu-latest,  bash: bash,      python: "3.12" }
+          # The oldest Python the test suite supports (the tool itself needs 3.8+).
+          - { name: linux-python-3.10, os: ubuntu-latest,  bash: bash,      python: "3.10" }
+          - { name: macos,             os: macos-latest,   bash: bash,      python: "3.12" }
+          # Stock macOS bash is 3.2 and many users never replace it.
+          - { name: macos-bash-3.2,    os: macos-latest,   bash: /bin/bash, python: "3.12" }
+          - { name: windows-git-bash,  os: windows-latest, bash: bash,      python: "3.12" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check pytest
+      - name: Pick the bash under test
+        run: |
+          b="$(command -v "${{ matrix.bash }}")"
+          "$b" --version | head -n 1
+          echo "BASH_UNDER_TEST=$b" >> "$GITHUB_ENV"
+          # Python on Windows would otherwise find WSL's bash.exe in System32 first.
+          if command -v cygpath >/dev/null 2>&1; then b="$(cygpath -w "$b")"; fi
+          echo "TEST_BASH=$b" >> "$GITHUB_ENV"
+      - name: Unit and CLI tests
+        run: python -m pytest -v
+      - name: Install contract
+        # install.sh and the forwarders run under the bash being tested, not whatever is first on PATH.
+        run: TEST_BASH="$BASH_UNDER_TEST" "$BASH_UNDER_TEST" tests/test_install.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install linters
+        run: python -m pip install --disable-pip-version-check ruff shellcheck-py
+      - name: ruff
+        run: ruff check .
+      - name: shellcheck
+        run: shellcheck install.sh skill/local-auditor/*.sh tests/*.sh

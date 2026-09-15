@@ -1,0 +1,26 @@
+# qwen-agent / qwen-sweep machine config -- sourced as shell by both.
+# install.sh copies this to ~/.config/qwen-agent/config (or $XDG_CONFIG_HOME/...)
+# once and never overwrites it. Every value uses ${VAR:-...}, so an environment
+# variable or a command-line flag still wins.
+
+# Your model server: anything that serves the Anthropic Messages API at
+# /v1/messages and lists its models at /v1/models. No /v1 suffix here.
+QWEN_BASE_URL="${QWEN_BASE_URL:-http://127.0.0.1:8000}"
+
+# Leave unset to use the served model when the server serves exactly one.
+# QWEN_MODEL="${QWEN_MODEL:-your-served-model-name}"
+
+# Context window. Unset = read max_model_len from /v1/models when reported.
+# QWEN_CTX="${QWEN_CTX:-131072}"
+
+# Passed to claude --effort (default medium). If your model's chat template only
+# accepts some levels, list them so a bad level fails fast instead of as a 400:
+# QWEN_EFFORT="${QWEN_EFFORT:-medium}"
+# QWEN_EFFORT_ALLOWED="${QWEN_EFFORT_ALLOWED:-low medium high}"
+
+# If the server requires a key (sent as the Anthropic auth token):
+# QWEN_API_KEY="${QWEN_API_KEY:-}"
+
+# Pin the interpreter used to parse results. Probed by RUNNING it: on Windows a
+# bare `python3` is often a Microsoft Store stub that cannot execute anything.
+# QWEN_PYTHON="${QWEN_PYTHON:-python}"
