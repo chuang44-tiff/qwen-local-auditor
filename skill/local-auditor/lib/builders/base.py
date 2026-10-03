@@ -26,7 +26,7 @@ from dataclasses import dataclass
 MAX_ITEM_BYTES = 120_000     # default per-item context budget; qwen-sweep scales it to the window
 _item_budget = MAX_ITEM_BYTES
 
-BUILDER_NAMES = ("claims", "diff", "files", "logs")
+BUILDER_NAMES = ("claims", "deviations", "diff", "files", "history", "logs")
 
 
 def set_item_budget(n):

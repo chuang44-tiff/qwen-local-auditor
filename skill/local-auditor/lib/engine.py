@@ -227,6 +227,8 @@ def collate(root, repo=None):
             problems.append("%s: emitted unexpected block(s): %s" % (d, extra))
         for flag in blocks.flag_prose_evidence(parsed, is_prose):
             problems.append("%s: PROSE EVIDENCE -- %s" % (d, flag))
+        for flag in blocks.flag_unverified_deviation(parsed):
+            problems.append("%s: UNVERIFIED DEVIATION -- %s" % (d, flag))
         for b in parsed:
             rows.append({"batch": os.path.basename(d),
                          "item": labels.get("t%d" % b["item"], "?"),

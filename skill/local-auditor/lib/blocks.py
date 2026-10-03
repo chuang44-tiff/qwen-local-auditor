@@ -97,3 +97,17 @@ def flag_prose_evidence(blocks, is_prose):
                    % (b["key"], b["verdict"], kind,
                       ", ".join("%s:%d" % c for c in prose_hits)))
     return out
+
+
+_TEST_LINE = re.compile(r"\bTEST\s+\S.*?\s(PASSED|FAILED|ERROR|TIMEOUT)\b")
+
+
+def flag_unverified_deviation(blocks_):
+    """A DEVIATION_EXPLAINED must carry a re-run TEST line: a recorded reason that
+    was true last week may be stale, and only re-running its test shows it holds."""
+    out = []
+    for b in blocks_:
+        if (b["verdict"] or "").upper() == "DEVIATION_EXPLAINED" and not _TEST_LINE.search(b["evidence"] or ""):
+            out.append("%s: DEVIATION_EXPLAINED without a re-run TEST line -- recorded reason "
+                       "not re-verified" % b["key"])
+    return out
