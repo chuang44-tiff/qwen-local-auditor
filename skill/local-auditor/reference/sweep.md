@@ -40,6 +40,25 @@ Built(body, context, size, withheld, clauses, label)
 - `build` must not write files. The engine writes, which is what guarantees a withheld
   item can never reach a batch directory and that surviving items are numbered densely.
 
+## Builders that read history
+
+- **`history`** (`--arg files=PATH[,PATH...]`, relative to `--repo`): one item per file.
+  The evidence is the extracted decision moments from the current project's Claude Code
+  transcripts: user lines naming the file, edits to it, test commands and their first
+  result line, and assistant lines that name it with a reason. The model never sees raw
+  transcripts, and each line carries a session id and timestamp. A file with no transcript
+  folder or no mention is withheld with a reason.
+- **`deviations`** (`--arg spec=PATH`, plus the usual diff options such as `--base`): one
+  item per changed file, held against the spec. The context adds the spec, every recorded
+  `decisions.jsonl` from `--until-done` runs of this repo, and the transcript evidence for
+  the file. Verdicts: `DEVIATION_EXPLAINED`, `DRIFT_UNEXPLAINED`, `MATCHES_SPEC`,
+  `CANNOT_DETERMINE`. Implies `--test`, so batches may run the project's tests via
+  `qwen-test`. `DEVIATION_EXPLAINED` must cite a `TEST ... PASSED|FAILED|ERROR|TIMEOUT`
+  line or the collator flags it; that proves a line is present, not that the test was
+  re-run.
+
+Transcript scope is the current project only (see `limits.md`).
+
 ## Why the engine owns so much
 
 Each of these was a real failure before it was a rule:

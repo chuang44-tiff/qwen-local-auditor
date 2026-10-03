@@ -12,11 +12,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PATTERNS = {
     "private IPv4 address": re.compile(
         r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
-        r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b"),
+        r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+        r"|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3})\b"),   # + CGNAT/Tailscale
     "home directory path": re.compile(
         r"(?:/home/|/Users/|\b[A-Za-z]:[\\/]+Users[\\/]+)[A-Za-z0-9._-]+"),
     "e-mail address": re.compile(
-        r"\b[A-Za-z0-9._%+-]+@(?!example\.(?:com|org)\b|users\.noreply\.github\.com\b)"
+        r"\b[A-Za-z0-9._%+-]+@(?!example\.(?:com|org)\b|users\.noreply\.github\.com\b|anthropic\.com\b(?<=noreply@anthropic\.com))"
         r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
 }
 

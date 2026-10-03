@@ -40,6 +40,9 @@ jobs:
           # Python on Windows would otherwise find WSL's bash.exe in System32 first.
           if command -v cygpath >/dev/null 2>&1; then b="$(cygpath -w "$b")"; fi
           echo "TEST_BASH=$b" >> "$GITHUB_ENV"
+      - name: Install tmux (macOS; qwen-cc's tests skip without it)
+        if: runner.os == 'macOS'
+        run: brew install tmux
       - name: Unit and CLI tests
         run: python -m pytest -v
       - name: Install contract
@@ -58,4 +61,4 @@ jobs:
       - name: ruff
         run: ruff check .
       - name: shellcheck
-        run: shellcheck install.sh skill/local-auditor/*.sh tests/*.sh
+        run: shellcheck install.sh skill/local-auditor/*.sh tests/*.sh tests/live/*.sh
