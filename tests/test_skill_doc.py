@@ -43,5 +43,40 @@ def test_limits_records_the_failopen_and_its_correction():
 
 def test_skill_lists_every_builder():
     t = _skill()
-    for b in ("claims", "diff", "files", "logs"):
+    for b in ("claims", "diff", "files", "logs", "history", "deviations"):
         assert b in t
+
+
+FAMILY = ("local-agent", "local-coder", "local-auditor", "local-sweep")
+
+
+def test_every_family_skill_exists_and_is_small():
+    for name in FAMILY:
+        p = ROOT / "skill" / name / "SKILL.md"
+        t = p.read_text(encoding="utf-8")
+        assert re.match(r"^---\nname: %s\ndescription: .{120,}" % name, t, re.S), name
+        assert len(t.splitlines()) < 200, name
+
+
+def test_router_names_every_sub_skill_and_preflights():
+    t = (ROOT / "skill" / "local-agent" / "SKILL.md").read_text(encoding="utf-8")
+    assert "qwen-agent --preflight-only" in t
+    for name in ("local-coder", "local-auditor", "local-sweep"):
+        assert name in t
+
+
+def test_router_documents_the_interactive_launch():
+    # qwen-cc is the one job the router does itself, and the one place where a
+    # permission prompt could be answered on the user's behalf.
+    t = (ROOT / "skill" / "local-agent" / "SKILL.md").read_text(encoding="utf-8")
+    for needle in ("Launch", "qwen-cc --peek", "qwen-cc --say", "qwen-cc --stop",
+                   "attach:", "permission prompt"):
+        assert needle in t, needle
+    assert "never answer" in t.lower()
+
+
+def test_coder_documents_until_done_and_exit_codes():
+    t = (ROOT / "skill" / "local-coder" / "SKILL.md").read_text(encoding="utf-8")
+    assert "--until-done" in t and "DEVIATION" in t
+    for code in ("11", "12", "13", "14"):
+        assert code in t

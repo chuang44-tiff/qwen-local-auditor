@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install contract, in a throwaway HOME: the skill is linked (or copied with a
-# marker where symlinks are unavailable), two forwarders are written, the config
+# Install contract, in a throwaway HOME: the four skills are linked (or copied with a
+# marker where symlinks are unavailable), four forwarders are written, the config
 # is seeded once and never overwritten, and --uninstall removes what was added.
 #
 # Runs install.sh and the forwarders under $TEST_BASH when set, so a CI leg that
@@ -36,11 +36,18 @@ else
   fail "skill was neither linked nor copied"
 fi
 [ -f "$SKILL/qwen-agent.sh" ] || fail "skill contents missing"
+[ -f "$SKILL/qwen-cc.sh" ] || fail "skill contents missing (qwen-cc.sh)"
 [ -f "$CFG" ] || fail "config was not seeded from config.example"
 [ -x "$FAKE/.local/bin/qwen-agent" ] || fail "qwen-agent forwarder missing"
 [ -x "$FAKE/.local/bin/qwen-sweep" ] || fail "qwen-sweep forwarder missing"
+for s in local-agent local-coder local-sweep; do
+  [ -e "$FAKE/.claude/skills/$s/SKILL.md" ] || fail "skill $s not installed"
+done
+[ -x "$FAKE/.local/bin/qwen-test" ] || fail "qwen-test forwarder missing"
+[ -x "$FAKE/.local/bin/qwen-cc" ] || fail "qwen-cc forwarder missing"
 "$B" "$FAKE/.local/bin/qwen-agent" --version >/dev/null 2>&1 || fail "the qwen-agent forwarder does not run"
 "$B" "$FAKE/.local/bin/qwen-sweep" --version >/dev/null 2>&1 || fail "the qwen-sweep forwarder does not run"
+"$B" "$FAKE/.local/bin/qwen-cc" --version >/dev/null 2>&1 || fail "the qwen-cc forwarder does not run"
 
 # An untouched config means there is no server to check yet: say what to do next.
 run_install
@@ -67,7 +74,20 @@ run_install --uninstall
 [ ! -e "$SKILL" ] && [ ! -L "$SKILL" ] || fail "--uninstall left the skill behind"
 [ ! -e "$FAKE/.local/bin/qwen-agent" ] || fail "--uninstall left qwen-agent behind"
 [ ! -e "$FAKE/.local/bin/qwen-sweep" ] || fail "--uninstall left qwen-sweep behind"
+for s in local-agent local-coder local-auditor local-sweep; do
+  [ ! -e "$FAKE/.claude/skills/$s" ] || fail "uninstall left skill $s"
+done
+[ ! -e "$FAKE/.local/bin/qwen-test" ] || fail "uninstall left qwen-test"
+[ ! -e "$FAKE/.local/bin/qwen-cc" ] || fail "uninstall left qwen-cc"
 [ -f "$CFG" ] || fail "--uninstall must keep the user's config"
+
+# A partial checkout must be refused, not half-installed.
+PART="$(mktemp -d)"; cp -R "$REPO/." "$PART/"; rm -rf "$PART/skill/local-coder"
+if "$B" "$PART/install.sh" --no-preflight >"$FAKE/partial.log" 2>&1; then rm -rf "$PART"; fail "partial checkout installed"; fi
+grep -q "install together" "$FAKE/partial.log" || { rm -rf "$PART"; fail "partial install message"; }
+# ...but --uninstall must still work from an incomplete checkout.
+"$B" "$PART/install.sh" --uninstall >"$FAKE/partial-un.log" 2>&1 || { sed "s/^/  | /" "$FAKE/partial-un.log"; rm -rf "$PART"; fail "uninstall from a partial checkout failed"; }
+rm -rf "$PART"
 
 rm -rf "$FAKE"
 echo "PASS"

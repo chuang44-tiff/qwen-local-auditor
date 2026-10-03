@@ -1,6 +1,6 @@
 ---
 name: local-auditor
-description: Run a free, LAN-local second opinion by dispatching a headless Claude Code session to a locally-served model via the `qwen-agent` CLI, or a batch sweep over many items via `qwen-sweep`. Use this whenever work would benefit from a genuinely independent pair of eyes, or when a job is bulk reading that would be expensive in-session - reviewing a diff or a file you just wrote, sanity-checking a script before it runs, a cross-model check on your own conclusions, adjudicating claims a document makes about code, or digesting a large log. Trigger on "audit this", "second opinion", "have the local model look at it", "cross-model check", "review this with qwen", "run a local review", "check my reasoning", "sweep these files", "review this diff locally", "summarise this log", and on any request to review code where the user mentions the local/LAN/offline model, or where you are about to assert something is correct and have no independent check.
+description: Get a free, independent second opinion from a locally served model, run headless through the `qwen-agent` CLI. Use for reviewing a diff, a file you just wrote or a script before it runs, a cross-model check of your own conclusions, writing a failing reproduction test with `--test`, or explaining why code differs from a spec. Trigger on "audit this", "second opinion", "review this with qwen", "have the local model look at it", "check my reasoning", "prove it with a test", "why does this differ from the spec". For the same question over many files or items, use local-sweep instead.
 ---
 
 # Local auditor
@@ -57,6 +57,29 @@ qwen-agent -r auditor -C <dir> -f brief.md -o out.md
   `--toolset` naming Edit/Write/Bash.
 - `-o` is relative to your current directory, never to `-C`.
 
+## Running tests and reproduction tests
+
+```bash
+qwen-agent -r auditor --test -C <repo> "Does retry() handle a 503? Prove it with a test."
+```
+
+`--test` grants `qwen-test` (the project's configured test command, in a throwaway git
+worktree) and nothing else, under `claude --restricted`; it refuses `-w`, `--all-tools`,
+`--toolset`, `--read-only` and any `--permission-mode`. The tests it runs are code that runs as
+the user, so use it only on code you would run. The auditor may write ONLY
+inside that worktree; files it writes come back under `## REPRO FILES` in the result,
+for you or local-coder to adopt. It needs `QWEN_TEST_CMD` in the config.
+
+## Why does the code differ from the spec?
+
+```bash
+qwen-sweep --builder deviations --repo . --base <start> --arg spec=<spec.md>
+```
+
+Each changed file gets DEVIATION_EXPLAINED (a recorded reason, re-verified by re-running
+its test), DRIFT_UNEXPLAINED (the real finding), MATCHES_SPEC or CANNOT_DETERMINE.
+Reasons come from local-coder's decision log and this project's Claude Code transcripts.
+
 ## Batch: `qwen-sweep`
 
 ```bash
@@ -64,6 +87,7 @@ qwen-sweep --builder diff   --repo . --base main
 qwen-sweep --builder files  --repo . --glob 'src/**/*.py'
 qwen-sweep --builder claims --repo . --docs docs/issues --items list.json  # list.json: ["a.md", ...]
 qwen-sweep --builder logs   --input big.log
+qwen-sweep --builder history --repo . --arg files=src/a.py,src/b.py
 ```
 
 | builder | one item is | asks |
@@ -72,6 +96,8 @@ qwen-sweep --builder logs   --input big.log
 | `files` | a path from a glob | what the file does, demonstrable defects |
 | `claims` | a document asserting things about code | a VERDICT per claim, with evidence |
 | `logs` | a chunk of a large text | what is in it, what recurs |
+| `history` | what this project's Claude Code transcripts (not git) recorded about a file (`--arg files=a,b`) | why it is the way it is |
+| `deviations` | a changed file (`--arg spec=PATH`, implies `--test`) | does it differ from the spec, and is there a recorded reason |
 
 Useful flags: `--dry-run` (build and report, dispatch nothing — always do this first on a
 new sweep), `--resume` (skip batches that already passed), `-m NAME` (model for every
