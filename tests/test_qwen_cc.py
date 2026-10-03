@@ -12,6 +12,7 @@ import re
 import shutil
 import tempfile
 import subprocess
+import sys
 import time
 
 import pytest
@@ -336,9 +337,10 @@ def test_a_name_that_is_a_prefix_of_another_is_not_that_session(tmp_path, tmuxd)
 def test_window_dry_run(tmp_path, tmuxd):
     proj = tmp_path / "proj"
     proj.mkdir()
+    mac = sys.platform == "darwin"            # macOS opens Terminal through osascript
+    fake = "#!/bin/sh\necho \"$0\"\n"
     both = _script_dir(tmp_path, "gui-both",
-                       files={"gnome-terminal": "#!/bin/sh\necho \"$0\"\n",
-                              "x-terminal-emulator": "#!/bin/sh\necho \"$0\"\n"},
+                       files={"gnome-terminal": fake, "x-terminal-emulator": fake, "osascript": fake},
                        links=REAL_TOOLS)
     r = cc(tmp_path, str(proj), "--window", "--dry-run", path=posix(both))
     assert r.returncode == 0, r.stdout + r.stderr
@@ -346,14 +348,18 @@ def test_window_dry_run(tmp_path, tmuxd):
     name = session_of(r)
     assert lines[1] == "attach: tmux attach -t %s" % name
     assert command_line(r) == expected_command(name, proj)
-    assert [ln for ln in lines if ln.startswith("window: ")][0] == \
-        "window: gnome-terminal -- tmux attach -t %s" % name
+    window = [ln for ln in lines if ln.startswith("window: ")][0]
+    if mac:
+        assert window.startswith("window: osascript -e ") and "tmux attach -t %s" % name in window
+    else:
+        assert window == "window: gnome-terminal -- tmux attach -t %s" % name
     assert cc(tmp_path, "--list").stdout.strip() == ""    # --dry-run ran nothing
 
-    only = _script_dir(tmp_path, "gui-xterm", files={"x-terminal-emulator": "#!/bin/sh\necho x\n"},
-                       links=REAL_TOOLS)
-    r = cc(tmp_path, str(proj), "--window", "--dry-run", path=posix(only))
-    assert "window: x-terminal-emulator -e tmux attach -t %s" % session_of(r) in r.stdout
+    if not mac:
+        only = _script_dir(tmp_path, "gui-xterm", files={"x-terminal-emulator": "#!/bin/sh\necho x\n"},
+                           links=REAL_TOOLS)
+        r = cc(tmp_path, str(proj), "--window", "--dry-run", path=posix(only))
+        assert "window: x-terminal-emulator -e tmux attach -t %s" % session_of(r) in r.stdout
 
     # no opener at all: say what to do instead, and keep going with the session
     none = _script_dir(tmp_path, "gui-none", links=REAL_TOOLS)

@@ -1464,6 +1464,14 @@ classify() {
   return $QA_OK
 }
 
+repro_section() {  # the '## REPRO FILES' block for the newline-separated files in $1
+  printf '\n## REPRO FILES\n'
+  printf '%s\n' "$1" | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    printf '\n### %s\n\n```\n' "$f"; cat -- "$TEST_WT/$f"; printf '```\n'
+  done
+}
+
 emit() {
   local rc code fmt
   run_claude; rc=$?
@@ -1494,13 +1502,9 @@ emit() {
   if [ "$TEST_MODE" -eq 1 ] && [ "$WRITE_MODE" -eq 0 ] && [ "$JSON_OUT" -eq 0 ] && [ -n "$TEST_WT" ]; then
     _rf="$(skill_py testrun.py --changed "$(native_path "$TEST_REPO")" "$(native_path "$TEST_WT")" | tr -d '\r')"
     if [ -n "$_rf" ]; then
-      {
-        printf '\n## REPRO FILES\n'
-        printf '%s\n' "$_rf" | while IFS= read -r f; do
-          [ -n "$f" ] || continue
-          printf '\n### %s\n\n```\n' "$f"; cat -- "$TEST_WT/$f"; printf '```\n'
-        done
-      } >>"${OUT:-/dev/stdout}"
+      # Straight to stdout when there is no -o file: Git Bash on Windows has no
+      # /dev/stdout to append to, and the whole section was silently lost there.
+      if [ -n "$OUT" ]; then repro_section "$_rf" >>"$OUT"; else repro_section "$_rf"; fi
     fi
     unset _rf
   fi
