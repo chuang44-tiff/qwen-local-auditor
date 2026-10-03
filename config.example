@@ -24,3 +24,10 @@ QWEN_BASE_URL="${QWEN_BASE_URL:-http://127.0.0.1:8000}"
 # Pin the interpreter used to parse results. Probed by RUNNING it: on Windows a
 # bare `python3` is often a Microsoft Store stub that cannot execute anything.
 # QWEN_PYTHON="${QWEN_PYTHON:-python}"
+
+# The project test command qwen-test runs (the model only picks WHICH tests).
+# Set per machine; a repo-specific value can be exported before calling qwen-agent.
+# Windows: use forward slashes in paths (C:/Python312/python.exe): the value is
+# split like a POSIX shell line, which drops backslashes.
+# QWEN_TEST_CMD="${QWEN_TEST_CMD:-python -m pytest -q}"
+# QWEN_TEST_TIMEOUT="${QWEN_TEST_TIMEOUT:-600}"
