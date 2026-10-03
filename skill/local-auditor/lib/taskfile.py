@@ -8,7 +8,9 @@ import shlex
 from dataclasses import dataclass, field
 
 _ITEM = re.compile(r"^\s*[-*]\s*\[[ xX]\]\s*(.+?)\s*$")
-_CHECK = re.compile(r"\s+--\s+check:\s*(test|cmd|none)\b\s*(.*?)\s*$")
+# One marker, not the whole tail: the LAST occurrence on the line is the check, and
+# everything before it -- earlier " -- check:" text included -- is item text.
+_CHECK = re.compile(r"\s+--\s+check:\s*(test|cmd|none)\b")
 _CHECKISH = re.compile(r"check:", re.I)
 
 
@@ -35,10 +37,15 @@ def parse(text):
             continue
         body, kind, arg = m.group(1), "none", ""
         n = len(items) + 1
-        c = _CHECK.search(" " + body)
-        if c:
-            kind, arg = c.group(1), c.group(2)
-            body = (" " + body)[:c.start()].strip()
+        # The leading space: a suffix may sit at the very start of the item text.
+        padded = " " + body
+        hits = list(_CHECK.finditer(padded))
+        if hits:
+            # The LAST suffix is the check: prose quoting " -- check: none" must not
+            # silently downgrade the item's real check to UNVERIFIED.
+            c = hits[-1]
+            kind, arg = c.group(1), padded[c.end():].strip()
+            body = padded[:c.start()].strip()
         elif _CHECKISH.search(body):
             # A line that LOOKS like a check but does not read exactly as one
             # must not be downgraded to `none`: that would let the item pass

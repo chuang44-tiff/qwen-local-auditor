@@ -84,3 +84,28 @@ def test_bare_filename_citation_is_not_resolvable():
     from lib.blocks import citations
     assert citations("ledger.py") == []          # no line number -> unusable
     assert citations("pkg/x.py:120, y.py:9") == [("pkg/x.py", 120), ("y.py", 9)]
+
+
+DEVIATIONS = (
+    "## t1\nVERDICT: DEVIATION_EXPLAINED\nFINDING: f\n"
+    "EVIDENCE: D1, TEST tests/t.py::x FAILED: timeout at attempt 4\nWHY: w\n"
+    "## t2\nVERDICT: DEVIATION_EXPLAINED\nFINDING: f\n"
+    "EVIDENCE: D1, TEST tests/t.py::x PASSED\nWHY: w\n"
+    "## t3\nVERDICT: DEVIATION_EXPLAINED\nFINDING: f\nEVIDENCE: D1, src/n.py:4\nWHY: w\n"
+    "## t4\nVERDICT: DEVIATION_EXPLAINED\nFINDING: f\nEVIDENCE: TEST tests/t.py::y ERROR\nWHY: w\n"
+    "## t5\nVERDICT: DEVIATION_EXPLAINED\nFINDING: f\nEVIDENCE: TEST tests/t.py::z TIMEOUT\nWHY: w\n"
+)
+
+
+def test_failed_rerun_does_not_explain_a_deviation():
+    """A re-run is evidence a recorded reason HOLDS only when it passed. A TEST line
+    saying FAILED (or ERROR, or TIMEOUT) is flagged like a missing one, and the flag
+    names the result it saw."""
+    from lib.blocks import flag_unverified_deviation
+    flags = flag_unverified_deviation(parse(DEVIATIONS))
+    assert [f.split(":")[0] for f in flags] == ["t1", "t3", "t4", "t5"]
+    assert "did not pass" in flags[0] and "FAILED" in flags[0]
+    # A missing re-run keeps its own wording; a non-passing one names its result.
+    assert "without a re-run TEST line" in flags[1] and "FAILED" not in flags[1]
+    assert "ERROR" in flags[2] and "TIMEOUT" in flags[3]
+    assert not any(f.startswith("t2:") for f in flags), "PASSED is the evidence that counts"

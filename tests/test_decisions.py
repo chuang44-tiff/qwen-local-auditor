@@ -78,6 +78,21 @@ def test_load_skips_corrupt_json_lines(tmp_path):
     assert appended[0]["n"] == 2
 
 
+def test_append_after_partial_line_keeps_the_record(tmp_path):
+    p = str(tmp_path / "d.jsonl")
+    # A run killed mid-write leaves a line that parses to nothing and has no newline.
+    # The newline must still go in: without it the first record joins that line and
+    # the file loses both entries.
+    with open(p, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write('{"n": 1, "spec": "a", "did": "b"')
+    assert decisions.load(p) == []
+    appended = decisions.append(p, [{"spec": "c", "did": "d", "why": "", "evidence": ""}],
+                                session="s1", commit="def")
+    assert appended[0]["n"] == 1
+    assert [e["did"] for e in decisions.load(p)] == ["d"]
+    assert len(open(p, encoding="utf-8").read().splitlines()) == 2
+
+
 def test_append_adds_newline_if_missing(tmp_path):
     p = str(tmp_path / "d.jsonl")
     # Write a record without trailing newline

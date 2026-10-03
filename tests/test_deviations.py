@@ -84,3 +84,29 @@ def test_context_names_the_run_and_renumbers(tmp_path, monkeypatch):
     b = deviations.build(deviations.enumerate_items({"repo": str(repo), "spec": str(spec)})[0])
     assert "D1\nRUN: runA\nSPEC: s\nDID: d-runA" in b.context
     assert "D2\nRUN: runB\nSPEC: s\nDID: d-runB" in b.context
+
+
+def test_clipped_spec_is_marked(tmp_path, monkeypatch):
+    repo = tmp_path / "r"; repo.mkdir()
+    for a in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"]):
+        subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+    (repo / "n.py").write_text("a = 1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "i"], check=True, capture_output=True)
+    (repo / "n.py").write_text("a = 2\n")
+    monkeypatch.setenv("QWEN_AGENT_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("QWEN_TRANSCRIPT_DIR", str(tmp_path / "none"))
+    # A spec past MAX_SPEC is cut, and the cut must be visible: a clipped spec that
+    # reads as the whole one has the auditor rule on clauses it was never shown.
+    spec = tmp_path / "spec.md"
+    spec.write_text("Retry 3 times.\n" + "x" * deviations.MAX_SPEC + "\nPAST THE CUT: keep the name\n")
+    item = deviations.enumerate_items({"repo": str(repo), "spec": str(spec)})[0]
+    mark = "[spec truncated at %d characters]" % deviations.MAX_SPEC
+    assert item["spec"].endswith("\n" + mark)
+    assert "PAST THE CUT: keep the name" not in item["spec"]
+    assert mark in deviations.build(item).context
+    # A spec that fits carries no marker.
+    fits = tmp_path / "fits.md"
+    fits.write_text("y" * deviations.MAX_SPEC)
+    whole = deviations.enumerate_items({"repo": str(repo), "spec": str(fits)})[0]
+    assert "[spec truncated" not in whole["spec"]

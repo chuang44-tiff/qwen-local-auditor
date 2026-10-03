@@ -45,7 +45,10 @@ def append(path, entries, *, session, commit):
     start = max((e["n"] for e in loaded), default=0)
     stored = []
     with open(path, "a", encoding="utf-8", newline="\n") as fh:
-        if loaded and os.path.getsize(path) > 0:
+        # Any non-empty file not ending in a newline, parsed entries or not: a log
+        # whose only content is a half-written line would otherwise absorb the first
+        # record appended to it and lose both.
+        if os.path.getsize(path) > 0:
             with open(path, "rb") as check:
                 check.seek(-1, 2)
                 if check.read(1) != b"\n":

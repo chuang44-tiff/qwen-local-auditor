@@ -39,6 +39,23 @@ def test_empty_check_argument_is_an_error():
         taskfile.parse("- [ ] x -- check: test   \n")
 
 
+def test_last_check_on_the_line_is_the_check():
+    """Item text may quote " -- check: none" without the real check being downgraded
+    to UNVERIFIED: the LAST " -- check:" on the line is the check, and everything
+    before it -- earlier " -- check:" text included -- is item text."""
+    quoted = taskfile.parse(
+        "- [ ] the old note reads -- check: none, but now -- check: test tests/net.py::test_retry\n")
+    i = quoted.items[0]
+    assert (i.kind, i.arg) == ("test", "tests/net.py::test_retry")
+    assert i.text == "the old note reads -- check: none, but now"
+    later = taskfile.parse("- [ ] a -- check: test first -- check: cmd ls -1\n").items[0]
+    assert (later.kind, later.arg) == ("cmd", "ls -1")
+    assert later.text == "a -- check: test first"
+    # One suffix, unchanged.
+    one = taskfile.parse("- [ ] docs updated -- check: none\n").items[0]
+    assert (one.kind, one.arg, one.text) == ("none", "", "docs updated")
+
+
 @pytest.mark.parametrize("line", [
     "- [ ] a -- check: Test a.py\n",    # wrong letter case
     "- [ ] a -- Check: test x\n",

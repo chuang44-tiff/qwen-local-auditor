@@ -21,8 +21,8 @@ description: Have the local model implement a change against a written task and 
 ```
 
 Write the ` -- check:` suffix only once per line, at the end. A line with no valid suffix
-whose prose contains "check:" is refused; a second suffix is not detected and becomes part
-of the first check's argument.
+whose prose contains "check:" is refused; when a line carries more than one, the last
+` -- check:` on the line is the check; anything before it is item text.
 
 Make every item checkable. The local model cannot tick items or edit this file.
 For batch edits across many files, give one item per file.

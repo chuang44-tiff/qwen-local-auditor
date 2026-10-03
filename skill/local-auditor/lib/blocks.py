@@ -103,11 +103,23 @@ _TEST_LINE = re.compile(r"\bTEST\s+\S.*?\s(PASSED|FAILED|ERROR|TIMEOUT)\b")
 
 
 def flag_unverified_deviation(blocks_):
-    """A DEVIATION_EXPLAINED must carry a re-run TEST line: a recorded reason that
-    was true last week may be stale, and only re-running its test shows it holds."""
+    """A DEVIATION_EXPLAINED must carry a re-run TEST line that PASSED: a recorded
+    reason that was true last week may be stale, and only a re-run of its test that
+    passes on the current code shows it still holds. A re-run that came back FAILED,
+    ERROR or TIMEOUT is no evidence at all -- it says the reason no longer holds --
+    so it is flagged exactly like a missing one, with the result named."""
     out = []
     for b in blocks_:
-        if (b["verdict"] or "").upper() == "DEVIATION_EXPLAINED" and not _TEST_LINE.search(b["evidence"] or ""):
+        if (b["verdict"] or "").upper() != "DEVIATION_EXPLAINED":
+            continue
+        results = _TEST_LINE.findall(b["evidence"] or "")
+        if "PASSED" in results:
+            continue
+        if results:
+            out.append("%s: DEVIATION_EXPLAINED citing a re-run TEST line that did not pass "
+                       "(%s) -- the recorded reason holds only while its test passes"
+                       % (b["key"], results[0]))
+        else:
             out.append("%s: DEVIATION_EXPLAINED without a re-run TEST line -- recorded reason "
                        "not re-verified" % b["key"])
     return out

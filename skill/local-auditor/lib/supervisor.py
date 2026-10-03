@@ -468,6 +468,10 @@ def run(o):
             _write(ppath, prompt)
             sig_before = _tree_sig(repo)
             r = call_agent(o.agent, repo, ppath, session, o.passthrough)
+            # The tree as the agent left it, taken once and before any check runs:
+            # a `cmd` check runs in the live repo, so one that writes a file would
+            # otherwise make a round that changed nothing look like progress.
+            sig_round = _tree_sig(repo)
             # The session transcript accumulates, so this round's calls are the
             # difference from the previous round's totals. No readable transcript
             # is empty counts, never a failure.
@@ -503,7 +507,7 @@ def run(o):
             # simply ended without text. Done is decided by the checks, so they run
             # either way; the round is "unusable" only if it also changed nothing.
             empty = r["rc"] in (AGENT_EMPTY, AGENT_HARNESS, AGENT_TIMEOUT) or not r["result"].strip()
-            unusable = empty and _tree_sig(repo) == sig_before
+            unusable = empty and sig_round == sig_before
             if not unusable:
                 garbage = 0
                 timeout_run = 0
@@ -553,10 +557,13 @@ def run(o):
                             if r["rc"] == AGENT_TIMEOUT else
                             "Your last reply was empty or unusable. Continue the task.")
                 continue
-            # Progress = a different failing set OR a changed tree. A model still
-            # editing toward one stubborn item is working, not stuck.
-            sig = (now, _tree_sig(repo))
-            if sig == prev:
+            # Progress = a different failing set OR a tree the AGENT changed. A model
+            # still editing toward one stubborn item is working, not stuck. `stalled`
+            # is what a writing check forces: its file sits in this round's starting
+            # tree, so consecutive signatures differ while the agent does nothing.
+            sig = (now, sig_round)
+            stalled = prev is not None and now == prev[0] and sig_round == sig_before
+            if sig == prev or stalled:
                 reason, code = ("no progress: the same checks failed two rounds in a row "
                                 "with no change to the tree"), EXIT_NOPROGRESS
                 break

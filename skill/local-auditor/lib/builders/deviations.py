@@ -25,7 +25,11 @@ def _state_dir(repo):
 def enumerate_items(args):
     repo = args["repo"]
     with open(args["spec"], encoding="utf-8", errors="replace") as fh:
-        spec = fh.read()[:MAX_SPEC]
+        spec = fh.read()
+    if len(spec) > MAX_SPEC:
+        # Name the cut: a clipped spec that reads as the whole one lets the auditor
+        # rule on clauses it was never shown.
+        spec = spec[:MAX_SPEC] + "\n[spec truncated at %d characters]" % MAX_SPEC
     log = []
     for p in sorted(glob.glob(os.path.join(_state_dir(repo), "*", "decisions.jsonl"))):
         run = os.path.basename(os.path.dirname(p))

@@ -77,6 +77,27 @@ def test_same_failures_twice_is_no_progress(env):
     assert len(calls(tmp)) == 2
 
 
+def test_writing_check_does_not_fake_progress(env):
+    # A `cmd` check runs in the live repo, so one that writes a file changes the tree
+    # every round. The round's tree signature is the tree the AGENT left, taken before
+    # any check runs, so a round that changed nothing is still a stuck round: exit 12
+    # after two rounds, not the round limit.
+    repo, task, tmp = env
+    (repo / "wcheck.py").write_text(
+        "import sys\n"
+        "with open('side.txt', 'a', encoding='utf-8') as fh:\n    fh.write('ran\\n')\n"
+        "sys.exit(1)\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-qm", "a check that writes")
+    task.write_text("# Goal\nNothing here passes.\n\n"
+                    "- [ ] the writing check -- check: cmd %s wcheck.py\n" % PY.replace("\\", "/"))
+    script(tmp, [{"result": "nothing changes"}])
+    assert sup(repo, task) == 12
+    assert len(calls(tmp)) == 2
+    report = next((tmp / "state").rglob("report.md")).read_text(encoding="utf-8")
+    assert "no progress" in report
+    assert (repo / "side.txt").read_text() == "ran\nran\n"      # the check wrote, twice
+
+
 def test_round_limit_is_partial_with_a_report(env, capsys):
     repo, task, tmp = env
     script(tmp, [{"result": "x", "write": {"value.txt": "v%d\n" % i}} for i in range(10)])
