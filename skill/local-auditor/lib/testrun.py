@@ -69,8 +69,23 @@ def validate_selectors(tokens):
     return out
 
 
+def split_command(cmd, windows=None):
+    """A command line as an argv. On Windows, backslashes are path separators, not
+    escapes: POSIX splitting would turn C:\\Python\\python.exe into C:Pythonpython.exe,
+    so split there in non-POSIX mode and drop the quotes around a quoted word."""
+    windows = (os.name == "nt") if windows is None else windows
+    if not windows:
+        return shlex.split(cmd or "")
+    out = []
+    for w in shlex.split(cmd or "", posix=False):
+        if len(w) >= 2 and w[0] == w[-1] and w[0] in "\"'":
+            w = w[1:-1]
+        out.append(w)
+    return out
+
+
 def build_argv(cmd, selectors):
-    base = shlex.split(cmd or "")
+    base = split_command(cmd)
     if not base:
         raise ValueError("the test command (QWEN_TEST_CMD) is empty")
     return base + list(selectors)

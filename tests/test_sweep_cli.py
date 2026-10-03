@@ -8,6 +8,7 @@ and every "nothing was audited" path.
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 
@@ -52,6 +53,18 @@ done
 
 def posix(p):
     return str(p).replace("\\", "/")
+
+
+def same_path(p):
+    """One spelling for a path whatever produced it: Python on Windows says C:\\x\\y,
+    Git Bash says /c/x/y, cygpath -m says C:/x/y. Compare these, not the raw strings."""
+    s = str(p).replace("\\", "/")
+    m = re.match(r"^/([A-Za-z])/(.*)$", s)
+    if m and os.name == "nt":
+        s = "%s:/%s" % (m.group(1), m.group(2))
+    if re.match(r"^[A-Za-z]:/", s):
+        s = s[0].upper() + s[1:]
+    return s
 
 
 @pytest.fixture
@@ -213,7 +226,7 @@ def test_sweep_test_flag_reaches_every_dispatch(tmp_path, repo, dispatch):
     assert calls, "no dispatch recorded"
     for argv in calls:
         assert "--test" in argv
-        assert argv[argv.index("--test-repo") + 1] == posix(repo)
+        assert same_path(argv[argv.index("--test-repo") + 1]) == same_path(repo)
 
 
 @pytest.mark.parametrize("args", [["--builder", "files", "--glob", "src/*.py", "--test"],
@@ -251,7 +264,7 @@ def test_deviations_builder_implies_test(tmp_path, dispatch):
     assert calls, "no dispatch recorded"
     for argv in calls:
         assert "--test" in argv
-        assert argv[argv.index("--test-repo") + 1] == posix(repo)
+        assert same_path(argv[argv.index("--test-repo") + 1]) == same_path(repo)
 
 
 @pytest.mark.parametrize("cmd", [" ", "   ", "\t"], ids=["space", "spaces", "tab"])

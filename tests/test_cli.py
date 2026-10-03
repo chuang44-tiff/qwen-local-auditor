@@ -6,6 +6,7 @@ Bash on Windows as well as Linux.
 """
 import http.server
 import json
+import re
 import os
 import pathlib
 import shutil
@@ -41,7 +42,8 @@ case "${FAKE_MODE:-ok}" in
   empty)   printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"","session_id":"fake-session-1"}' ;;
   denied)  printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"partial","permission_denials":[{"tool_name":"Bash"}]}' ;;
   garbage) printf 'this is not json\n' ;;
-  repro)   printf 'def test_repro():\n    assert False\n' > "$QWEN_TEST_WORKTREE/test_repro.py"; printf '%s\n' "$ok" ;;
+  repro)   wt="$QWEN_TEST_WORKTREE"; command -v cygpath >/dev/null 2>&1 && wt="$(cygpath -u "$wt")"
+           printf 'def test_repro():\n    assert False\n' > "$wt/test_repro.py"; printf '%s\n' "$ok" ;;
   sleep)   sleep 20; printf '%s\n' "$ok" ;;
 esac
 '''
@@ -71,6 +73,18 @@ class _Models(http.server.BaseHTTPRequestHandler):
 def posix(p):
     """Forward slashes work for Git Bash on Windows and change nothing elsewhere."""
     return str(p).replace("\\", "/")
+
+
+def same_path(p):
+    """One spelling for a path whatever produced it: Python on Windows says C:\\x\\y,
+    Git Bash says /c/x/y, cygpath -m says C:/x/y. Compare these, not the raw strings."""
+    s = str(p).replace("\\", "/")
+    m = re.match(r"^/([A-Za-z])/(.*)$", s)
+    if m and os.name == "nt":
+        s = "%s:/%s" % (m.group(1), m.group(2))
+    if re.match(r"^[A-Za-z]:/", s):
+        s = s[0].upper() + s[1:]
+    return s
 
 
 @pytest.fixture
@@ -541,7 +555,7 @@ def test_coder_test_run_has_no_worktree_grants(tmp_path, server, fake):
     assert "Edit" in grants and "Write" in grants
     assert not [g for g in grants if g.startswith(("Edit(//", "Write(//"))]
     assert "--add-dir" not in argv                     # the worktree is not even shared
-    assert env["QWEN_TEST_WORKTREE"].startswith(posix(tmp_path / "wts"))   # still named in the env
+    assert same_path(env["QWEN_TEST_WORKTREE"]).startswith(same_path(tmp_path / "wts"))  # still named in the env
 
 
 def test_test_flag_sets_bash_timeouts(tmp_path, fake):
@@ -859,7 +873,7 @@ def _repro_run(tmp_path, server, fake, args):
 def test_repro_files_listed_for_read_only_run(tmp_path, server, fake):
     repo, r = _repro_run(tmp_path, server, fake, [])
     assert r.returncode == 0, r.stderr
-    assert "## REPRO FILES" in r.stdout
+    assert "## REPRO FILES" in r.stdout, r.stdout + r.stderr
     assert "### test_repro.py" in r.stdout
     assert "assert False" in r.stdout
     st = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
@@ -1013,7 +1027,7 @@ def test_until_done_forwards_filtered_options(tmp_path):
             extra={"QWEN_PYTHON": posix(fakepy)})
     assert r.returncode == 0, r.stdout + r.stderr
     argv, _ = record(tmp_path)
-    assert flag(argv, "--repo") == posix(tmp_path / "sub")
+    assert same_path(flag(argv, "--repo")) == same_path(tmp_path / "sub")
     assert argv.count("--max-rounds") + sum(a.startswith("--max-rounds=") for a in argv) == 1
     assert argv[argv.index("--") + 1:] == ["--model", "a b"]
 

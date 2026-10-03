@@ -416,3 +416,12 @@ def test_huge_test_output_is_read_back_bounded(tmp_path, monkeypatch):
                            str(tmp_path), 60)
     assert rc == 0 and len(out) < 6000
     assert out.startswith("FIRST") and "FAILED: LAST" in out and "not kept" in out
+
+
+def test_split_command_keeps_windows_backslashes():
+    # A Windows QWEN_TEST_CMD names programs by backslash paths; POSIX splitting ate them.
+    cmd = r'C:\Py\python.exe -m pytest "C:\My Repo\tests" -q'
+    assert testrun.split_command(cmd, windows=True) == [
+        r"C:\Py\python.exe", "-m", "pytest", r"C:\My Repo\tests", "-q"]
+    assert testrun.split_command("python3 -m pytest 'a b' -q", windows=False) == [
+        "python3", "-m", "pytest", "a b", "-q"]

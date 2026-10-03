@@ -5,10 +5,12 @@ TMUX, so it talks to a tmux SERVER OF ITS OWN -- created by that first call and
 killed in the fixture's finalizer -- and never to the developer's. A fake
 `qwen-agent` sits at the front of PATH, so the real one is never launched.
 """
+import atexit
 import os
 import pathlib
 import re
 import shutil
+import tempfile
 import subprocess
 import time
 
@@ -95,6 +97,26 @@ def _script_dir(tmp_path, name, files=None, links=()):
     return d
 
 
+_SOCK_ROOTS = {}
+# Tests that never start the tmuxd fixture still make a root; remove whatever is left.
+atexit.register(lambda: [shutil.rmtree(r, ignore_errors=True) for r in _SOCK_ROOTS.values()])
+
+
+def _sock_root(tmp_path):
+    """A SHORT directory for this test's tmux socket. A unix socket path is capped at about
+    104 bytes, and macOS's pytest temp dirs (/private/var/folders/...) are longer than
+    that, so the socket cannot live under tmp_path itself."""
+    key = str(tmp_path)
+    if key not in _SOCK_ROOTS:
+        base = "/tmp" if os.path.isdir("/tmp") else None
+        root = tempfile.mkdtemp(prefix="qcc", dir=base)
+        sock = os.path.join(root, "tmux-%d" % getattr(os, "getuid", lambda: 0)())
+        os.mkdir(sock)
+        os.chmod(sock, 0o700)                # tmux refuses a group-writable socket dir
+        _SOCK_ROOTS[key] = root
+    return _SOCK_ROOTS[key]
+
+
 def _base_env(tmp_path, path=None):
     """The environment every tmux / qwen-cc call gets: private server, no TMUX,
     no display (so no window is opened by accident), no SSH session (so no remote
@@ -102,10 +124,7 @@ def _base_env(tmp_path, path=None):
     skip = ("TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "PATH", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
     env = {k: v for k, v in os.environ.items()
            if k not in skip and not k.startswith(("QWEN_", "CLAUDE_", "ANTHROPIC_"))}
-    env["TMUX_TMPDIR"] = str(tmp_path)
-    sock = tmp_path / ("tmux-%d" % getattr(os, "getuid", lambda: 0)())
-    sock.mkdir(exist_ok=True)
-    sock.chmod(0o700)                       # tmux refuses a group-writable socket dir
+    env["TMUX_TMPDIR"] = _sock_root(tmp_path)
     env["PATH"] = path if path is not None else str(tmp_path / "bin") + os.pathsep + os.environ["PATH"]
     return env
 
@@ -157,6 +176,7 @@ def tmuxd(tmp_path):
     yield d
     subprocess.run([TMUX, "kill-server"], env=_base_env(tmp_path),
                    capture_output=True, text=True, timeout=60)
+    shutil.rmtree(_SOCK_ROOTS.pop(str(tmp_path), ""), ignore_errors=True)
 
 
 def test_launch_creates_tagged_session(tmp_path, tmuxd):
