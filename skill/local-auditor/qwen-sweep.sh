@@ -74,10 +74,11 @@ DRY=0; RESUME=0; STRICT=0; ALLOW_EMPTY=0; BUDGET=""; ITEM_BUDGET=""; ROLE="audit
 PREFLIGHT=1
 case "${QWEN_PREFLIGHT:-1}" in 0|false|no) PREFLIGHT=0 ;; esac
 EXTRA_ARGS=()
+TEST=0
 
 usage() {
   cat <<'USAGE'
-qwen-sweep --builder {claims|diff|files|logs} [options]
+qwen-sweep --builder {claims|deviations|diff|files|history|logs} [options]
 
 Runs qwen-agent over many items: builds batches, dispatches each, collates the
 answers. Always --dry-run a new sweep first.
@@ -113,6 +114,7 @@ OPTIONS
   --resume            continue the latest run for this repo, skipping complete batches
   --strict            a builder exception aborts the run instead of withholding the item
   --allow-empty       exit 0 even when there is nothing to audit
+  --test              let every batch run the project's tests via qwen-test (implied by --builder deviations)
   --no-preflight      skip the one-time server check (also QWEN_PREFLIGHT=0)
   -V, --version       print the version
 
@@ -168,18 +170,33 @@ while [ $# -gt 0 ]; do
     --strict)       STRICT=1;      shift ;;
     --allow-empty)  ALLOW_EMPTY=1; shift ;;
     --no-preflight) PREFLIGHT=0;   shift ;;
+    --test)         TEST=1;        shift ;;
     -V|--version)   echo "qwen-sweep $SWEEP_VERSION"; exit 0 ;;
     -h|--help)      usage; exit 0 ;;
     *) echo "qwen-sweep: unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
 [ -n "$BUILDER" ] || { echo "qwen-sweep: --builder is required (see --help)" >&2; exit 2; }
+[ "$BUILDER" = deviations ] && TEST=1
+# Every batch would refuse --test without a test command: say so once, up front,
+# instead of N identical batch failures (a --dry-run refuses too, so it predicts
+# the real run). Whitespace-only counts as unset: it survives an -n test but
+# splits into nothing, and every batch then dies in qwen-agent.
+TEST_CMD_SET=0
+case "${QWEN_TEST_CMD:-}" in *[![:space:]]*) TEST_CMD_SET=1 ;; esac
+if [ "$TEST" -eq 1 ] && [ "$TEST_CMD_SET" -eq 0 ]; then
+  _why="--test"; [ "$BUILDER" = deviations ] && _why="--builder deviations (it implies --test)"
+  echo "qwen-sweep: $_why needs a test command: set QWEN_TEST_CMD in the config or the environment" >&2
+  exit 2
+fi
+unset TEST_CMD_SET
 for _n in "$BUDGET" "$ITEM_BUDGET"; do
   case "$_n" in ''|[0-9]*[0-9]|[0-9]) ;; *) echo "qwen-sweep: budgets are whole numbers of bytes, got '$_n'" >&2; exit 2 ;; esac
   case "$_n" in *[!0-9]*) echo "qwen-sweep: budgets are whole numbers of bytes, got '$_n'" >&2; exit 2 ;; esac
 done
 unset _n
 REPO="$(cd "$REPO" 2>/dev/null && pwd)" || { echo "qwen-sweep: --repo is not a directory" >&2; exit 2; }
+if [ "$TEST" -eq 1 ]; then DISPATCH_EXTRA=(--test --test-repo "$REPO"); else DISPATCH_EXTRA=(); fi
 
 # ---- one preflight for the whole sweep, instead of one failing retry per batch ----
 CTX_DETECTED=""
@@ -323,6 +340,7 @@ for d in "$OUT"/b[0-9][0-9]*; do
   while : ; do
     # -C is the batch dir: no repo file is reachable by a relative path at all.
     "$DISPATCH" -r "$ROLE" -C "$d" -f "$d/brief.md" -o "$d/out.md" \
+        ${DISPATCH_EXTRA[@]+"${DISPATCH_EXTRA[@]}"} \
         >"$d/stdout.txt" 2>"$d/stderr.txt"
     rc=$?
     status="$(engine check --dir "$(native_path "$d")" | tr -d '\r')"

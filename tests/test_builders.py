@@ -3,7 +3,7 @@ lesson -- empty context is refused at the tool boundary -- into every future bui
 import pytest
 from lib.builders.base import Built, load_builder
 
-BUILDERS = ["claims", "diff", "files", "logs"]
+BUILDERS = ["claims", "deviations", "diff", "files", "history", "logs"]
 
 
 @pytest.mark.parametrize("name", BUILDERS)

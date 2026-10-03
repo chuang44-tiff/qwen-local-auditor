@@ -29,6 +29,9 @@ for a in "$@"; do
     exit 0
   fi
 done
+if [ -n "${FAKE_RECORD:-}" ]; then
+  { for a in "$@"; do printf '%s\n' "$a"; done; printf -- '---\n'; } >> "$FAKE_RECORD"
+fi
 while [ $# -gt 0 ]; do
   case "$1" in
     -C) dir="$2"; shift 2 ;;
@@ -199,3 +202,73 @@ def test_a_lib_package_in_the_working_directory_is_not_imported(tmp_path, repo, 
 def test_version_flag(tmp_path):
     r = sweep(tmp_path, ["--version"])
     assert r.returncode == 0 and r.stdout.startswith("qwen-sweep ")
+
+
+def test_sweep_test_flag_reaches_every_dispatch(tmp_path, repo, dispatch):
+    out, rec = tmp_path / "run", tmp_path / "rec.txt"
+    r = sweep(tmp_path, files_args(repo, out) + ["--test"], dispatch,
+              extra={"FAKE_RECORD": posix(rec), "QWEN_TEST_CMD": "true"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = [c.strip("\n").split("\n") for c in rec.read_text(encoding="utf-8").split("---\n") if c.strip()]
+    assert calls, "no dispatch recorded"
+    for argv in calls:
+        assert "--test" in argv
+        assert argv[argv.index("--test-repo") + 1] == posix(repo)
+
+
+@pytest.mark.parametrize("args", [["--builder", "files", "--glob", "src/*.py", "--test"],
+                                  ["--builder", "deviations", "--arg", "spec=spec.md"]],
+                         ids=["test-flag", "deviations"])
+def test_sweep_test_needs_a_test_command_before_dispatch(tmp_path, repo, dispatch, args):
+    rec = tmp_path / "rec.txt"
+    r = sweep(tmp_path, ["--repo", posix(repo), "--out", posix(tmp_path / "run"), *args], dispatch,
+              extra={"FAKE_RECORD": posix(rec)})
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "QWEN_TEST_CMD" in r.stderr
+    assert not rec.exists()                                   # nothing was dispatched
+
+
+def test_deviations_builder_implies_test(tmp_path, dispatch):
+    # A deviation verdict claims its reason still holds, which only a re-run can
+    # show: --builder deviations turns --test on even when nobody passed it.
+    repo = tmp_path / "gitrepo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "a.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
+    for a in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
+              ["add", "-A"], ["commit", "-qm", "i"]):
+        subprocess.run(["git", "-C", posix(repo), *a], check=True, capture_output=True)
+    (repo / "src" / "a.py").write_text("def alpha():\n    return 2\n", encoding="utf-8")
+    spec = tmp_path / "spec.md"
+    spec.write_text("alpha returns 1.\n", encoding="utf-8")
+    out, rec = tmp_path / "run", tmp_path / "rec.txt"
+    r = sweep(tmp_path, ["--builder", "deviations", "--repo", posix(repo), "--out", posix(out),
+                         "--arg", "spec=%s" % posix(spec)], dispatch,
+              extra={"FAKE_RECORD": posix(rec), "QWEN_TEST_CMD": "true",
+                     "QWEN_AGENT_STATE": posix(tmp_path / "state"),
+                     "QWEN_TRANSCRIPT_DIR": posix(tmp_path / "no-transcripts")})
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = [c.strip("\n").split("\n") for c in rec.read_text(encoding="utf-8").split("---\n") if c.strip()]
+    assert calls, "no dispatch recorded"
+    for argv in calls:
+        assert "--test" in argv
+        assert argv[argv.index("--test-repo") + 1] == posix(repo)
+
+
+@pytest.mark.parametrize("cmd", [" ", "   ", "\t"], ids=["space", "spaces", "tab"])
+def test_whitespace_test_cmd_fails_fast(tmp_path, repo, dispatch, cmd):
+    # Whitespace-only survives an `-n` test but splits into nothing: it must be
+    # refused here, once, exactly like an unset QWEN_TEST_CMD.
+    rec = tmp_path / "rec.txt"
+    r = sweep(tmp_path, files_args(repo, tmp_path / "run") + ["--test"], dispatch,
+              extra={"FAKE_RECORD": posix(rec), "QWEN_TEST_CMD": cmd})
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "QWEN_TEST_CMD" in r.stderr
+    assert not rec.exists()                                   # nothing was dispatched
+
+
+def test_sweep_test_command_from_the_config_is_enough(tmp_path, repo, dispatch):
+    cfg = tmp_path / "config"
+    cfg.write_text("QWEN_TEST_CMD='true'\n", encoding="utf-8", newline="\n")
+    r = sweep(tmp_path, files_args(repo, tmp_path / "run") + ["--test"], dispatch,
+              extra={"QWEN_CONFIG": posix(cfg)})
+    assert r.returncode == 0, r.stdout + r.stderr

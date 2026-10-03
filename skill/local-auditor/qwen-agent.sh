@@ -11,6 +11,15 @@
 
 set -uo pipefail
 
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  case "$_src" in /*) ;; *) _src="$_dir/$_src" ;; esac
+done
+SKILL_DIR="$(cd -P "$(dirname "$_src")" && pwd)"
+unset _src _dir
+
 QA_VERSION="3.0"
 QA_SELF="qwen-agent"           # the forwarder execs qwen-agent.sh; users type qwen-agent
 
@@ -30,7 +39,7 @@ QA_HARNESS=8       # claude binary missing, or its output was unparseable
 #    custom headers), which would send the prompt -- code excerpts included --
 #    somewhere other than the local server;
 #  - model and effort overrides, which are set explicitly for the child below.
-SCRUB_LIST='CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_BRIDGE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_EFFORT CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY AWS_BEARER_TOKEN_BEDROCK ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL CLAUDE_CODE_SUBAGENT_MODEL'
+SCRUB_LIST='CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_BRIDGE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_EFFORT CLAUDE_CODE_EFFORT_LEVEL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY AWS_BEARER_TOKEN_BEDROCK ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL CLAUDE_CODE_SUBAGENT_MODEL'
 SCRUB_ARGS=""
 for _v in $SCRUB_LIST; do SCRUB_ARGS="$SCRUB_ARGS -u $_v"; done
 unset _v
@@ -90,8 +99,13 @@ TOOLS=""            # --allowed-tools : GRANTS permission, does not restrict
 TOOLS_EXPLICIT=0
 TOOLSET=""          # --tools         : RESTRICTS the available built-in set
 TOOLSET_EXPLICIT=0
-WRITE_MODE=0        # --write     : allow Edit/Write
+READ_ONLY_FLAG=0    # --read-only given (refused with --test)
+WRITE_MODE=0       # --write     : allow Edit/Write
 ALL_TOOLS=0         # --all-tools : no restriction at all (dangerous)
+WEB_MODE=0          # --web       : web access is opt-in (adds WebFetch only, never WebSearch)
+case "${QWEN_WEB:-}" in 1) WEB_MODE=1 ;; esac
+SUBAGENTS=0         # --subagents : opt-in Task tool (each subagent is one more concurrent request)
+case "${QWEN_SUBAGENTS:-}" in 1) SUBAGENTS=1 ;; esac
 STRICT_MCP=0
 STRICT_MCP_EXPLICIT=0
 NO_TIMEOUT=0
@@ -117,6 +131,12 @@ case "${QWEN_PREFLIGHT:-1}" in 0|false|no) NO_PREFLIGHT=1 ;; esac
 PREFLIGHT_ONLY=0
 WARN_DENIALS=0
 PERM_MODE=""
+PERM_MODE_EXPLICIT=0  # --permission-mode given by the caller (refused with --test)
+RESUME_ID=""
+INTERACTIVE=0       # --interactive : hand the keyboard to a person: exec claude with no -p and no fence
+TEST_MODE=0         # --test : grant qwen-test, give the run a throwaway worktree
+TEST_REPO=""        # --test-repo : the repo whose tests run (default: the -C dir)
+TEST_WT=""
 
 # --------------------------------------------------------------------- help
 usage() {
@@ -127,6 +147,7 @@ USAGE
   $QA_SELF [options] <prompt>...
   $QA_SELF [options] -f prompt.md
   cat task.md | $QA_SELF [options] --stdin
+  $QA_SELF --interactive [-C DIR]   an interactive session for a person
 
 PROMPT INPUT (exactly one)
   <prompt>...          Positional. Multiple words are joined with a space.
@@ -137,7 +158,7 @@ PROMPT INPUT (exactly one)
       --stdin          Read the prompt from stdin.
 
 ROLE / SYSTEM PROMPT
-  -r, --role NAME      Prepend a role. Built-ins: auditor, mechanic, plain.
+  -r, --role NAME      Prepend a role. Built-ins: auditor, coder, mechanic, plain.
                        Also resolves \$QWEN_ROLE_DIR/NAME.md (or .txt), then a
                        literal file path. Roles are APPENDED to Claude Code's
                        own system prompt, never replacing it (replacing it
@@ -183,13 +204,63 @@ CONFIG FILE
   usually a Store stub that is on PATH but cannot run anything.
 
 EXECUTION  (the DEFAULT is read-only — mutation must be asked for)
+      --interactive    Open an INTERACTIVE Claude Code session (no -p) on this
+                       server for the person at the keyboard, in the -C directory
+                       (default: the current one). Preflight, model, context and
+                       effort resolve exactly as for a headless run, and so does
+                       the child environment (every model alias, the window, the
+                       effort, the scrubbed parent-session variables). NO fence
+                       flags are passed at all — no --tools, --allowed-tools,
+                       --restricted, --permission-mode, --output-format,
+                       --append-system-prompt or --strict-mcp-config: the person
+                       answers Claude Code's own permission prompts. --dry-run
+                       prints the command line and the redacted environment
+                       instead of running. Refused with a prompt, -f/--stdin,
+                       --until-done, --test, --write, --all-tools/--unrestricted,
+                       --toolset, --read-only, --strict-mcp, -t/--tools, --web,
+                       --subagents, --json, -o, -w, --resume, -r/--role,
+                       --role-file and -s/--system — each belongs to a headless
+                       run and would be silently dropped here. --timeout does not
+                       apply: the person ends the session. Launch one from inside
+                       Claude Code with qwen-cc.
       --write          Let the run modify files: --toolset '$TOOLSET_WRITE',
                        and --permission-mode acceptEdits unless you set one.
                        Still no Bash. Role 'mechanic' implies this.
+      --test           Let the run execute the project's tests through qwen-test
+                       (the ONLY shell command granted). The test command is
+                       QWEN_TEST_CMD from the config; the model only picks which
+                       tests. Runs in a throwaway git worktree. Read-only runs may
+                       write ONLY inside that worktree (reproduction tests, listed
+                       under '## REPRO FILES' in the result). Always passes
+                       claude --restricted (user/project settings files are
+                       ignored, file tools confined to the working dirs) and
+                       --permission-mode dontAsk; write/coder runs still edit
+                       because --allowed-tools grants the edit tools. Needs a
+                       claude that has --restricted. Not with -w, --all-tools,
+                       --toolset, --read-only, -t/--tools or any
+                       --permission-mode. The
+                       tests run the repo's code as you: use it only on code
+                       you would run.
+      --test-repo DIR  Repo whose tests run (default: the -C directory).
       --all-tools      No toolset restriction at all: every built-in, including
                        Bash and Write, plus any configured MCP servers. This is
                        the widest setting; a warning is printed. Costs many
                        more input tokens per run (every tool schema is sent).
+      --web            Web access is opt-in: adds WebFetch to --tools and to
+                       --allowed-tools (every role, and to the fixed --test
+                       grant list; --all-tools needs none of this). Off by
+                       default. Never WebSearch: it is a server-side tool that
+                       local servers (vLLM) reject with a 400
+                       "body.tools.0.input_schema Field required"; search needs
+                       an MCP server. With --test a warning is printed: tests
+                       and checks can be gamed by fetching upstream answers.
+                       (env QWEN_WEB=1)
+      --subagents      Subagents are opt-in: adds the Task tool, so the model can
+                       hand broad reading and searching to a subagent and keep
+                       its own context small. A subagent runs on the same model
+                       with the same tool limits, and is one more concurrent
+                       request: leave it off on a small GPU. Off by default.
+                       (env QWEN_SUBAGENTS=1)
       --toolset LIST   Passed to claude as --tools — the REAL restriction: it
                        removes every built-in tool you do not name. Overrides
                        --write/--all-tools. Default: '$TOOLSET_READONLY'.
@@ -199,6 +270,9 @@ EXECUTION  (the DEFAULT is read-only — mutation must be asked for)
                        permission for tools that ARE in the toolset; it does
                        not restrict anything and it is NOT a sandbox. Only
                        meaningful together with --write or --all-tools.
+                       Default grants include read-only Bash (ls, grep, cat,
+                       head, tail, wc); they take effect only in a run whose
+                       toolset has Bash (--toolset ...,Bash or --all-tools).
       --strict-mcp     Add --strict-mcp-config, dropping configured MCP servers
                        (--toolset governs built-ins only; MCP tools survive it).
                        On by default; --all-tools turns it off.
@@ -224,11 +298,22 @@ OUTPUT
                        instead of refusing (two jobs sharing one -o clobber
                        each other's sidecars).
       --json           Emit Claude Code's full JSON result record, not just text.
+      --resume ID      Continue Claude Code session ID (passed to claude --resume).
+                       The session id of every run is printed on the status line.
       --warn-denials   Treat tool-permission denials as a warning, not a failure.
   -q, --quiet          Suppress the stderr status line.
       --dry-run        Print the exact command that would run, then exit.
   -h, --help           This text.
   -V, --version        Print version.
+
+UNTIL DONE  (a coding task with a checklist, checked by the harness)
+      --until-done TASK  Work on TASK (a task file with '- [ ] text -- check: ...'
+                       items) until every check passes. Each round resumes the
+                       same session with what still fails. Implies -r coder --test.
+      --max-rounds N   Default 8.
+      --budget-tokens N / --budget-seconds N   Stop early when spent.
+      --allow-dirty    Start even with uncommitted changes.
+      --no-deviation-audit  Skip the read-only spec-vs-diff audit after checks pass.
 
 ENVIRONMENT  (also settable in the config file; flags win)
   QWEN_BASE_URL, QWEN_MODEL, QWEN_CTX, QWEN_AUTOCOMPACT, QWEN_EFFORT, QWEN_TIMEOUT
@@ -237,10 +322,16 @@ ENVIRONMENT  (also settable in the config file; flags win)
   QWEN_CUSTOM_HEADERS  Passed to claude as ANTHROPIC_CUSTOM_HEADERS (gateways).
   QWEN_EFFORT_ALLOWED  Effort levels the server accepts; others are refused up
                        front. QWEN_EFFORT=default omits --effort entirely.
+                       With --effort (or QWEN_EFFORT) the level is also set in
+                       the child environment as CLAUDE_CODE_EFFORT_LEVEL, so
+                       Claude Code's own internal model calls use it too.
+  QWEN_WEB=1           Same as --web: adds WebFetch. Off by default.
+  QWEN_SUBAGENTS=1     Same as --subagents: adds Task. Off by default.
   QWEN_PREFLIGHT=0     Skip the /v1/models check (QWEN_MODEL is then required).
   QWEN_AUTO_MODEL=1    Same as --auto-model.
   QWEN_SETTING_SOURCES Passed to claude --setting-sources (e.g. project,local) so
-                       personal ~/.claude settings cannot change results.
+                       personal ~/.claude settings cannot change results. Not
+                       with --test (--restricted already ignores settings files).
   QWEN_PYTHON          Interpreter for result parsing: Python 3.8+, probed by
                        running it.
   QWEN_CLAUDE_BIN      The claude executable. Default: claude.
@@ -262,6 +353,11 @@ EXIT CODES
   $QA_EMPTY  ran clean but returned no usable text
   $QA_DENIED  a tool call was blocked by the permission system (see --warn-denials)
   $QA_HARNESS  harness failure (claude missing, or unparseable output)
+  11  --until-done stopped at the round limit or a budget; also checks pass but the
+      deviation audit was unusable twice -- review the diff manually (partial; report written)
+  12  --until-done made no progress (same checks failed two rounds in a row)
+  13  --until-done: working tree dirty at start (use --allow-dirty)
+  14  --until-done: another run holds this repo's lock
 
 EXAMPLES
   $QA_SELF "which files in this dir are shell scripts?"
@@ -270,12 +366,16 @@ EXAMPLES
   $QA_SELF --json "count TODOs" | jq -r .usage.input_tokens
   $QA_SELF -r mechanic "add a trailing newline to every .sh that lacks one"
   $QA_SELF --write --toolset 'Read,Edit,Glob,Grep' "retitle every heading"
+  $QA_SELF --interactive -C ./proj      # an interactive session on the local model
 
 SAFETY
   A bare run is read-only: --tools 'Read,Glob,Grep' --strict-mcp-config, which
   is a schema-level restriction (the model has no Bash and no Write tool at
   all). File mutation requires --write, --all-tools, or an explicit --toolset
   naming Edit/Write/Bash. --allowed-tools alone never restricts anything.
+  --test adds Bash for qwen-test only; the tests it runs are arbitrary code.
+  No run gets web tools unless you pass --web: web access is opt-in, and --web
+  adds only WebFetch (never WebSearch, which local servers reject anyway).
 EOF
 }
 
@@ -284,6 +384,21 @@ note() { [ "$QUIET" -eq 1 ] || printf '%s: %s\n' "$QA_SELF" "$*" >&2; }
 # Git Bash: argument conversion is switched off for the child (see CHILD_ENV), so
 # a path that must reach a native program is converted explicitly. No-op elsewhere.
 native_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+# An absolute path as a permission-rule path ("//path"). Claude Code matches rules
+# against POSIX-form paths and normalizes a Windows drive path C:\x\y to /c/x/y, so
+# on Git Bash the (native, from Python) path is converted to exactly that form.
+# cygpath -m, not -u: -u maps %TEMP% back to /tmp through the mount table, which
+# is not the form Claude Code compares against.
+rule_path() {
+  local p="$1" d
+  if command -v cygpath >/dev/null 2>&1 && [ "$p" != "<worktree>" ]; then
+    p="$(cygpath -m "$p")"
+    case "$p" in
+      [A-Za-z]:/*) d="$(printf '%s' "${p%%:*}" | tr '[:upper:]' '[:lower:]')"; p="/$d${p#?:}" ;;
+    esac
+  fi
+  printf '//%s' "${p#/}"
+}
 
 # --------------------------------------------------------------- interpreter
 # The JSON parsing below needs a REAL python. Presence on PATH is not enough:
@@ -321,6 +436,28 @@ You are operating as a CODE AUDITOR. Rules:
   speculative one.
 ROLE_EOF
       ;;
+    coder)
+      cat <<'ROLE_EOF'
+You are a CODER working to a written task with a checklist. Rules:
+- The harness, not you, decides when you are done: it runs every checklist
+  check itself after you stop. Do not claim an item is done; make its check pass.
+- Run tests with `qwen-test [SELECTOR]` (a test id/path or -k EXPR). It is the
+  only shell command you have. Read its first line: TEST <id> PASSED|FAILED|...
+- Change only what the task needs. Preserve surrounding style.
+- When you deliberately depart from the spec, end your reply with one block per
+  departure, exactly:
+  ## DEVIATION
+  SPEC: <the spec text or section you departed from>
+  DID: <what you did instead>
+  WHY: <the reason>
+  EVIDENCE: <the TEST line or path:line that forced it>
+- Finish with a terse list of the files you changed.
+- Before you stop, compare your actual output with every explicit requirement in the spec
+  (names, headers, exact messages, output shape). Read the files you wrote.
+- Do not add leniency the spec did not ask for (trimming, normalising, accepting malformed
+  input), and do not special-case the examples.
+ROLE_EOF
+      ;;
     mechanic)
       cat <<'ROLE_EOF'
 You are performing a MECHANICAL task. Rules:
@@ -338,7 +475,7 @@ ROLE_EOF
 }
 
 list_roles() {
-  echo "built-in: auditor, mechanic, plain"
+  echo "built-in: auditor, coder, mechanic, plain"
   if [ -d "$ROLE_DIR" ]; then
     echo "from $ROLE_DIR:"
     # Portable on purpose: no find -printf, no GNU sed alternation (BSD/macOS).
@@ -368,7 +505,7 @@ apply_role_defaults() {
     auditor)
       : # nothing to pin: the default is already read-only + strict MCP
       ;;
-    mechanic)
+    mechanic|coder)
       # A mechanic has to be able to edit; still no Bash, still no MCP.
       if [ "$TOOLSET_EXPLICIT" -eq 0 ] && [ "$ALL_TOOLS" -eq 0 ]; then
         WRITE_MODE=1
@@ -379,6 +516,10 @@ apply_role_defaults() {
 
 # ------------------------------------------------------------- arg parsing
 need_arg() { [ "$2" -gt 0 ] || { die "option $1 requires a value (see --help)"; exit $QA_USAGE; }; }
+
+ORIG_ARGS=("$@")
+UNTIL_DONE=""
+SUP_ARGS=()
 
 while [ $# -gt 0 ]; do
   arg="$1"
@@ -396,9 +537,14 @@ while [ $# -gt 0 ]; do
     -o|--out)             need_arg "$1" $(($#-1)); OUT="$2"; shift 2 ;;
     -t|--tools)           need_arg "$1" $(($#-1)); TOOLS="$2"; TOOLS_EXPLICIT=1; shift 2 ;;
     --toolset)            need_arg "$1" $(($#-1)); TOOLSET="$2"; TOOLSET_EXPLICIT=1; shift 2 ;;
-    --read-only)          TOOLSET="$TOOLSET_READONLY"; TOOLSET_EXPLICIT=1
+    --read-only)          TOOLSET="$TOOLSET_READONLY"; TOOLSET_EXPLICIT=1; READ_ONLY_FLAG=1
                           STRICT_MCP=1; STRICT_MCP_EXPLICIT=1; shift ;;
     --write)              WRITE_MODE=1; shift ;;
+    --web)                WEB_MODE=1; shift ;;
+    --subagents)          SUBAGENTS=1; shift ;;
+    --interactive)        INTERACTIVE=1; shift ;;
+    --test)               TEST_MODE=1; shift ;;
+    --test-repo)          need_arg "$1" $(($#-1)); TEST_REPO="$2"; shift 2 ;;
     --all-tools|--unrestricted) ALL_TOOLS=1; shift ;;
     --strict-mcp)         STRICT_MCP=1; STRICT_MCP_EXPLICIT=1; shift ;;
     -e|--effort)          need_arg "$1" $(($#-1)); EFFORT="$2"; shift 2 ;;
@@ -414,12 +560,27 @@ while [ $# -gt 0 ]; do
     --stdin)              READ_STDIN=1; shift ;;
     -C|--cd)              need_arg "$1" $(($#-1)); WORKDIR="$2"; shift 2 ;;
     -D|--add-dir)         need_arg "$1" $(($#-1)); ADD_DIRS+=("$2"); shift 2 ;;
-    --permission-mode)    need_arg "$1" $(($#-1)); PERM_MODE="$2"; shift 2 ;;
+    --permission-mode)    need_arg "$1" $(($#-1)); PERM_MODE="$2"; PERM_MODE_EXPLICIT=1; shift 2 ;;
     --timeout)            need_arg "$1" $(($#-1)); TIMEOUT="$2"; shift 2 ;;
     --no-timeout)         NO_TIMEOUT=1; shift ;;
     --force)              FORCE=1; shift ;;
     -w|--detach|--bg)     BG=1; shift ;;
     --json)               JSON_OUT=1; shift ;;
+    --resume)             need_arg "$1" $(($#-1))
+                          # A value starting with '-' is a forgotten quote or a missing id:
+                          # claude would consume the next real flag as the session id (or be
+                          # fed one as its prompt). An empty id resumes nothing and silences
+                          # the run. Refuse both here, where the message can name --resume.
+                          case "$2" in
+                            ''|-*) die "--resume needs a session id, not '$2' (empty or option-like)";
+                                   exit $QA_USAGE ;;
+                          esac
+                          RESUME_ID="$2"; shift 2 ;;
+    --until-done)         need_arg "$1" $(($#-1)); UNTIL_DONE="$2"; shift 2 ;;
+    --max-rounds|--budget-tokens|--budget-seconds)
+                          need_arg "$1" $(($#-1)); SUP_ARGS+=("$1" "$2"); shift 2 ;;
+    --allow-dirty|--no-deviation-audit)
+                          SUP_ARGS+=("$1"); shift ;;
     --warn-denials)       WARN_DENIALS=1; shift ;;
     --auto-model)         AUTO_MODEL=1; shift ;;
     --no-preflight)       NO_PREFLIGHT=1; shift ;;
@@ -431,6 +592,113 @@ while [ $# -gt 0 ]; do
     *)                    PROMPT="$*"; PROMPT_SET=1; break ;;
   esac
 done
+
+# ------------------------------------------------------- --interactive
+# An interactive session is Claude Code as the person at the keyboard knows it:
+# they answer its permission prompts themselves, and the session ends when they
+# leave. Every flag that exists to fence a HEADLESS run (a tool policy, a fixed
+# permission mode, a role prompt, one result file, a background job) either
+# cannot apply here or would be silently dropped, so the combination is refused
+# rather than quietly ignored. --dry-run is allowed: printing the command is not
+# running it. Refused before the until-done block below, which would otherwise
+# consume --until-done and its task file.
+if [ "$INTERACTIVE" -eq 1 ]; then
+  _ia_refuse() {
+    die "--interactive cannot be combined with $1: an interactive session is driven by the person at the"
+    die "keyboard, who answers Claude Code's own permission prompts (drop $1, or drop --interactive)"
+    exit $QA_USAGE
+  }
+  [ "$PROMPT_SET" -eq 0 ] || _ia_refuse "a prompt"
+  for _a in ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}; do
+    case "$_a" in
+      -f|--prompt-file|--prompt-file=*)  _ia_refuse "--prompt-file" ;;
+      --stdin)                           _ia_refuse "--stdin" ;;
+      --until-done|--until-done=*)       _ia_refuse "--until-done" ;;
+      --test|--test=*)                   _ia_refuse "--test" ;;
+      --write)                           _ia_refuse "--write" ;;
+      --all-tools|--all-tools=*|--unrestricted) _ia_refuse "$_a" ;;
+      --toolset|--toolset=*)             _ia_refuse "$_a" ;;
+      -t|--tools|--tools=*)              _ia_refuse "$_a" ;;
+      --web|--web=*)                     _ia_refuse "--web" ;;
+      --subagents|--subagents=*)         _ia_refuse "--subagents" ;;
+      --json)                            _ia_refuse "--json" ;;
+      -o|--out|--out=*)                  _ia_refuse "$_a" ;;
+      -w|--detach|--bg)                  _ia_refuse "$_a" ;;
+      --resume|--resume=*)               _ia_refuse "--resume" ;;
+      -r|--role|--role=*)                _ia_refuse "$_a" ;;
+      # A role or extra system text has nowhere to go: an interactive run passes
+      # no --append-system-prompt, so it would be read and then dropped.
+      --role-file|--role-file=*)         _ia_refuse "--role-file" ;;
+      -s|--system|--system=*)            _ia_refuse "$_a" ;;
+      # Same reason: both only shape the tool fence an interactive run does not
+      # pass at all, so accepting them would advertise a restriction that is not there.
+      --read-only)                       _ia_refuse "--read-only" ;;
+      # Each only steers a headless or looped run; an interactive session would drop it.
+      --permission-mode|--permission-mode=*) _ia_refuse "--permission-mode" ;;
+      --test-repo|--test-repo=*)         _ia_refuse "--test-repo" ;;
+      --max-rounds|--max-rounds=*|--budget-tokens|--budget-tokens=*|--budget-seconds|--budget-seconds=*|--allow-dirty|--no-deviation-audit)
+                                         _ia_refuse "${_a%%=*}" ;;
+      --warn-denials)                    _ia_refuse "--warn-denials" ;;
+      --strict-mcp|--strict-mcp=*)       _ia_refuse "--strict-mcp" ;;
+    esac
+  done
+  unset _a
+fi
+
+# --------------------------------------------------------- until-done
+if [ -n "$UNTIL_DONE" ]; then
+  _ud_refuse() { die "--until-done takes its prompt from TASK and owns -f/--resume/-o/--json per round; drop $1"; exit $QA_USAGE; }
+  [ "$PROMPT_SET" -eq 0 ] || _ud_refuse "the prompt"
+  FWD=()
+  _skip=0
+  for a in ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}; do
+    if [ "$_skip" -eq 2 ]; then
+      [ "$a" = coder ] || { die "--until-done always runs the coder role (got -r $a)"; exit $QA_USAGE; }
+      _skip=0; continue
+    fi
+    if [ "$_skip" -eq 1 ]; then _skip=0; continue; fi
+    case "$a" in
+      # --role-file would replace the coder role every round runs with: a custom
+      # file has no coder instructions, so the rounds silently turn read-only.
+      -f|--prompt-file|--prompt-file=*|--stdin|--resume|--resume=*|-w|--detach|--bg|-o|--out|--out=*|--dry-run|--json|\
+      --role-file|--role-file=*)
+        _ud_refuse "$a" ;;
+      # Every round runs --test, and --test builds the tool policy itself. These
+      # collide with that fence, so refuse them here rather than at every
+      # round's qwen-agent call. -t/--tools would replace the qwen-test-only
+      # grants and --unrestricted removes the toolset outright; -D/--add-dir
+      # widens the coder's file access (-D / reaches the whole disk).
+      --toolset|--toolset=*|--read-only|--all-tools|--permission-mode|--permission-mode=*|\
+      -t|--tools|--tools=*|--unrestricted|-D|--add-dir|--add-dir=*)
+        _ud_refuse "$a" ;;
+      -r|--role) _skip=2 ;;
+      --role=coder|--test) ;;
+      --role=*) die "--until-done always runs the coder role (got $a)"; exit $QA_USAGE ;;
+      --until-done|-C|--cd|--max-rounds|--budget-tokens|--budget-seconds) _skip=1 ;;
+      --until-done=*|--cd=*|--max-rounds=*|--budget-tokens=*|--budget-seconds=*) ;;
+      --allow-dirty|--no-deviation-audit) ;;
+      *) FWD+=("$a") ;;
+    esac
+  done
+  unset _skip
+  resolve_py || { die "no working Python 3.8+ found (set QWEN_PYTHON)"; exit $QA_HARNESS; }
+  # The supervisor is exec'd, not sourced: it only sees EXPORTED variables. The
+  # config eval above sets shell variables, so each QWEN_* the supervisor or the
+  # test runner reads from the environment must be exported here. Guard unset
+  # ones (set -u would make a bare "$NAME" an error; ${NAME:-} inside [ ] is fine).
+  [ -n "${QWEN_TEST_CMD:-}" ] && export QWEN_TEST_CMD
+  [ -n "${QWEN_TEST_TIMEOUT:-}" ] && export QWEN_TEST_TIMEOUT
+  [ -n "${QWEN_TEST_MAX_BYTES:-}" ] && export QWEN_TEST_MAX_BYTES
+  [ -n "${QWEN_TEST_WORKTREES:-}" ] && export QWEN_TEST_WORKTREES
+  [ -n "${QWEN_AGENT_STATE:-}" ] && export QWEN_AGENT_STATE
+  case "$UNTIL_DONE" in /*|[A-Za-z]:*) ;; *) UNTIL_DONE="$PWD/$UNTIL_DONE" ;; esac
+  case "${WORKDIR:-.}" in /*|[A-Za-z]:*) SUP_REPO="${WORKDIR:-.}" ;; *) SUP_REPO="$PWD/$WORKDIR" ;; esac
+  # bash (not $0's interpreter guess): the forwarder execs `bash qwen-agent.sh`, keep that.
+  PYTHONPATH="$(native_path "$SKILL_DIR")" exec "$QA_PY" "$(native_path "$SKILL_DIR/lib/supervisor.py")" \
+    --task "$(native_path "$UNTIL_DONE")" --repo "$(native_path "$SUP_REPO")" \
+    --agent "${BASH:-bash}" --agent "$(native_path "$SKILL_DIR/qwen-agent.sh")" \
+    ${SUP_ARGS[@]+"${SUP_ARGS[@]}"} -- ${FWD[@]+"${FWD[@]}"}
+fi
 
 # --------------------------------------------------------- validate inputs
 case "$EFFORT" in
@@ -517,8 +785,9 @@ elif [ "$READ_STDIN" -eq 1 ]; then
   PROMPT="$(cat)"
 fi
 
-# Trim whitespace-only prompts. --preflight-only never sends one, so it is exempt.
-if [ "$PREFLIGHT_ONLY" -eq 0 ]; then
+# Trim whitespace-only prompts. --preflight-only never sends one, so it is exempt,
+# and --interactive has none at all: the person at the keyboard types it.
+if [ "$PREFLIGHT_ONLY" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ]; then
   case "$PROMPT" in
     *[![:space:]]*) ;;
     *) die "no prompt given (see --help)"; exit $QA_USAGE ;;
@@ -572,7 +841,16 @@ fi
 if [ "$TOOLS_EXPLICIT" -eq 0 ]; then
   if [ "$WRITE_MODE" -eq 1 ]; then TOOLS="$GRANTS_WRITE"; else TOOLS="$GRANTS_DEFAULT"; fi
 fi
-if [ "$WRITE_MODE" -eq 1 ] && [ -z "$PERM_MODE" ]; then
+if [ "$TEST_MODE" -eq 1 ]; then
+  # Never left to the settings files --restricted ignores, and never to a
+  # caller-chosen mode: dontAsk asks nothing, so nothing beyond the grants made
+  # below is ever applied. Write/coder runs still edit -- --allowed-tools hands
+  # them Edit/Write/MultiEdit already granted; acceptEdits would auto-accept
+  # every edit, granted or not. A --permission-mode of one's own collides with
+  # the fence: refuse it here (before the write warning below can print it).
+  [ "$PERM_MODE_EXPLICIT" -eq 1 ] && { die "--test cannot be combined with --permission-mode: --test fixes the permission mode to dontAsk (got '$PERM_MODE'); drop --permission-mode"; exit $QA_USAGE; }
+  PERM_MODE="dontAsk"
+elif [ "$WRITE_MODE" -eq 1 ] && [ -z "$PERM_MODE" ]; then
   PERM_MODE="acceptEdits"
 fi
 # Warn on stderr whenever this run can mutate anything. Deliberately uses die()
@@ -598,6 +876,128 @@ case "$QWEN_OUTDIR" in /*|[A-Za-z]:*) ;; *) QWEN_OUTDIR="$PWD/$QWEN_OUTDIR" ;; e
 if [ -n "$WORKDIR" ]; then
   [ -d "$WORKDIR" ] || { die "--cd: not a directory: $WORKDIR"; exit $QA_USAGE; }
   cd -- "$WORKDIR" || { die "--cd failed: $WORKDIR"; exit $QA_USAGE; }
+fi
+
+# shellcheck disable=SC2329  # invoked via trap
+cleanup() {
+  [ -n "${TMPD:-}" ] && rm -rf "$TMPD"
+  [ -n "${TEST_WT:-}" ] && skill_py testrun.py --cleanup "$(native_path "$TEST_REPO")" "$(native_path "$TEST_WT")" >/dev/null 2>&1
+  return 0
+}
+
+# ------------------------------------------------------------- --test setup
+skill_py() {  # run a lib/ module with this skill on PYTHONPATH
+  PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" "$(native_path "$SKILL_DIR/lib/$1")" "${@:2}"
+}
+if [ "$TEST_MODE" -eq 1 ]; then
+  [ "$ALL_TOOLS" -eq 1 ] && { die "--test cannot be combined with --all-tools (--test is a fence, --all-tools removes it)"; exit $QA_USAGE; }
+  [ "$BG" -eq 1 ] && { die "--test cannot be combined with -w (the worktree must be cleaned up by this process)"; exit $QA_USAGE; }
+  # --test builds its own fence (toolset, grants, permission mode); a hand-made
+  # toolset on top of it would silently widen or break that fence.
+  [ "$READ_ONLY_FLAG" -eq 1 ] && { die "--test cannot be combined with --read-only: a --test run gains Bash (qwen-test only) and, when read-only, writes inside its worktree; drop --read-only"; exit $QA_USAGE; }
+  [ "$TOOLSET_EXPLICIT" -eq 1 ] && { die "--test cannot be combined with --toolset: --test sets the toolset itself; drop --toolset"; exit $QA_USAGE; }
+  # -t/--tools IS the --allowed-tools grant list, and --test keeps it to
+  # qwen-test; an explicit one REPLACES those grants, so `--test -t 'Bash(*)'`
+  # would hand an unrestricted shell to a dontAsk run. The fence cannot widen.
+  [ "$TOOLS_EXPLICIT" -eq 1 ] && { die "--test cannot be combined with -t/--tools: --test grants qwen-test only and an explicit grant list replaces that (e.g. Bash(*) would be an unrestricted shell); drop -t/--tools"; exit $QA_USAGE; }
+  # Whitespace-only counts as unset (like qwen-sweep's guard): it survives an
+  # -n test but splits into nothing, and every qwen-test in the run would die.
+  case "${QWEN_TEST_CMD:-}" in
+    *[![:space:]]*) ;;
+    *) die "--test needs a test command: set QWEN_TEST_CMD in $QA_CONFIG"; exit $QA_USAGE ;;
+  esac
+  # --restricted is what makes the fence independent of the user's and the repo's
+  # Claude settings (it ignores their settings files and confines the file tools
+  # to the working directories). An older claude without it cannot be fenced.
+  "$CLAUDE_BIN" --help 2>/dev/null | grep -q -- '--restricted' \
+    || { die "--test needs a Claude Code with --restricted; upgrade claude"; exit $QA_USAGE; }
+  TEST_REPO="${TEST_REPO:-$PWD}"
+  # The fence is invisible to the model: without this it burns turns on cat,
+  # grep, find and git calls the permission system denies. Every role, every
+  # --test run; appended after the role text and any -s text.
+  # shellcheck disable=SC2016  # the backticks are literal prompt text, not command substitution
+  _fence_note='Your only shell command is `qwen-test [SELECTOR]`, run with the Bash tool (it is a command, not a tool). Every other Bash command is denied and wastes a turn. Instead of cat/head/tail use Read; instead of grep/rg use Grep; instead of find/ls use Glob. You cannot run git, python, pip, env or which. To check a change, run its test with qwen-test.'
+  if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
+
+$_fence_note"; else SYSTEM="$_fence_note"; fi
+  unset _fence_note
+fi
+if [ "$TEST_MODE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+  _errf="${TMPDIR:-/tmp}/qwen-test-err.$$"
+  TEST_WT="$(skill_py testrun.py --prepare "$(native_path "$TEST_REPO")" 2>"$_errf")" || {
+    _e="$(cat "$_errf")"; rm -f "$_errf"
+    die "--test: ${_e#qwen-test: }"; exit $QA_USAGE; }
+  rm -f "$_errf"; unset _errf _e
+  TEST_WT="$(printf '%s' "$TEST_WT" | tr -d '\r')"
+  # Registered NOW, not at the runner: a failed preflight below must not leak the worktree.
+  trap cleanup EXIT
+fi
+if [ "$TEST_MODE" -eq 1 ]; then
+  if [ "$TOOLSET_EXPLICIT" -eq 0 ]; then
+    case ",$TOOLSET," in *,Bash,*) ;; *) TOOLSET="$TOOLSET,Bash" ;; esac
+  fi
+  if [ "$TOOLS_EXPLICIT" -eq 0 ]; then
+    TOOLS='Bash(qwen-test:*),Read,Glob,Grep'
+    if [ "$WRITE_MODE" -eq 1 ]; then
+      # A write-mode run (coder, --write) owns the repo it was given. Handing it
+      # the worktree as an extra grant would blur which tree it is supposed to
+      # edit, so the worktree stays the harness's scratch space: no //worktree
+      # rules and no --add-dir for it below.
+      TOOLS="$TOOLS,Edit,Write,MultiEdit"
+    else
+      _wt_rule="$(rule_path "${TEST_WT:-<worktree>}")"
+      [ "$TOOLSET_EXPLICIT" -eq 0 ] && TOOLSET="$TOOLSET,Edit,Write"
+      TOOLS="$TOOLS,Edit($_wt_rule/**),Write($_wt_rule/**)"
+      unset _wt_rule
+    fi
+  fi
+  # Read-only runs may write ONLY inside the worktree, so it must be readable.
+  if [ "$WRITE_MODE" -eq 0 ] && [ -n "$TEST_WT" ]; then ADD_DIRS+=("$TEST_WT"); fi
+  # die, not note: -q must not hide that a "read-only" run can now run code.
+  [ "$WRITE_MODE" -eq 0 ] && die "WARNING: --test: this read-only run gains Bash (qwen-test only, which runs the repo's tests) and may write inside its throwaway worktree ${TEST_WT:-<worktree>}"
+fi
+
+# Web access is opt-in (--web / QWEN_WEB=1): nothing above ever names WebFetch,
+# so by default no role, no --write run and no --test run reaches the web at all.
+# --web adds ONLY WebFetch -- never WebSearch, which is a server-side tool that
+# local servers (vLLM) reject with a 400 "body.tools.0.input_schema Field
+# required" (search needs an MCP server). --all-tools leaves the toolset
+# unrestricted and already has every built-in: it keeps that behaviour.
+if [ "$WEB_MODE" -eq 1 ] && [ "$ALL_TOOLS" -eq 0 ]; then
+  if [ -n "$TOOLSET" ]; then
+    case ",$TOOLSET," in
+      *,WebFetch,*) ;;
+      *) TOOLSET="${TOOLSET:+$TOOLSET,}WebFetch" ;;
+    esac
+  fi
+  case ",$TOOLS," in
+    *,WebFetch,*) ;;
+    *) TOOLS="${TOOLS:+$TOOLS,}WebFetch" ;;
+  esac
+  if [ "$TEST_MODE" -eq 1 ]; then
+    # Raw printf, not die(): the spec fixes this line to START with
+    # "WARNING: --web with --test", and die() would prefix the program name.
+    # Unconditional (not note()) so -q cannot hide that the run can fetch the
+    # very answers its tests and checks are supposed to derive (seen in the
+    # benchmark).
+    printf 'WARNING: --web with --test: tests and checks can be gamed by fetching upstream answers (WebFetch is enabled)\n' >&2
+  fi
+fi
+
+# Subagents are opt-in (--subagents / QWEN_SUBAGENTS=1): each one is another
+# concurrent request against the same server, too much for a small GPU. A
+# subagent inherits this run's tool restrictions and grants (and --restricted
+# under --test), so Task adds no capability the run did not already have.
+if [ "$SUBAGENTS" -eq 1 ] && [ "$ALL_TOOLS" -eq 0 ]; then
+  if [ -n "$TOOLSET" ]; then
+    case ",$TOOLSET," in *,Task,*) ;; *) TOOLSET="${TOOLSET:+$TOOLSET,}Task" ;; esac
+  fi
+  case ",$TOOLS," in *,Task,*) ;; *) TOOLS="${TOOLS:+$TOOLS,}Task" ;; esac
+  _sub_note='You can delegate to a subagent with the Task tool; it runs on the same local model with the same tool limits as you. Your context window is limited: delegate broad reading and searching (for example "find every caller of X and report file:line") and keep your own context for edits and test runs. Do not delegate edits. Run one subagent at a time: each is another request the server must serve.'
+  if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
+
+$_sub_note"; else SYSTEM="$_sub_note"; fi
+  unset _sub_note
 fi
 
 # ------------------------------------------------------- validate -o target
@@ -753,26 +1153,51 @@ if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
 fi
 
 # --------------------------------------------------- build the claude argv
-CLAUDE_ARGV=("$CLAUDE_BIN" -p
-  --model "$MODEL"
-  --output-format json
-  --allowed-tools "$TOOLS")
-[ "$EFFORT" = default ] || CLAUDE_ARGV+=(--effort "$EFFORT")
-[ -n "$SETTING_SOURCES" ] && CLAUDE_ARGV+=(--setting-sources "$SETTING_SOURCES")
-[ -n "$AUTOCOMPACT" ]  && CLAUDE_ARGV+=(--autocompact "$AUTOCOMPACT")
-[ -n "$TOOLSET" ]      && CLAUDE_ARGV+=(--tools "$TOOLSET")
-[ "$STRICT_MCP" -eq 1 ] && CLAUDE_ARGV+=(--strict-mcp-config)
-[ -n "$SYSTEM" ]    && CLAUDE_ARGV+=(--append-system-prompt "$SYSTEM")
-[ -n "$PERM_MODE" ] && CLAUDE_ARGV+=(--permission-mode "$PERM_MODE")
-if [ "${#ADD_DIRS[@]}" -gt 0 ]; then
-  for d in "${ADD_DIRS[@]}"; do CLAUDE_ARGV+=(--add-dir "$(native_path "$d")"); done
+if [ "$INTERACTIVE" -eq 1 ]; then
+  # No -p/--print, and none of the flags a headless run needs a fence for: no
+  # --output-format (the session draws itself), no --tools/--allowed-tools, no
+  # --permission-mode and no --restricted (the person at the keyboard answers
+  # Claude Code's own prompts), no --append-system-prompt and no
+  # --strict-mcp-config. What DOES point claude at this server is passed exactly
+  # as a headless run passes it: --model, --effort, the context window through
+  # the environment, --autocompact, and --setting-sources when configured.
+  CLAUDE_ARGV=("$CLAUDE_BIN" --model "$MODEL")
+  [ "$EFFORT" = default ] || CLAUDE_ARGV+=(--effort "$EFFORT")
+  [ -n "$SETTING_SOURCES" ] && CLAUDE_ARGV+=(--setting-sources "$SETTING_SOURCES")
+  [ -n "$AUTOCOMPACT" ]     && CLAUDE_ARGV+=(--autocompact "$AUTOCOMPACT")
+  if [ "${#ADD_DIRS[@]}" -gt 0 ]; then
+    for d in "${ADD_DIRS[@]}"; do CLAUDE_ARGV+=(--add-dir "$(native_path "$d")"); done
+  fi
+else
+  CLAUDE_ARGV=("$CLAUDE_BIN" -p
+    --model "$MODEL"
+    --output-format json
+    --allowed-tools "$TOOLS")
+  [ "$EFFORT" = default ] || CLAUDE_ARGV+=(--effort "$EFFORT")
+  # --test must not depend on any settings file, and --restricted ignores them
+  # anyway -- passing the flag there would only advertise a door the fence shuts.
+  if [ "$TEST_MODE" -eq 0 ] && [ -n "$SETTING_SOURCES" ]; then
+    CLAUDE_ARGV+=(--setting-sources "$SETTING_SOURCES")
+  fi
+  [ -n "$AUTOCOMPACT" ]  && CLAUDE_ARGV+=(--autocompact "$AUTOCOMPACT")
+  [ -n "$TOOLSET" ]      && CLAUDE_ARGV+=(--tools "$TOOLSET")
+  [ "$STRICT_MCP" -eq 1 ] && CLAUDE_ARGV+=(--strict-mcp-config)
+  [ -n "$SYSTEM" ]    && CLAUDE_ARGV+=(--append-system-prompt "$SYSTEM")
+  [ -n "$PERM_MODE" ] && CLAUDE_ARGV+=(--permission-mode "$PERM_MODE")
+  [ "$TEST_MODE" -eq 1 ] && CLAUDE_ARGV+=(--restricted)
+  if [ "${#ADD_DIRS[@]}" -gt 0 ]; then
+    for d in "${ADD_DIRS[@]}"; do CLAUDE_ARGV+=(--add-dir "$(native_path "$d")"); done
+  fi
+  [ -n "$RESUME_ID" ] && CLAUDE_ARGV+=(--resume "$RESUME_ID")
+  # '--' guards a prompt that begins with '-'.
+  CLAUDE_ARGV+=(-- "$PROMPT")
 fi
-# '--' guards a prompt that begins with '-'.
-CLAUDE_ARGV+=(-- "$PROMPT")
 
 # Wrap in GNU timeout when one was found; otherwise run_claude's watchdog
-# enforces --timeout. Never pass 0 (see above).
-if [ -n "$TIMEOUT" ] && [ -n "$TIMEOUT_BIN" ]; then
+# enforces --timeout. Never pass 0 (see above). An interactive session is never
+# wrapped: the person at the keyboard ends it, and killing their session on a
+# wall clock would throw away the work they are typing.
+if [ "$INTERACTIVE" -eq 0 ] && [ -n "$TIMEOUT" ] && [ -n "$TIMEOUT_BIN" ]; then
   RUN_ARGV=("$TIMEOUT_BIN" -k 10 "$TIMEOUT" "${CLAUDE_ARGV[@]}")
 else
   RUN_ARGV=("${CLAUDE_ARGV[@]}")
@@ -790,7 +1215,23 @@ CHILD_ENV=(
   "ANTHROPIC_DEFAULT_OPUS_MODEL=$MODEL"
   "CLAUDE_CODE_SUBAGENT_MODEL=$MODEL")
 [ -n "$CTX" ] && CHILD_ENV+=("CLAUDE_CODE_MAX_CONTEXT_TOKENS=$CTX")
+# Claude Code's internal model calls (WebFetch summarises pages with its own
+# request) ignore --effort and send "high", which Qwen chat templates reject
+# (400). The env var is what reaches those calls; the parent's value is scrubbed,
+# so with QWEN_EFFORT=default (no --effort) nothing is set for the child.
+[ "$EFFORT" = default ] || CHILD_ENV+=("CLAUDE_CODE_EFFORT_LEVEL=$EFFORT")
 [ -n "${QWEN_CUSTOM_HEADERS:-}" ] && CHILD_ENV+=("ANTHROPIC_CUSTOM_HEADERS=$QWEN_CUSTOM_HEADERS")
+if [ "$TEST_MODE" -eq 1 ]; then
+  # The Bash tool must never cut qwen-test off before the test timeout does:
+  # qwen-test itself kills the test's process group at QWEN_TEST_TIMEOUT (600
+  # default), and gets a 60s margin on top for the worktree sync and teardown.
+  _qt="${QWEN_TEST_TIMEOUT:-600}"
+  case "$_qt" in ''|*[!0-9]*) _qt=600 ;; esac
+  _bash_ms=$(( _qt * 1000 + 60000 ))
+  CHILD_ENV+=("QWEN_TEST_CMD=$QWEN_TEST_CMD" "QWEN_TEST_SOURCE=$TEST_REPO" "QWEN_TEST_WORKTREE=${TEST_WT:-<worktree>}"
+              "BASH_DEFAULT_TIMEOUT_MS=$_bash_ms" "BASH_MAX_TIMEOUT_MS=$_bash_ms")
+  unset _qt _bash_ms
+fi
 # Git Bash rewrites any argument that looks like a POSIX path when it starts a
 # native program: a prompt or a model id beginning with "/" would reach claude as
 # C:/Program Files/Git/... Pass arguments verbatim (--add-dir is converted above).
@@ -810,14 +1251,26 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "# config: $QA_CONFIG$([ -r "$QA_CONFIG" ] || echo '  (absent)')"
   echo "# cwd: $PWD"
   echo "# out: ${OUT:-<stdout>}"
-  echo "# timeout: ${TIMEOUT:-<none (--no-timeout)>}${TIMEOUT:+ via ${TIMEOUT_BIN:-built-in watchdog}}"
+  if [ "$INTERACTIVE" -eq 1 ]; then
+    echo "# timeout: not applied (--interactive: the session ends when the person at the keyboard leaves)"
+  else
+    echo "# timeout: ${TIMEOUT:-<none (--no-timeout)>}${TIMEOUT:+ via ${TIMEOUT_BIN:-built-in watchdog}}"
+  fi
   exit 0
+fi
+
+if [ "$INTERACTIVE" -eq 1 ]; then
+  # Replace this process rather than spawn and supervise one: from here the
+  # terminal, Ctrl-C and the exit code belong to the session, and there is no
+  # JSON record to parse, classify or write to a file. `env` still gets the
+  # scrubbed parent session's control channel and provider routing.
+  note "interactive session on '$MODEL' at $BASE — Claude Code's own prompts ask you about every tool; leave with /exit"
+  # shellcheck disable=SC2086  # SCRUB_ARGS is a deliberate word list
+  exec env $SCRUB_ARGS "${CHILD_ENV[@]}" "${RUN_ARGV[@]}"
 fi
 
 # ------------------------------------------------------------------- runner
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/qwen-agent.XXXXXXXX")" || { die "mktemp failed"; exit $QA_HARNESS; }
-# shellcheck disable=SC2329  # invoked via trap
-cleanup() { [ -n "${TMPD:-}" ] && rm -rf "$TMPD"; }
 
 # claude runs as a BACKGROUND job and is joined with `wait`, because a trap
 # cannot interrupt a foreground command: with `timeout ... claude` in the
@@ -932,6 +1385,7 @@ print("qa_in_tok=" + q(u.get("input_tokens")))
 print("qa_out_tok=" + q(u.get("output_tokens")))
 res = obj.get("result")
 print("qa_result_len=" + q(len(res) if isinstance(res, str) else 0))
+print("qa_session=" + q(obj.get("session_id")))
 PY
 }
 
@@ -1006,7 +1460,7 @@ classify() {
     return $QA_EMPTY
   fi
 
-  note "ok — turns=${qa_turns:-?} in=${qa_in_tok:-?} out=${qa_out_tok:-?} tok, ${qa_dur_ms:-?}ms"
+  note "ok — turns=${qa_turns:-?} in=${qa_in_tok:-?} out=${qa_out_tok:-?} tok, ${qa_dur_ms:-?}ms${qa_session:+ session=$qa_session}"
   return $QA_OK
 }
 
@@ -1019,9 +1473,11 @@ emit() {
 
   # Always write whatever payload exists, even on failure — a partial or errored
   # result is still evidence, and silently losing it is the worst outcome.
-  # Exception: on QA_EMPTY there is no text, and emitting it would put a bare
-  # newline on stdout, so `r=$(qwen-agent ...)` would get whitespace not "".
-  if [ -s "$RAW" ] && [ "$code" -ne "$QA_EMPTY" ]; then
+  # Exception: in text mode on QA_EMPTY there is no text, and emitting it would
+  # put a bare newline on stdout, so `r=$(qwen-agent ...)` would get whitespace
+  # not "". With --json the record is always emitted: it carries the session id,
+  # which a caller needs to resume a round that edited files but ended silent.
+  if [ -s "$RAW" ] && { [ "$code" -ne "$QA_EMPTY" ] || [ "$fmt" = json ]; }; then
     if [ -n "$OUT" ]; then
       if extract "$fmt" >"$OUT"; then
         [ "$code" -eq 0 ] && note "wrote $OUT"
@@ -1034,6 +1490,19 @@ emit() {
     else
       extract "$fmt"
     fi
+  fi
+  if [ "$TEST_MODE" -eq 1 ] && [ "$WRITE_MODE" -eq 0 ] && [ "$JSON_OUT" -eq 0 ] && [ -n "$TEST_WT" ]; then
+    _rf="$(skill_py testrun.py --changed "$(native_path "$TEST_REPO")" "$(native_path "$TEST_WT")" | tr -d '\r')"
+    if [ -n "$_rf" ]; then
+      {
+        printf '\n## REPRO FILES\n'
+        printf '%s\n' "$_rf" | while IFS= read -r f; do
+          [ -n "$f" ] || continue
+          printf '\n### %s\n\n```\n' "$f"; cat -- "$TEST_WT/$f"; printf '```\n'
+        done
+      } >>"${OUT:-/dev/stdout}"
+    fi
+    unset _rf
   fi
   return $code
 }
