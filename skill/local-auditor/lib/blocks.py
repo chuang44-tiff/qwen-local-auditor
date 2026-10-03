@@ -99,7 +99,10 @@ def flag_prose_evidence(blocks, is_prose):
     return out
 
 
-_TEST_LINE = re.compile(r"\bTEST\s+\S.*?\s(PASSED|FAILED|ERROR|TIMEOUT)\b")
+# qwen-test's own result line: "TEST <selector> <RESULT>" at the end of a line or before
+# ": <first failure line>". The lookahead keeps a result word in prose ("it PASSED last
+# week") or inside a selector ("x[on ERROR] PASSED") from counting as the result.
+_TEST_LINE = re.compile(r"\bTEST\s+\S.*?\s(PASSED|FAILED|ERROR|TIMEOUT)(?=\s*(?::|$))", re.M)
 
 
 def flag_unverified_deviation(blocks_):
@@ -113,12 +116,14 @@ def flag_unverified_deviation(blocks_):
         if (b["verdict"] or "").upper() != "DEVIATION_EXPLAINED":
             continue
         results = _TEST_LINE.findall(b["evidence"] or "")
-        if "PASSED" in results:
+        # The LAST TEST line is the re-run: an earlier PASSED (copied from the decision
+        # log) must not cancel a re-run that came back failing.
+        if results and results[-1] == "PASSED":
             continue
         if results:
             out.append("%s: DEVIATION_EXPLAINED citing a re-run TEST line that did not pass "
                        "(%s) -- the recorded reason holds only while its test passes"
-                       % (b["key"], results[0]))
+                       % (b["key"], results[-1]))
         else:
             out.append("%s: DEVIATION_EXPLAINED without a re-run TEST line -- recorded reason "
                        "not re-verified" % b["key"])

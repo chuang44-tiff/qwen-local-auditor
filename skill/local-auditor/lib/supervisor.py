@@ -565,7 +565,7 @@ def run(o):
             stalled = prev is not None and now == prev[0] and sig_round == sig_before
             if sig == prev or stalled:
                 reason, code = ("no progress: the same checks failed two rounds in a row "
-                                "with no change to the tree"), EXIT_NOPROGRESS
+                                "and the agent changed nothing"), EXIT_NOPROGRESS
                 break
             prev = sig
             if (o.budget_tokens and tokens >= o.budget_tokens) or \

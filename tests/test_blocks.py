@@ -109,3 +109,19 @@ def test_failed_rerun_does_not_explain_a_deviation():
     assert "without a re-run TEST line" in flags[1] and "FAILED" not in flags[1]
     assert "ERROR" in flags[2] and "TIMEOUT" in flags[3]
     assert not any(f.startswith("t2:") for f in flags), "PASSED is the evidence that counts"
+
+
+def test_rerun_verdict_reads_the_last_test_line_and_ignores_prose():
+    from lib.blocks import flag_unverified_deviation
+
+    def flagged(evidence):
+        b = {"key": "t1", "verdict": "DEVIATION_EXPLAINED", "evidence": evidence}
+        return flag_unverified_deviation([b])
+
+    # an earlier PASSED (copied from the decision log) does not cancel a failing re-run
+    assert flagged("TEST tests/t.py::x PASSED\nTEST tests/t.py::x FAILED: assert 1 == 2")
+    # a result word in prose is not a result
+    assert flagged("TEST tests/t.py::x not re-run, it PASSED last week")
+    # ... nor is one inside the selector; the real result is the line's last word
+    assert not flagged("TEST tests/t.py::x[on ERROR] PASSED")
+    assert not flagged("TEST tests/t.py::x FAILED\nTEST tests/t.py::x PASSED")

@@ -92,3 +92,14 @@ def test_run_checks(repo):
     assert [r.status for r in res] == ["PASS", "FAIL", "FAIL", "UNVERIFIED"]
     assert res[1].evidence.startswith("TEST bad FAILED")
     assert "exit 3" in res[2].evidence
+
+
+def test_ambiguous_markers_are_refused():
+    # A cmd whose argument quotes "-- check: none" must not turn into an unchecked item,
+    # and a trailing marker with an unknown kind must not vanish into the argument.
+    for line in ('- [ ] x -- check: cmd grep -q " -- check: none" t.md\n',
+                 '- [ ] x -- check: test tests/t.py -- check: maybe\n',
+                 '- [ ] x -- check: none, see the docs\n'):
+        with pytest.raises(ValueError):
+            taskfile.parse(line)
+    assert taskfile.parse("- [ ] docs updated -- check: none\n").items[0].kind == "none"

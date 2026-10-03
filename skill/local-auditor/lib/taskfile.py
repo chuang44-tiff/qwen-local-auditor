@@ -53,6 +53,15 @@ def parse(text):
             raise ValueError("item %d: unknown check kind in %r "
                              "(expected exactly '-- check: test ID', '-- check: cmd CMD' "
                              "or '-- check: none')" % (n, body))
+        if hits and _CHECKISH.search(arg):
+            # Something after the chosen marker still reads like one ("-- check: foo"
+            # with an unknown kind): two markers on a line is ambiguous, so say so.
+            raise ValueError("item %d: more than one '-- check:' marker in %r; "
+                             "put exactly one, at the end" % (n, " " + m.group(1)))
+        if kind == "none" and arg:
+            # "-- check: none" takes nothing after it: text there is either a cmd/test
+            # argument that was cut in two, or prose that hides what was meant.
+            raise ValueError("item %d: 'check: none' takes no argument (got %r)" % (n, arg))
         if kind in ("test", "cmd") and not arg:
             raise ValueError("item %d: 'check: %s' needs an argument" % (n, kind))
         if kind == "cmd":

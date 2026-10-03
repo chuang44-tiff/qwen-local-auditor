@@ -21,8 +21,9 @@ description: Have the local model implement a change against a written task and 
 ```
 
 Write the ` -- check:` suffix only once per line, at the end. A line with no valid suffix
-whose prose contains "check:" is refused; when a line carries more than one, the last
-` -- check:` on the line is the check; anything before it is item text.
+whose prose contains "check:" is refused. When item text quotes the syntax, the last valid
+` -- check:` on the line is the check and anything before it is item text; anything that
+still reads like a marker after it, or text after `check: none`, is refused.
 
 Make every item checkable. The local model cannot tick items or edit this file.
 For batch edits across many files, give one item per file.
@@ -52,7 +53,7 @@ evidence, the stop reason, the decision log, the new files and the denied tool c
 | 2 | usage error or refused flag | fix the command |
 | 4, 8 | server API error, or harness problem | run `qwen-agent --preflight-only` |
 | 11 | round limit or budget hit | read the report; raise the limit or split the task |
-| 12 | no progress: same failing checks and an unchanged tree, two rounds running | read the evidence, fix the task or do it yourself |
+| 12 | no progress: same failing checks two rounds running, and the agent changed nothing | read the evidence, fix the task or do it yourself |
 | 13 | dirty tree at start | commit, or pass `--allow-dirty` |
 | 14 | another run holds this repo | wait, or remove a stale lock named in the message |
 | 130 | interrupted (Ctrl-C) | re-run when ready |

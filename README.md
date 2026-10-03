@@ -186,7 +186,7 @@ repo).
 | exit | meaning |
 |---|---|
 | 11 | `--until-done` stopped at the round limit or a budget, or the checks pass but the deviation audit was unusable twice (partial; report written; review the diff manually) |
-| 12 | no progress: the same checks failed and the tree was unchanged two rounds in a row |
+| 12 | no progress: the same checks failed two rounds in a row and the agent changed nothing |
 | 13 | working tree dirty at start (commit, or `--allow-dirty`) |
 | 14 | another `--until-done` run holds this repo's lock |
 | 130 | interrupted (Ctrl-C); report written |

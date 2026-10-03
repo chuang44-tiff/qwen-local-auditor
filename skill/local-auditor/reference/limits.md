@@ -207,8 +207,8 @@ both before trusting a "done". The state directory (`QWEN_AGENT_STATE`, default 
 It says a reason was recorded and its test still behaves as the reason claims. Whether
 the deviation was a good idea stays with you.
 
-The collator requires the verdict to cite a line shaped `TEST ... PASSED`, `FAILED`,
-`ERROR` or `TIMEOUT`. A pattern match cannot prove the test was actually re-run rather
+The collator requires the verdict's last TEST line to be shaped `TEST ... PASSED` (a
+re-run that came back `FAILED`, `ERROR` or `TIMEOUT` is flagged). A pattern match cannot prove the test was actually re-run rather
 than copied from the decision log or a transcript, so a fabricated TEST line passes it.
 Treat the verdict as a lead to confirm, not as evidence that the test ran.
 
