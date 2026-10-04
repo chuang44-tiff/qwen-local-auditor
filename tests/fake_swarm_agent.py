@@ -34,8 +34,28 @@ def opt(name):
     return argv[argv.index(name) + 1] if name in argv else None
 
 
-with open(d / "calls.jsonl", "a", encoding="utf-8") as fh:
-    fh.write(json.dumps(argv) + "\n")
+def append_line(path, line):
+    # Several fake agents append to the same file at once. On Windows concurrent
+    # appends can overwrite each other, so take an exclusive lock file first.
+    lock = str(path) + ".lock"
+    deadline = time.time() + 30
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            if time.time() > deadline:
+                raise
+            time.sleep(0.005)
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    finally:
+        os.close(fd)
+        os.unlink(lock)
+
+
+append_line(d / "calls.jsonl", json.dumps(argv))
 signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))
 live = d / "live"
 live.mkdir(exist_ok=True)
@@ -43,8 +63,7 @@ me = live / uuid.uuid4().hex
 me.write_text("x")
 try:
     role = pathlib.Path(opt("--role-file")).stem
-    with open(d / "counts", "a", encoding="utf-8") as fh:
-        fh.write("%s %d\n" % (role, len(list(live.iterdir()))))
+    append_line(d / "counts", "%s %d" % (role, len([x for x in live.iterdir() if not x.name.endswith(".lock")])))
     time.sleep(float(os.environ.get("FAKE_SWARM_SLEEP", "0.2")))
     prompt = pathlib.Path(opt("-f")).read_text(encoding="utf-8")
     beh = d / ("%s.py" % role)
