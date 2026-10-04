@@ -1,4 +1,73 @@
-# Batch sweeps: mechanics and writing a builder
+# Batch sweeps: running `qwen-sweep`, its mechanics, and writing a builder
+
+## Running a sweep
+
+```bash
+qwen-sweep --builder diff   --repo . --base main --dry-run       # always dry-run a new sweep first
+qwen-sweep --builder diff   --repo . --base main                  # no --base: uncommitted changes vs HEAD
+qwen-sweep --builder files  --repo . --glob 'src/**/*.py'
+qwen-sweep --builder claims --repo . --docs docs/issues --items list.json   # list.json: ["ISSUE-12.md", ...]
+qwen-sweep --builder logs   --input build.log
+qwen-sweep --builder history    --repo . --arg files=src/a.py,src/b.py
+qwen-sweep --builder deviations --repo . --base main --arg spec=SPEC.md
+```
+
+| builder | one item is | asks | needs |
+|---|---|---|---|
+| `diff` | a changed file in a range | what the change does, what contradicts its intent | `--repo` `[--base REF]` |
+| `files` | a path from a glob | what the file does, demonstrable defects | `--repo --glob PAT` |
+| `claims` | a document asserting things about code | a VERDICT per claim, with evidence | `--repo --docs DIR --items FILE` |
+| `logs` | a chunk of a large text | what is in it, what recurs | `--input FILE` |
+| `history` | what this project's Claude Code transcripts (not git) recorded about a file | why it is the way it is | `--repo --arg files=a,b` |
+| `deviations` | a changed file, held against a spec; implies `--test` | does it differ from the spec, and is there a recorded reason | `--repo --arg spec=PATH` plus the diff options |
+
+| option | meaning |
+|---|---|
+| `--arg KEY=VALUE` | a builder setting, repeatable. `claims`: `test_dirs=test,spec`, `strip_fields=Status,Owner`, `exts=.py,.go`, `census_root=DIR`; `logs`: `chunk_bytes=N` |
+| `--brief NAME` | use brief NAME (`$QWEN_BRIEF_DIR/NAME.md`, else the bundled one) |
+| `--role NAME` | the `qwen-agent` role (default `auditor`) |
+| `-m NAME`, `--effort LEVEL`, `--timeout SECS` | model, effort and wall clock for every batch (set `QWEN_MODEL`, `QWEN_EFFORT`, `QWEN_TIMEOUT`) |
+| `--budget BYTES`, `--item-budget BYTES` | bytes per batch (default: scaled to the model's context window) and per item (default: half the batch budget) |
+| `--out DIR` | the run directory (default: a new run under the sweep cache) |
+| `--dry-run` | build and report, dispatch nothing |
+| `--resume` | continue the latest run for this repo, skipping complete batches |
+| `--strict` | a builder exception aborts the run instead of withholding the item |
+| `--allow-empty` | exit 0 even when there is nothing to audit |
+| `--test` | let every batch run the project's tests via `qwen-test` (needs `QWEN_TEST_CMD`; implied by `--builder deviations`) |
+| `--no-preflight` | skip the one-time server check (also `QWEN_PREFLIGHT=0`) |
+
+`claims` understands most source languages, but its guard against citing a comment as
+evidence is exact only for Python and approximate for C-family files (see `limits.md`).
+Batch edits are not a sweep job: use `--until-done` with one checklist item per file.
+
+### Output
+
+The run directory's path is printed at the start and the end. Runs live under
+`$QWEN_SWEEP_CACHE`, else `$XDG_CACHE_HOME/qwen-sweep`, else `~/.cache/qwen-sweep`,
+grouped per repo.
+
+| file | contents |
+|---|---|
+| `collated.json` | every answer: `rows[]` of `{item, key, verdict, finding, evidence, why}`, plus `problems[]` and `withheld[]` |
+| `needs-human.txt` | items never dispatched, with the reason (no evidence, over budget, empty): route these to a person. The final summary lists them and prints the path |
+| `progress.log` | this run's console output |
+| `bNN/` | one batch: `t*.md` and `context*.md` (what the model saw), `brief.md`, `out.md` (its answer), `stderr.txt` (`qwen-agent`'s messages) |
+
+### Exit codes
+
+| exit | meaning |
+|---|---|
+| 0 | every dispatched batch answered completely |
+| 1 | collation problems: missing blocks, or prose cited as evidence |
+| 2 | usage error (bad option, missing builder argument, unreadable `--items`) |
+| 3 | preflight failed: server, model or key (the message says which) |
+| 8 | no working Python 3.8+, or claude missing |
+| 9 | nothing was audited: build failed, no items, or every item withheld |
+| 10 | another sweep holds this run's lock |
+| 130 | interrupted |
+
+Because it exits non-zero on a missing block, a prose citation or an empty run, a sweep
+can gate a commit or a CI step.
 
 ## The pipeline
 

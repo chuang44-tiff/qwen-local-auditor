@@ -80,6 +80,38 @@ verdict; do not undo that by asking a single blended question.
 **Ask for extraction, not judgment.** Every failure mode here is the harness asking the
 model to decide something when it should have asked it to report something.
 
+## The fence at a glance
+
+What each command can reach, and which flag opens what. The sections that follow give
+the measured detail.
+
+- **A bare `qwen-agent` run can only read.** The toolset is `Read,Glob,Grep` and
+  configured MCP servers are dropped (`--strict-mcp-config`): a schema-level restriction,
+  the model has no Bash and no Write tool at all. Editing needs `--write` (or the
+  `mechanic` or `coder` role); Bash needs `--test` (which grants only `qwen-test`),
+  `--all-tools` or an explicit `--toolset`, and each prints a warning.
+- **Subagents are opt-in** (`--subagents`, `QWEN_SUBAGENTS=1`): the `Task` tool, same
+  model, same tool limits, one more concurrent request against your server.
+- **No run reaches the web unless you ask** (`--web`, `QWEN_WEB=1`), and that adds only
+  `WebFetch`, never `WebSearch`. Keep it off for test-driven work.
+- **`--test` limits the shell, not what code runs**: the tests `qwen-test` runs, including
+  any the model wrote or edited, execute as you. Every `--test` run passes
+  `claude --restricted`, so your own Claude settings cannot widen the fence.
+- **The child never inherits the parent session's control channel**, its provider routing
+  (Bedrock, Vertex, Foundry), `ANTHROPIC_API_KEY`, custom headers or model overrides, so a
+  prompt cannot silently go to a cloud provider instead of your server. `--dry-run` shows
+  the exact command and environment with secrets redacted.
+- **Sweep runs are written to your cache directory**, never into the repository under
+  audit; `--until-done` state must live outside the repo too.
+- **`qwen-cc` reads, types into and kills only the tmux sessions it created** (tagged
+  `@qwen_cc=1`) and refuses every other session. What it cannot limit is what a typed line
+  does: `--say` is how an interactive session's permission prompts get answered, so that
+  stays a human decision (the skills tell your Claude Code session to answer one only when
+  the user explicitly asks). See `interactive.md`.
+- **`qwen-deep-research` is the one command that needs the internet.** Its agents run in
+  empty folders with no file tools and no Bash; only the searcher, reader and verifier
+  reach the network. See `deep-research.md`.
+
 ## Running tests runs the repository's code
 
 **With `--test`, the model can run arbitrary code as you.** The fence limits the SHELL
