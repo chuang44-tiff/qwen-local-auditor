@@ -108,6 +108,8 @@ SUBAGENTS=0         # --subagents : opt-in Task tool (each subagent is one more 
 case "${QWEN_SUBAGENTS:-}" in 1) SUBAGENTS=1 ;; esac
 STRICT_MCP=0
 STRICT_MCP_EXPLICIT=0
+MCP_CONFIG=""       # --mcp-config: load ONLY the MCP servers named in this file
+TOOLSET_NONE=0      # --toolset none: pass --tools "" (no built-in tool at all)
 NO_TIMEOUT=0
 FORCE=0
 OUT=""
@@ -264,6 +266,7 @@ EXECUTION  (the DEFAULT is read-only — mutation must be asked for)
       --toolset LIST   Passed to claude as --tools — the REAL restriction: it
                        removes every built-in tool you do not name. Overrides
                        --write/--all-tools. Default: '$TOOLSET_READONLY'.
+                       'none' removes every built-in tool.
       --read-only      Explicit form of the default (--toolset
                        '$TOOLSET_READONLY' --strict-mcp).
   -t, --tools LIST     Passed to claude as --allowed-tools. This GRANTS
@@ -276,6 +279,8 @@ EXECUTION  (the DEFAULT is read-only — mutation must be asked for)
       --strict-mcp     Add --strict-mcp-config, dropping configured MCP servers
                        (--toolset governs built-ins only; MCP tools survive it).
                        On by default; --all-tools turns it off.
+      --mcp-config FILE  Load only the MCP servers in FILE (implies --strict-mcp), even with --all-tools.
+                       Grant their tools with -t, e.g. -t mcp__search__search.
       --permission-mode M   Passed through to claude (e.g. acceptEdits, plan).
   -C, --cd DIR         chdir here before running (tool access is rooted at cwd).
   -D, --add-dir DIR    Extra readable directory. Repeatable.
@@ -536,7 +541,15 @@ while [ $# -gt 0 ]; do
     --list-roles)         list_roles; exit 0 ;;
     -o|--out)             need_arg "$1" $(($#-1)); OUT="$2"; shift 2 ;;
     -t|--tools)           need_arg "$1" $(($#-1)); TOOLS="$2"; TOOLS_EXPLICIT=1; shift 2 ;;
-    --toolset)            need_arg "$1" $(($#-1)); TOOLSET="$2"; TOOLSET_EXPLICIT=1; shift 2 ;;
+    --toolset)            need_arg "$1" $(($#-1)); TOOLSET="$2"; TOOLSET_EXPLICIT=1
+                          # 'none' MEANS THE EMPTY TOOLSET; inside a list it would
+                          # be silently dropped (or read as a tool literally named
+                          # 'none'), so it only means something on its own.
+                          case ",$TOOLSET," in
+                            *,none,*)
+                              [ "$TOOLSET" = none ] || { die "--toolset: 'none' must stand alone (got '$TOOLSET')"; exit $QA_USAGE; } ;;
+                          esac
+                          [ "$TOOLSET" = none ] && { TOOLSET=""; TOOLSET_NONE=1; }; shift 2 ;;
     --read-only)          TOOLSET="$TOOLSET_READONLY"; TOOLSET_EXPLICIT=1; READ_ONLY_FLAG=1
                           STRICT_MCP=1; STRICT_MCP_EXPLICIT=1; shift ;;
     --write)              WRITE_MODE=1; shift ;;
@@ -547,6 +560,13 @@ while [ $# -gt 0 ]; do
     --test-repo)          need_arg "$1" $(($#-1)); TEST_REPO="$2"; shift 2 ;;
     --all-tools|--unrestricted) ALL_TOOLS=1; shift ;;
     --strict-mcp)         STRICT_MCP=1; STRICT_MCP_EXPLICIT=1; shift ;;
+    --mcp-config)         need_arg "$1" $(($#-1))
+                          # An empty value survives every later [ -n ] test as
+                          # "not given": the run would look like an MCP run and
+                          # load nothing. Refuse it where the message can name
+                          # the flag.
+                          [ -n "$2" ] || { die "--mcp-config needs a file path, not an empty string"; exit $QA_USAGE; }
+                          MCP_CONFIG="$2"; shift 2 ;;
     -e|--effort)          need_arg "$1" $(($#-1)); EFFORT="$2"; shift 2 ;;
     -m|--model)           need_arg "$1" $(($#-1)); MODEL="$2"; shift 2 ;;
     -b|--base)            need_arg "$1" $(($#-1)); BASE="$2"; shift 2 ;;
@@ -640,6 +660,9 @@ if [ "$INTERACTIVE" -eq 1 ]; then
                                          _ia_refuse "${_a%%=*}" ;;
       --warn-denials)                    _ia_refuse "--warn-denials" ;;
       --strict-mcp|--strict-mcp=*)       _ia_refuse "--strict-mcp" ;;
+      # Same reason: it only steers the headless fence (a strict MCP load an
+      # interactive session never gets), so it would be silently dropped.
+      --mcp-config|--mcp-config=*)       _ia_refuse "--mcp-config" ;;
     esac
   done
   unset _a
@@ -671,6 +694,10 @@ if [ -n "$UNTIL_DONE" ]; then
       --toolset|--toolset=*|--read-only|--all-tools|--permission-mode|--permission-mode=*|\
       -t|--tools|--tools=*|--unrestricted|-D|--add-dir|--add-dir=*)
         _ud_refuse "$a" ;;
+      # Every round is a headless run of the coder role; the MCP servers are the
+      # harness's, not the caller's to retarget per loop.
+      --mcp-config|--mcp-config=*)
+        _ud_refuse "--mcp-config" ;;
       -r|--role) _skip=2 ;;
       --role=coder|--test) ;;
       --role=*) die "--until-done always runs the coder role (got $a)"; exit $QA_USAGE ;;
@@ -761,6 +788,20 @@ check_autocompact_vs_ctx() {
 }
 check_autocompact_vs_ctx || exit $QA_USAGE
 
+# A RELATIVE --mcp-config NAMES THE CALLER'S FILE: the existence check below
+# resolves it against the caller's directory, but claude would resolve the same
+# relative string inside -C -- without this the directory under audit could swap
+# in its own mcp.json and choose which MCP servers (arbitrary commands) start.
+# Absolutize it the way -o is: relative to the caller, never to --cd.
+case "$MCP_CONFIG" in ''|/*|[A-Za-z]:*) ;; *) MCP_CONFIG="$PWD/$MCP_CONFIG" ;; esac
+# A typo'd --mcp-config must not become a run that silently loads the wrong MCP
+# servers (or none); checking the file up front also makes the implied
+# --strict-mcp safe: nothing configured can sneak in beside a missing file.
+if [ -n "$MCP_CONFIG" ]; then
+  [ -f "$MCP_CONFIG" ] || { die "--mcp-config: no such file: $MCP_CONFIG"; exit $QA_USAGE; }
+  STRICT_MCP=1
+fi
+
 # Prompt sources are mutually exclusive.
 nsrc=0
 [ "$PROMPT_SET" -eq 1 ] && nsrc=$((nsrc+1))
@@ -839,7 +880,11 @@ if [ "$STRICT_MCP_EXPLICIT" -eq 0 ] && [ "$ALL_TOOLS" -eq 0 ]; then
   STRICT_MCP=1
 fi
 if [ "$TOOLS_EXPLICIT" -eq 0 ]; then
-  if [ "$WRITE_MODE" -eq 1 ]; then TOOLS="$GRANTS_WRITE"; else TOOLS="$GRANTS_DEFAULT"; fi
+  # --toolset none leaves no built-in tool to grant: the default grant list would
+  # advertise permissions for tools the run cannot have, so the grant stays empty.
+  # --web/--subagents below still append their tools to it.
+  if [ "$TOOLSET_NONE" -eq 1 ]; then TOOLS=""
+  elif [ "$WRITE_MODE" -eq 1 ]; then TOOLS="$GRANTS_WRITE"; else TOOLS="$GRANTS_DEFAULT"; fi
 fi
 if [ "$TEST_MODE" -eq 1 ]; then
   # Never left to the settings files --restricted ignores, and never to a
@@ -855,10 +900,15 @@ elif [ "$WRITE_MODE" -eq 1 ] && [ -z "$PERM_MODE" ]; then
 fi
 # Warn on stderr whenever this run can mutate anything. Deliberately uses die()
 # (not note()) so -q cannot hide it.
-if [ "$ALL_TOOLS" -eq 1 ]; then
+# An explicit --toolset OVERRIDES --all-tools (see the effective policy above),
+# so with one given the every-tool claim would be false: take the branch that
+# describes the toolset actually passed instead.
+if [ "$ALL_TOOLS" -eq 1 ] && [ "$TOOLSET_EXPLICIT" -eq 0 ]; then
   die "WARNING: --all-tools — every built-in tool is available, including Bash and Write"
 elif [ "$WRITE_MODE" -eq 1 ]; then
-  die "WARNING: write-enabled run (toolset '$TOOLSET', permission-mode '$PERM_MODE')"
+  # ${TOOLSET:-none}: --toolset none leaves the list empty, and an empty list in
+  # the warning would read like a mistake rather than the point of 'none'.
+  die "WARNING: write-enabled run (toolset '${TOOLSET:-none}', permission-mode '$PERM_MODE')"
 elif [ "$TOOLSET_EXPLICIT" -eq 1 ]; then
   case ",$TOOLSET," in
     *,Bash,*|*,Write,*|*,Edit,*|*,MultiEdit,*|*,NotebookEdit,*)
@@ -964,7 +1014,7 @@ fi
 # required" (search needs an MCP server). --all-tools leaves the toolset
 # unrestricted and already has every built-in: it keeps that behaviour.
 if [ "$WEB_MODE" -eq 1 ] && [ "$ALL_TOOLS" -eq 0 ]; then
-  if [ -n "$TOOLSET" ]; then
+  if [ -n "$TOOLSET" ] || [ "$TOOLSET_NONE" -eq 1 ]; then
     case ",$TOOLSET," in
       *,WebFetch,*) ;;
       *) TOOLSET="${TOOLSET:+$TOOLSET,}WebFetch" ;;
@@ -989,7 +1039,7 @@ fi
 # subagent inherits this run's tool restrictions and grants (and --restricted
 # under --test), so Task adds no capability the run did not already have.
 if [ "$SUBAGENTS" -eq 1 ] && [ "$ALL_TOOLS" -eq 0 ]; then
-  if [ -n "$TOOLSET" ]; then
+  if [ -n "$TOOLSET" ] || [ "$TOOLSET_NONE" -eq 1 ]; then
     case ",$TOOLSET," in *,Task,*) ;; *) TOOLSET="${TOOLSET:+$TOOLSET,}Task" ;; esac
   fi
   case ",$TOOLS," in *,Task,*) ;; *) TOOLS="${TOOLS:+$TOOLS,}Task" ;; esac
@@ -1180,7 +1230,10 @@ else
     CLAUDE_ARGV+=(--setting-sources "$SETTING_SOURCES")
   fi
   [ -n "$AUTOCOMPACT" ]  && CLAUDE_ARGV+=(--autocompact "$AUTOCOMPACT")
-  [ -n "$TOOLSET" ]      && CLAUDE_ARGV+=(--tools "$TOOLSET")
+  if [ -n "$TOOLSET" ]; then CLAUDE_ARGV+=(--tools "$TOOLSET")
+  elif [ "$TOOLSET_NONE" -eq 1 ]; then CLAUDE_ARGV+=(--tools "")
+  fi
+  [ -n "$MCP_CONFIG" ] && CLAUDE_ARGV+=(--mcp-config "$(native_path "$MCP_CONFIG")")
   [ "$STRICT_MCP" -eq 1 ] && CLAUDE_ARGV+=(--strict-mcp-config)
   [ -n "$SYSTEM" ]    && CLAUDE_ARGV+=(--append-system-prompt "$SYSTEM")
   [ -n "$PERM_MODE" ] && CLAUDE_ARGV+=(--permission-mode "$PERM_MODE")

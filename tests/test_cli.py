@@ -1069,6 +1069,142 @@ def test_subagents_note_only_when_enabled(tmp_path, server):
     assert note not in (_sys_prompt(tmp_path, server, ["-r", "coder", "hi"]) or "")
 
 
+# ------------------------------------------------------------ --mcp-config / --toolset none
+
+def test_mcp_config_passes_file_and_strict(tmp_path, server, fake):
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text('{"mcpServers": {}}', encoding="utf-8")
+    r = run(tmp_path, ["--mcp-config", posix(cfg), "hi"], server, fake)
+    assert r.returncode == 0, r.stderr
+    argv, _ = record(tmp_path)
+    assert flag(argv, "--mcp-config").endswith("mcp.json")
+    assert "--strict-mcp-config" in argv
+
+
+def test_mcp_config_missing_file_is_usage(tmp_path, server, fake):
+    r = run(tmp_path, ["--mcp-config", posix(tmp_path / "nope.json"), "hi"], server, fake)
+    assert r.returncode == 2
+    assert "--mcp-config" in r.stderr
+    assert not (tmp_path / "record.txt").exists()
+
+
+def test_toolset_none_passes_empty_tools(tmp_path, server, fake):
+    r = run(tmp_path, ["--toolset", "none", "hi"], server, fake)
+    assert r.returncode == 0, r.stderr
+    argv, _ = record(tmp_path)
+    assert flag(argv, "--tools") == ""
+
+
+def test_toolset_none_with_web_and_subagents(tmp_path, server, fake):
+    assert run(tmp_path, ["--toolset", "none", "--web", "hi"], server, fake).returncode == 0
+    assert flag(record(tmp_path)[0], "--tools") == "WebFetch"
+    assert run(tmp_path, ["--toolset", "none", "--subagents", "hi"], server, fake).returncode == 0
+    assert flag(record(tmp_path)[0], "--tools") == "Task"
+
+
+def test_interactive_refuses_mcp_config(tmp_path, server, fake):
+    r = run(tmp_path, ["--interactive", "--mcp-config", "x.json"], server, fake)
+    assert r.returncode == 2
+    assert "--mcp-config" in r.stderr
+
+
+def test_until_done_refuses_mcp_config(tmp_path, server, fake):
+    task = tmp_path / "t.md"
+    task.write_text("# Checklist\n- [ ] a -- check: none\n", encoding="utf-8")
+    r = run(tmp_path, ["--until-done", posix(task), "--mcp-config", "x.json"], server, fake)
+    assert r.returncode == 2
+    assert "--mcp-config" in r.stderr
+
+
+def test_mcp_config_relative_path_is_the_callers(tmp_path, server, fake):
+    # run() executes with cwd=tmp_path, so tmp_path IS the caller's directory.
+    # The audited wd/ holds a DIFFERENT mcp.json: claude resolves a relative
+    # string inside -C, so handing it the bare name would let the directory
+    # under audit choose which MCP servers (arbitrary commands) start.
+    caller_cfg = tmp_path / "mcp.json"
+    caller_cfg.write_text('{"mcpServers": {"caller": {}}}', encoding="utf-8")
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "mcp.json").write_text('{"mcpServers": {"auditee": {}}}', encoding="utf-8")
+    r = run(tmp_path, ["-C", "wd", "--mcp-config", "mcp.json", "hi"], server, fake)
+    assert r.returncode == 0, r.stderr
+    got = flag(record(tmp_path)[0], "--mcp-config")
+    assert got is not None and got != "mcp.json"               # absolutized
+    assert same_path(got) == same_path(caller_cfg)            # the caller's file
+
+
+def test_mcp_config_relative_path_only_in_workdir_is_refused(tmp_path, server, fake):
+    # Only wd/mcp.json exists: --mcp-config names the CALLER's file, so this is
+    # a usage error, never a silent hand-off of the auditee's server list.
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "mcp.json").write_text('{"mcpServers": {}}', encoding="utf-8")
+    r = run(tmp_path, ["-C", "wd", "--mcp-config", "mcp.json", "hi"], server, fake)
+    assert r.returncode == 2
+    assert "--mcp-config" in r.stderr
+    assert not (tmp_path / "record.txt").exists()       # claude never ran
+
+
+def test_mcp_config_strict_even_with_all_tools(tmp_path, server, fake):
+    # --all-tools drops the strict default for CONFIGURED servers, but when the
+    # caller names the file only that file may load, on every setting.
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text('{"mcpServers": {}}', encoding="utf-8")
+    r = run(tmp_path, ["--all-tools", "--mcp-config", posix(cfg), "hi"], server, fake)
+    assert r.returncode == 0, r.stderr
+    assert "--strict-mcp-config" in record(tmp_path)[0]
+
+
+@pytest.mark.parametrize("args", [["--mcp-config", ""], ["--mcp-config="]], ids=["empty", "empty-eq"])
+def test_mcp_config_empty_is_usage(tmp_path, server, fake, args):
+    # An empty value is dropped by every later [ -n ] test: the run would look
+    # like an MCP run and load nothing. That is a typo, not "no MCP config".
+    r = run(tmp_path, [*args, "hi"], server, fake)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "--mcp-config" in r.stderr
+    assert not (tmp_path / "record.txt").exists()       # claude never ran
+
+
+@pytest.mark.parametrize("toolset", ["none,Read", "Read,none"], ids=["leading", "trailing"])
+def test_toolset_none_must_stand_alone(tmp_path, server, fake, toolset):
+    # 'none' MEANS the empty toolset; in a list it would be silently dropped
+    # (or read as a tool literally named 'none'), hiding what the caller asked.
+    r = run(tmp_path, ["--toolset", toolset, "hi"], server, fake)
+    assert r.returncode == 2, r.stderr
+    assert "--toolset: 'none' must stand alone" in r.stderr
+    assert not (tmp_path / "record.txt").exists()       # claude never ran
+
+
+def test_all_tools_with_toolset_none_does_not_claim_every_tool(tmp_path, server, fake):
+    # An explicit --toolset overrides --all-tools, so the all-tools warning
+    # would describe a run this is not: --toolset none leaves nothing available.
+    r = run(tmp_path, ["--all-tools", "--toolset", "none", "hi"], server, fake)
+    assert r.returncode == 0, r.stderr
+    assert "every built-in tool is available" not in r.stderr
+
+
+def test_toolset_none_with_web_and_subagents_together(tmp_path, server, fake):
+    assert run(tmp_path, ["--toolset", "none", "--web", "--subagents", "hi"],
+               server, fake).returncode == 0
+    assert flag(record(tmp_path)[0], "--tools") == "WebFetch,Task"
+
+
+def test_toolset_none_has_no_default_grants(tmp_path, server, fake):
+    # --toolset none leaves no built-in tool to grant, so the --allowed-tools grant
+    # must be empty: default grants for tools the run cannot have are stray grants.
+    # --web/--subagents still append what they were explicitly asked for.
+    assert run(tmp_path, ["--toolset", "none", "hi"], server, fake).returncode == 0
+    assert flag(record(tmp_path)[0], "--allowed-tools") == ""
+    assert run(tmp_path, ["--toolset", "none", "--web", "hi"], server, fake).returncode == 0
+    assert flag(record(tmp_path)[0], "--allowed-tools") == "WebFetch"
+    assert run(tmp_path, ["--toolset", "none", "--subagents", "hi"], server, fake).returncode == 0
+    assert flag(record(tmp_path)[0], "--allowed-tools") == "Task"
+    # an explicit -t is still the caller's own list, none or not
+    assert run(tmp_path, ["--toolset", "none", "-t", "mcp__x__y", "hi"], server,
+               fake).returncode == 0
+    assert flag(record(tmp_path)[0], "--allowed-tools") == "mcp__x__y"
+
+
 # ------------------------------------------------------------- --interactive
 
 def test_interactive_runs_claude_without_print(tmp_path, server, fake):
@@ -1152,6 +1288,7 @@ def test_interactive_passes_no_fence_flags(tmp_path, server, fake):
     (["-s", "extra text"], "-s"),
     (["--read-only"], "--read-only"),
     (["--strict-mcp"], "--strict-mcp"),
+    (["--mcp-config", "x.json"], "--mcp-config"),
     (["--permission-mode", "plan"], "--permission-mode"),
     (["--permission-mode=plan"], "--permission-mode"),
     (["--test-repo", "."], "--test-repo"),
@@ -1162,7 +1299,7 @@ def test_interactive_passes_no_fence_flags(tmp_path, server, fake):
 ], ids=["prompt", "prompt-after-dash", "f", "prompt-file-eq", "stdin", "until-done", "test",
         "write", "all-tools", "unrestricted", "toolset", "toolset-eq", "t", "tools", "tools-eq",
         "web", "subagents", "json", "o", "out-eq", "w", "detach", "bg", "resume", "r", "role-eq",
-        "role-file", "s", "read-only", "strict-mcp", "permission-mode", "permission-mode-eq",
+        "role-file", "s", "read-only", "strict-mcp", "mcp-config", "permission-mode", "permission-mode-eq",
         "test-repo", "max-rounds", "budget-seconds-eq", "allow-dirty", "warn-denials"])
 def test_interactive_refuses_incompatible_flags(tmp_path, server, fake, args, needle):
     # Every one of these shapes a HEADLESS run: a tool fence, a fixed permission
