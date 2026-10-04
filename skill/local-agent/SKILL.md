@@ -1,6 +1,6 @@
 ---
 name: local-agent
-description: Use when the user wants work done by the local, LAN or offline model and has not said which kind of work. This skill only routes: it runs a preflight, then hands off to local-coder, local-auditor or local-sweep. Trigger on "local agent", "use the local model", "have qwen do it", "run it locally", "offline model".
+description: Use when the user wants work done by the local, LAN or offline model and has not said which kind of work. This skill only routes: it runs a preflight, then hands off to local-coder, local-auditor, local-sweep or local-deep-research. Trigger on "local agent", "use the local model", "have qwen do it", "run it locally", "offline model".
 ---
 
 # Local agent (router)
@@ -20,6 +20,7 @@ Exit 0 means usable. Anything else: report the message and stop.
 | Make code changes against a spec until checks pass; fix failing tests | `local-coder` |
 | Review code, a diff or a repo; second opinion; explain why code differs from a spec; write a reproduction test | `local-auditor` |
 | The same read-only question over many files or items at once | `local-sweep` |
+| A question answered from the web: research it, deep research it, fact-check it against sources | `local-deep-research` |
 | Open an interactive session the user types into themselves | no skill: `qwen-cc` (section 3) |
 
 Load one at a time. If a job is two of these (fix then review), run them in order:
@@ -60,3 +61,5 @@ explicitly asked you to accept that prompt: the permission decision is theirs. `
   `qwen-cc` session is the user's own Claude Code, with its normal permission prompts).
 - Ask for extraction, not judgment (see local-auditor's `reference/limits.md`).
 - Judge results by content, not exit code.
+- `local-deep-research` is the one job that reaches the internet (search plus fetched
+  pages); every other route stays offline-capable.
