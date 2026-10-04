@@ -390,6 +390,16 @@ def test_parse_audit():
     assert supervisor.parse_audit("I looked and it seems fine", 0) is None
 
 
+@pytest.mark.parametrize("value,logged", [
+    ("D2", True), ("D2 (also D4, D6, D8, D9)", True), ("**D3**", True), ("`D3`", True),
+    ("d5.", True), ("D10", False), ("D0", False), ("NONE", False), ("see D2", False),
+    ("", False),
+])
+def test_parse_audit_accepts_a_leading_d_number(value, logged):
+    txt = "## CONTRADICTION\nSPEC: s\nCODE: a.py:1\nLOGGED: %s\n" % value
+    assert supervisor.parse_audit(txt, 9) == ([] if logged else ["a.py:1"])
+
+
 def test_parse_audit_empty_value_does_not_swallow_next_line():
     txt = "## contradiction:\nSPEC:\nCODE: src/n.py:3\nLOGGED: none\n"
     assert supervisor.parse_audit(txt, 2) == ["src/n.py:3"]

@@ -200,6 +200,11 @@ or, if there are none, the single line: NO CONTRADICTIONS
 """
 _CONTRA = re.compile(r"^##\s*CONTRADICTION\s*:?\s*$", re.M | re.I)
 _AFIELD = re.compile(r"^[ \t>*_-]*\**(SPEC|CODE|LOGGED)\**:[ \t]*\**[ \t]*(.*?)[ \t\r]*$", re.M | re.I)
+# A real audit cites more than the one number it was logged under:
+# "D2 (also D4, D6, D8, D9)". What matters is that the field STARTS with a
+# D-number (only "*" emphasis or backticks around it allowed); the rest is
+# prose, and only the first number gets the range check.
+_LOGGED_D = re.compile(r"^[*`]*D(\d+)(?:\W|$)", re.I)
 MAX_AUDIT_DIFF = 120_000
 
 
@@ -218,7 +223,7 @@ def parse_audit(text, n_logged):
     for i, m in enumerate(heads):
         seg = text[m.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
         f = {k.lower(): v for k, v in _AFIELD.findall(seg)}
-        logged = re.fullmatch(r"D(\d+)", f.get("logged", "").strip(), re.I)
+        logged = _LOGGED_D.match(f.get("logged", "").strip())
         if not logged or not 1 <= int(logged.group(1)) <= n_logged:
             out.append(f.get("code") or "(unlocated)")
     return out
