@@ -43,7 +43,7 @@ def append_line(path, line):
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             break
-        except FileExistsError:
+        except (FileExistsError, PermissionError):   # Windows: a lock being deleted refuses create
             if time.time() > deadline:
                 raise
             time.sleep(0.005)
