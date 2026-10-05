@@ -441,3 +441,31 @@ def test_symlinked_base_file_falls_back_to_head(tmp_path):
     assert "+ONE" in patch
     sandbox.remove(target, sb)
     assert decoy.exists()                                 # remove() unlinked the link only
+
+
+@pytest.mark.parametrize("kind,attrs", [("git", None), ("git", "* text=auto\n"), ("copy", None)])
+def test_sandboxes_ignore_the_users_global_line_endings(tmp_path, monkeypatch, kind, attrs):
+    # Windows Git Bash ships core.autocrlf=true globally: a sandbox must still check files
+    # out byte-for-byte as committed, so a patch made in one sandbox applies in another.
+    files = {"main.py": "print(1)\n"}
+    if attrs:
+        files[".gitattributes"] = attrs
+    if kind == "git":
+        target = git_repo(tmp_path / "target", files)
+    else:
+        target = tmp_path / "target"
+        target.mkdir()
+        for rel, text in files.items():
+            (target / rel).write_text(text, encoding="utf-8", newline="\n")
+    cfg = tmp_path / "windows-like.gitconfig"
+    cfg.write_text("[core]\n\tautocrlf = true\n\teol = crlf\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg))
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "probe")
+    assert (sb / "main.py").read_bytes() == b"print(1)\n"
+    assert status(sb) == ""
+    (sb / "main.py").write_bytes(b"print(2)\n")
+    patch = sandbox.diff(sb)
+    assert "+print(2)" in patch and "\r" not in patch
+    res = sandbox.run_cmd(target, tmp_path / "run" / "sandboxes" / "check", "cat main.py", patch=patch)
+    assert res["applied"] and res["rc"] == 0 and "print(2)" in res["output_tail"]
+    sandbox.remove(target, sb)

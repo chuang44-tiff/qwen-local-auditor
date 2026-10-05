@@ -165,6 +165,21 @@ def _exclude_build_artifacts(path):
         fh.write("".join(p + "\n" for p in BUILD_IGNORE))
 
 
+def _pin_eol(path):
+    """Record core.autocrlf=false in the sandbox repo's OWN config, before its working
+    tree is materialised, so every git command run inside the sandbox -- this module's
+    checkout as well as an agent's unpinned `git stash` / `git apply` -- sees the same
+    line endings whatever the user's global core.autocrlf/core.eol say. GIT_ID's `-c`
+    flags cover only this module's own commands: with the pin missing from the config,
+    a global core.autocrlf=true made the unpinned checkout below convert the checked-out
+    files, git still called them clean, and every later diff/apply mismatched --
+    "patch does not apply". core.eol is pinned to lf as well: a target whose
+    .gitattributes says `text=auto` would otherwise still be checked out with the user's
+    core.eol (crlf) even with autocrlf off."""
+    _git(["config", "core.autocrlf", "false"], path)
+    _git(["config", "core.eol", "lf"], path)
+
+
 def create(target, path):
     """A fresh sandbox of target at path (any old one there is removed first). Both paths
     become absolute: the clone runs with the sandbox's parent as its cwd, so a relative
@@ -192,12 +207,16 @@ def create(target, path):
         _git(["clone", "--shared", "--no-checkout", "--template=%s" % template, "-q",
               str(target), str(path)], path.parent)
         _git(["remote", "remove", "origin"], path)           # a push cannot reach the target
-        _git(["checkout", "-q", "--detach", sha], path)
+        _pin_eol(path)                                       # before the checkout writes the
+        _git(["checkout", "-q", "--detach", sha], path)       # tree: byte-exact whatever the
+                                                               # user's global EOL settings
         _exclude_build_artifacts(path)                       # after the checkout: only NEW
         _base_file(path).write_text(sha + "\n", encoding="utf-8")
         return path
     shutil.copytree(str(target), str(path), symlinks=True, ignore=shutil.ignore_patterns(*SKIP))
     _git(["init", "-q"], path)
+    _pin_eol(path)                                           # the config pin outlives create():
+    # every later git in the sandbox, pinned or not, is immune to the user's global EOL
     _git(GIT_ID + ["add", "-A", "--force"], path)            # ignored-but-copied files too
     _git(GIT_ID + ["commit", "-q", "--allow-empty", "--no-verify", "-m", "sandbox base"], path)
     _exclude_build_artifacts(path)                           # after the baseline commit: the
