@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install contract, in a throwaway HOME: the five skills are linked (or copied with a
-# marker where symlinks are unavailable), five forwarders are written, the config
+# Install contract, in a throwaway HOME: the six skills are linked (or copied with a
+# marker where symlinks are unavailable), six forwarders are written, the config
 # is seeded once and never overwritten, and --uninstall removes what was added.
 #
 # Runs install.sh and the forwarders under $TEST_BASH when set, so a CI leg that
@@ -38,19 +38,22 @@ fi
 [ -f "$SKILL/qwen-agent.sh" ] || fail "skill contents missing"
 [ -f "$SKILL/qwen-cc.sh" ] || fail "skill contents missing (qwen-cc.sh)"
 [ -f "$SKILL/qwen-deep-research.sh" ] || fail "skill contents missing (qwen-deep-research.sh)"
+[ -f "$SKILL/qwen-swarm.sh" ] || fail "skill contents missing (qwen-swarm.sh)"
 [ -f "$CFG" ] || fail "config was not seeded from config.example"
 [ -x "$FAKE/.local/bin/qwen-agent" ] || fail "qwen-agent forwarder missing"
 [ -x "$FAKE/.local/bin/qwen-sweep" ] || fail "qwen-sweep forwarder missing"
-for s in local-agent local-coder local-sweep local-deep-research; do
+for s in local-agent local-coder local-sweep local-deep-research local-swarm; do
   [ -e "$FAKE/.claude/skills/$s/SKILL.md" ] || fail "skill $s not installed"
 done
 [ -x "$FAKE/.local/bin/qwen-test" ] || fail "qwen-test forwarder missing"
 [ -x "$FAKE/.local/bin/qwen-cc" ] || fail "qwen-cc forwarder missing"
 [ -x "$FAKE/.local/bin/qwen-deep-research" ] || fail "qwen-deep-research forwarder missing"
+[ -x "$FAKE/.local/bin/qwen-swarm" ] || fail "qwen-swarm forwarder missing"
 "$B" "$FAKE/.local/bin/qwen-agent" --version >/dev/null 2>&1 || fail "the qwen-agent forwarder does not run"
 "$B" "$FAKE/.local/bin/qwen-sweep" --version >/dev/null 2>&1 || fail "the qwen-sweep forwarder does not run"
 "$B" "$FAKE/.local/bin/qwen-cc" --version >/dev/null 2>&1 || fail "the qwen-cc forwarder does not run"
 "$B" "$FAKE/.local/bin/qwen-deep-research" --version >/dev/null 2>&1 || fail "the qwen-deep-research forwarder does not run"
+"$B" "$FAKE/.local/bin/qwen-swarm" --version >/dev/null 2>&1 || fail "the qwen-swarm forwarder does not run"
 
 # An untouched config means there is no server to check yet: say what to do next.
 run_install
@@ -77,12 +80,13 @@ run_install --uninstall
 [ ! -e "$SKILL" ] && [ ! -L "$SKILL" ] || fail "--uninstall left the skill behind"
 [ ! -e "$FAKE/.local/bin/qwen-agent" ] || fail "--uninstall left qwen-agent behind"
 [ ! -e "$FAKE/.local/bin/qwen-sweep" ] || fail "--uninstall left qwen-sweep behind"
-for s in local-agent local-coder local-auditor local-sweep local-deep-research; do
+for s in local-agent local-coder local-auditor local-sweep local-deep-research local-swarm; do
   [ ! -e "$FAKE/.claude/skills/$s" ] || fail "uninstall left skill $s"
 done
 [ ! -e "$FAKE/.local/bin/qwen-test" ] || fail "uninstall left qwen-test"
 [ ! -e "$FAKE/.local/bin/qwen-cc" ] || fail "uninstall left qwen-cc"
 [ ! -e "$FAKE/.local/bin/qwen-deep-research" ] || fail "uninstall left qwen-deep-research"
+[ ! -e "$FAKE/.local/bin/qwen-swarm" ] || fail "uninstall left qwen-swarm"
 [ -f "$CFG" ] || fail "--uninstall must keep the user's config"
 
 # A partial checkout must be refused, not half-installed.

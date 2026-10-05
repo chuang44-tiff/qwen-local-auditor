@@ -16,20 +16,24 @@ question. Do not research a vague question.
     qwen-deep-research --check
     qwen-deep-research "PRECISE QUESTION" [--depth quick|standard|deep|overnight] [--max-agents N]
                                           [--max-items N]
-                                          [--seats N] [--web-seats N] [--retries N] [--hours H]
+                                          [--seats N] [--web-seats N] [--timeout S] [--retries N] [--rounds N|until] [--hours H]
                                           [--effort LEVEL] [--role-effort ROLE=LEVEL[,ROLE=LEVEL...]]
 
 Run it with run_in_background: a standard run takes tens of minutes. The `--depth` presets:
 
-| `--depth` | angles | sources | claims | voters | per-item budget | retries |
-|---|---|---|---|---|---|---|
-| `quick` | 3 | 6 | 10 | 1 | 240 s | 1 |
-| `standard` (default) | 5 | 15 | 25 | 3 | 240 s | 1 |
-| `deep` | 8 | 30 | 50 | 3 | 600 s | 2 |
-| `overnight` | 10 | 40 | 80 | 5 | 900 s | 3 |
+| `--depth` | angles | sources | claims | voters | per-item budget | retries | rounds |
+|---|---|---|---|---|---|---|---|
+| `quick` | 3 | 6 | 10 | 1 | 240 s | 1 | 1 |
+| `standard` (default) | 5 | 15 | 25 | 3 | 240 s | 1 | 1 |
+| `deep` | 8 | 30 | 50 | 3 | 600 s | 2 | 2 |
+| `overnight` | 10 | 40 | 80 | 5 | 900 s | 3 | until 8 h |
 
 `--depth quick` for a fast look, `deep` for a thorough one. Deeper presets are meant for
 long unattended runs: locally, time is cheap, so they trade wall time for completeness.
+From round 2 a planner turns the last report's gaps into new angles and re-checks of
+unclear claims; the run stops early when the planner finds nothing new or a round adds
+no supported claim, and every round leaves `report-round-<r>.md`. `--rounds N|until`
+overrides the preset (`until` needs `--hours`).
 `--max-agents` (default 8) caps agents started per phase; work is split among them, never
 cut (it must be at least the voters per claim — 5 for `overnight`). `--max-items` (default
 10) caps the items one agent holds: a phase with more items than `--max-agents x --max-items`
@@ -56,7 +60,7 @@ and synthesis always runs. Each agent is capped at 4 h; --hours bounds the whole
 the stored deadline.
 `--effort LEVEL` sets the reasoning effort of every role (qwen-agent validates
 the level), and `--role-effort ROLE=LEVEL[,ROLE=LEVEL...]` — roles scoper, searcher, reader,
-verifier, synthesizer — beats it for single roles; both are stored with the run and are part
+verifier, planner, synthesizer — beats it for single roles; both are stored with the run and are part
 of each agent's cache key. `--out DIR` picks the run folder; an existing run folder cannot be reused
 without `--resume`.
 
@@ -93,14 +97,17 @@ What to do after each outcome:
 
       qwen-deep-research --resume <run folder>
 
-  On resume only `--seats`, `--web-seats`, `--timeout`, `--retries`, `--hours`, `--effort`
-  and `--role-effort` may be given; a `--timeout` there applies only to the agents that
-  still have to run, the stored effort is reused unless `--effort`/`--role-effort` is given
-  again (a `--role-effort` there merges into the stored dict, later wins; `--effort`
-  replaces the stored global level), and the stored deadline stands unless `--hours` starts
-  a new one from then — work the old deadline left unrun is logged as `deadline` in
-  `run.log`. The settings a resume ran with are written back to `config.json` for the
-  next one.
+  On resume the run folder supplies the question, the depth and the caps — asking for those
+  (or `--stdin`, `--out`, `--set`, `--target`) is a usage error — while `--seats`,
+  `--web-seats`, `--timeout`, `--retries`, `--hours`, `--effort` and `--role-effort` may be
+  given, as may the engine's `--rounds` and `--keep-sandboxes` (this command's own resume
+  message names only the seven, and `--keep-sandboxes` keeps nothing here: research has no
+  sandboxes); a `--timeout` there applies only to the agents that still have to run. The
+  stored effort is reused unless `--effort`/`--role-effort` is given again (a
+  `--role-effort` there merges into the stored dict, later wins; `--effort` replaces the
+  stored global level), and the stored deadline stands unless `--hours` starts a new one
+  from then — work the old deadline left unrun is logged as `deadline` in `run.log`. The
+  settings a resume ran with are written back to `config.json` for the next one.
 
 For long or multi-line questions, pass the question through a file, not argv:
 

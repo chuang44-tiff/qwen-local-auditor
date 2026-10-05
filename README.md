@@ -3,20 +3,23 @@
 Run Claude Code against a model you serve yourself. `qwen-agent` starts a separate,
 headless Claude Code process pointed at your own server (vLLM serving Qwen, or anything
 that speaks the Anthropic Messages API), fenced so that by default it can only read. On
-top of it sit five Claude Code skills and five commands: a free second opinion on a diff,
+top of it sit six Claude Code skills and six commands: a free second opinion on a diff,
 bulk reading you would rather not spend frontier tokens on, a coding loop that runs until
-its checks pass, an interactive session you can watch, and web research with every claim
-checked by independent agents. The "qwen" in the name is historical; any model works.
+its checks pass, an interactive session you can watch, web research with every claim
+checked by independent agents, and a swarm that runs a whole workflow — many agents, in
+rounds, over a codebase or over the web. The "qwen" in the name is historical; any model
+works.
 
 - **`qwen-agent`**: one question, one headless session, one answer. Read-only unless you say otherwise.
 - **`qwen-sweep`**: the same question over many files, a diff, a set of documents or a large log.
-- **`qwen-test`**: the one shell command a local agent is ever granted: your test command, in a throwaway git worktree.
+- **`qwen-test`**: your test command in a throwaway git worktree — the one shell command a `qwen-agent --test` run is granted.
 - **`qwen-cc`**: an interactive session on the local model inside tmux, which Claude Code can read, type into and stop.
 - **`qwen-deep-research`**: a swarm of local sessions that researches a question on the web and writes a cited report.
+- **`qwen-swarm`**: a workflow — the built-in `research` or `debug`, or one you write — run by many local agents in rounds, often overnight.
 
-The skills (`local-agent` routes; `local-auditor`, `local-sweep`, `local-coder` and
-`local-deep-research` do the work) teach your Claude Code session when and how to use
-these, so "have the local model review this" is enough.
+The skills (`local-agent` routes; `local-auditor`, `local-sweep`, `local-coder`,
+`local-deep-research` and `local-swarm` do the work) teach your Claude Code session when
+and how to use these, so "have the local model review this" is enough.
 
 ## Requirements
 
@@ -24,8 +27,10 @@ these, so "have the local model review this" is enough.
   `/v1/messages`. vLLM does, and also lists models at `/v1/models`, which the tools use to
   pick the model and read its context window.
 - bash (Linux, macOS, or Git Bash on Windows), Python 3.8+ (stdlib only), curl, git.
-- tmux for `qwen-cc`. Internet and a search backend (SearXNG or a Brave key) for
-  `qwen-deep-research` only; everything else runs offline.
+- tmux for `qwen-cc`. Internet and a search backend (SearXNG or a Brave key) are needed only
+  by research — `qwen-deep-research`, or a `qwen-swarm` workflow whose roles have a `search`
+  or `web` fence. Nothing else needs the network to do its work, and no other fence adds a
+  network tool; a swarm `sandbox` agent does have a shell, and that shell is yours.
 
 Servers without `/v1/models`, Windows and macOS notes:
 [reference/configuration.md](skill/local-auditor/reference/configuration.md).
@@ -38,7 +43,7 @@ cd qwen-local-auditor
 ./install.sh
 ```
 
-This symlinks the five skills into `~/.claude/skills/`, writes the five commands into
+This symlinks the six skills into `~/.claude/skills/`, writes the six commands into
 `~/.local/bin` (keep it on `PATH`) and copies `config.example` to
 `~/.config/qwen-agent/config` once, never overwriting it. Then point the config at your
 server and check it:
@@ -106,18 +111,36 @@ qwen-deep-research --check                             # model and search backen
 qwen-deep-research "PRECISE QUESTION" --depth quick    # quick, standard, deep or overnight
 ```
 
+**A swarm for any job.** `qwen-swarm` runs a workflow (a manifest, a short Python script
+and role files) on many local agents, in rounds, often overnight; `qwen-deep-research` is
+its `research` workflow. The built-in `debug` workflow finds a bug's root cause and a
+patch it has checked in throwaway copies of your repo, never in the repo itself. Writing
+your own workflow: [reference/swarm.md](skill/local-auditor/reference/swarm.md).
+
+```bash
+qwen-swarm --list                                        # built-in workflows
+qwen-swarm debug "add(2, 3) returns -1" --target . --out ../debug-run --set repro="python -m pytest tests/test_calc.py"
+qwen-swarm --check ./my-workflow                         # validate before a long run
+```
+
 ## Safety
 
 A bare run can only read: the toolset is `Read,Glob,Grep`, MCP servers are dropped, and
 editing, shell access, web access and subagents are each a separate flag; any run that can
 modify files or run a shell prints a warning. `--test` opens exactly one command,
 `qwen-test`, under `claude --restricted`, but the tests it runs are your repository's code
-running as you, so use it only on code you would run yourself. No run reaches the web
-unless you pass `--web`, and that adds only `WebFetch`; `qwen-deep-research` is the one
-command that needs the internet, and its agents work in empty folders with no file tools.
-The child process never inherits your session's API key, provider routing or model
-overrides, so a prompt cannot silently go to a cloud provider. The measured failure modes,
-and how to read a verdict: [reference/limits.md](skill/local-auditor/reference/limits.md).
+running as you, so use it only on code you would run yourself. A `qwen-agent` run reaches
+the web only when you pass `--web`, which adds `WebFetch` and nothing else. Research goes
+online on purpose — `qwen-deep-research`, `qwen-swarm research`, or any workflow with a
+`search` or `web` fence — and its agents work in empty folders with no file tools. A swarm
+never writes its `--target`: `read` roles only read it, and the edits and shell of a
+`sandbox` role, along with the commands the engine runs to reproduce the bug and check a
+patch, happen in a throwaway clone of it; you apply a winning patch with `git apply`. That
+clone is a copy, not a jail — its shell runs as you, with your network — so run such a
+workflow only on code you would run yourself. The child process never inherits your
+session's API key, provider routing or model overrides, so a prompt cannot silently go to
+a cloud provider. The measured failure modes, and how to read a verdict:
+[reference/limits.md](skill/local-auditor/reference/limits.md).
 
 ## Benchmark
 
@@ -141,6 +164,7 @@ All under `skill/local-auditor/reference/`; the installed skills read the same f
 | [sweep.md](skill/local-auditor/reference/sweep.md) | `qwen-sweep`: builders, flags, output files, the engine, writing a builder |
 | [interactive.md](skill/local-auditor/reference/interactive.md) | `qwen-agent --interactive` and `qwen-cc` |
 | [deep-research.md](skill/local-auditor/reference/deep-research.md) | `qwen-deep-research`: SearXNG or Brave setup, depth presets, flags, run folder, resume |
+| [swarm.md](skill/local-auditor/reference/swarm.md) | `qwen-swarm`: workflows, the manifest, fences, the `wf` API, `--check`, the debug workflow |
 | [limits.md](skill/local-auditor/reference/limits.md) | the fence at a glance, and what this lane gets wrong, measured |
 | [vllm.md](skill/local-auditor/reference/vllm.md) | serving Qwen on vLLM for Claude Code: the chat-template fix that keeps the prefix cache |
 | [benchmark.md](skill/local-auditor/reference/benchmark.md) | full method and numbers |
@@ -148,7 +172,7 @@ All under `skill/local-auditor/reference/`; the installed skills read the same f
 The skills' `SKILL.md` files are the short version your Claude Code session reads:
 [local-agent](skill/local-agent/SKILL.md) (router), [local-auditor](skill/local-auditor/SKILL.md),
 [local-sweep](skill/local-sweep/SKILL.md), [local-coder](skill/local-coder/SKILL.md),
-[local-deep-research](skill/local-deep-research/SKILL.md). Each command's `--help` is its
+[local-deep-research](skill/local-deep-research/SKILL.md), [local-swarm](skill/local-swarm/SKILL.md). Each command's `--help` is its
 complete flag reference.
 
 **Troubleshooting.** `qwen-agent --preflight-only` names what is wrong (server unreachable,

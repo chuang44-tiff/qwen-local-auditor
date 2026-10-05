@@ -1,6 +1,6 @@
 ---
 name: local-agent
-description: Use when the user wants work done by the local, LAN or offline model and has not said which kind of work. This skill only routes: it runs a preflight, then hands off to local-coder, local-auditor, local-sweep or local-deep-research. Trigger on "local agent", "use the local model", "have qwen do it", "run it locally", "offline model".
+description: Use when the user wants work done by the local, LAN or offline model and has not said which kind of work. This skill only routes: it runs a preflight, then hands off to local-coder, local-auditor, local-sweep, local-deep-research or local-swarm. Trigger on "local agent", "use the local model", "have qwen do it", "run it locally", "offline model".
 ---
 
 # Local agent (router)
@@ -21,6 +21,7 @@ Exit 0 means usable. Anything else: report the message and stop.
 | Review code, a diff or a repo; second opinion; explain why code differs from a spec; write a reproduction test | `local-auditor` |
 | The same read-only question over many files or items at once | `local-sweep` |
 | A question answered from the web: research it, deep research it, fact-check it against sources | `local-deep-research` |
+| Debug a bug down to a checked patch; an overnight multi-agent run; a custom swarm workflow | `local-swarm` |
 | Open an interactive session the user types into themselves | no skill: `qwen-cc` (section 3) |
 
 Load one at a time. If a job is two of these (fix then review), run them in order:
@@ -57,9 +58,15 @@ explicitly asked you to accept that prompt: the permission decision is theirs. `
 ## 4. What stays the same in all of them
 
 - Read-only is the default; writing and tests are explicit flags.
-- The only shell command a headless local agent ever gets is `qwen-test` (an interactive
-  `qwen-cc` session is the user's own Claude Code, with its normal permission prompts).
+- A plain `qwen-agent` run gets no shell: `qwen-test` is the one command `--test` grants it
+  (an interactive `qwen-cc` session is the user's own Claude Code, with its normal
+  permission prompts). A `local-swarm` workflow chooses its tools per role's fence instead:
+  a `sandbox` agent gets a shell inside a throwaway clone of the target, and a `read` agent
+  gets read-only tools (Read, Glob, Grep) in the target itself. Neither ever writes the
+  target — a patch is a file you apply with `git apply`.
 - Ask for extraction, not judgment (see local-auditor's `reference/limits.md`).
 - Judge results by content, not exit code.
-- `local-deep-research` is the one job that reaches the internet (search plus fetched
-  pages); every other route stays offline-capable.
+- `local-deep-research` (and a `local-swarm` workflow with `search` or `web` roles) is the
+  only job that needs the internet (search plus fetched pages); every other route runs
+  without it — but a swarm `sandbox` agent has a shell, and that shell is the user's own,
+  with their network.

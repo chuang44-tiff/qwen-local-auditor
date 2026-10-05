@@ -49,7 +49,8 @@ def test_skill_lists_every_builder():
         assert b in t
 
 
-FAMILY = ("local-agent", "local-coder", "local-auditor", "local-sweep", "local-deep-research")
+FAMILY = ("local-agent", "local-coder", "local-auditor", "local-sweep", "local-deep-research",
+          "local-swarm")
 
 
 def test_every_family_skill_exists_and_is_small():
@@ -63,7 +64,8 @@ def test_every_family_skill_exists_and_is_small():
 def test_router_names_every_sub_skill_and_preflights():
     t = (ROOT / "skill" / "local-agent" / "SKILL.md").read_text(encoding="utf-8")
     assert "qwen-agent --preflight-only" in t
-    for name in ("local-coder", "local-auditor", "local-sweep", "local-deep-research"):
+    for name in ("local-coder", "local-auditor", "local-sweep", "local-deep-research",
+                 "local-swarm"):
         assert name in t
 
 
@@ -188,3 +190,116 @@ def test_skill_guides_each_outcome():
     t = DR_SKILL.read_text(encoding="utf-8")
     for needle in ("run.log", "--resume", "--stdin", "codebase"):
         assert needle in t, needle
+
+
+SW_SKILL = ROOT / "skill" / "local-swarm" / "SKILL.md"
+SW_REF = REF / "swarm.md"
+
+
+def test_swarm_skill_documents_the_loop_and_exit_codes():
+    t = SW_SKILL.read_text(encoding="utf-8")
+    for needle in ("qwen-swarm --list", "qwen-swarm --check", "--resume", "--target",
+                   "--set repro=", "reference/swarm.md", "run.log", "run_in_background"):
+        assert needle in t, needle
+    for code in ("0", "2", "3", "4", "5", "8", "130"):
+        assert re.search(r"^\| %s \|" % code, t, re.M), "exit %s not in a table row" % code
+
+
+def test_swarm_reference_covers_the_api_and_the_fences():
+    t = SW_REF.read_text(encoding="utf-8")
+    for needle in ("wf.agent", "wf.fan_out", "wf.vote", "wf.rounds()", "wf.converged",
+                   "wf.steps.run_cmd", "wf.save", "wf.report", "wf.fail", "wf.goal_unmet",
+                   "validate(cfg)", "check.py", "--keep-sandboxes", "stop_reason"):
+        assert needle in t, needle
+    for fence in ("`none`", "`search`", "`web`", "`read`", "`sandbox`"):
+        assert fence in t, fence
+
+
+def test_swarm_reference_matches_the_debug_manifest():
+    import json
+    m = json.loads((ROOT / "skill" / "local-auditor" / "lib" / "workflows" / "debug"
+                    / "workflow.json").read_text(encoding="utf-8"))
+    t = SW_REF.read_text(encoding="utf-8")
+    for depth, p in m["presets"].items():
+        rounds = ("until, %g h" % p["hours"]) if p["rounds"] == "until" else str(p["rounds"])
+        row = "| %s | %d | %d | %d | %d | %s |" % (depth, p["hypotheses"], p["voters"],
+                                                  p["budget"], p["retries"], rounds)
+        assert row in t, row
+
+
+def _qwen_swarm_examples(doc):
+    """Every `qwen-swarm ...` example a page shows, a wrapped one joined into a single
+    line (a synopsis or example continues on the indented `[...]` lines under it)."""
+    lines = doc.read_text(encoding="utf-8").splitlines()
+    out = []
+    for i, line in enumerate(lines):
+        s = line.strip().strip("`").strip("$ ")
+        if not s.startswith("qwen-swarm "):
+            continue
+        j = i + 1
+        while j < len(lines) and lines[j].strip().startswith("["):
+            s += " " + lines[j].strip().strip("`")
+            j += 1
+        out.append(s)
+    return out
+
+
+def test_swarm_examples_put_the_run_folder_outside_the_target():
+    # a run folder inside --target is refused (exit 2): an example that passes --target
+    # without saying where the run goes is an example that does not run
+    for doc in (README, SW_SKILL, SW_REF):
+        for ex in _qwen_swarm_examples(doc):
+            if "--target" in ex:
+                assert "--out" in ex, "%s: %s" % (doc.name, ex)
+    assert "outside the target" in SW_REF.read_text(encoding="utf-8")
+
+
+def test_deep_research_docs_list_the_stop_reasons_the_engine_writes():
+    t = DR_REF.read_text(encoding="utf-8")
+    for needle in ("`rounds`", "`hours`", "`deadline`", "`converged: <reason>`",
+                   "the planner produced no plan", "the planner found no new angle",
+                   "added no supported claim", "units dropped in round"):
+        assert needle in t, needle
+
+
+def test_deep_research_docs_cover_rounds():
+    t = DR_REF.read_text(encoding="utf-8")
+    for needle in ("planner", "--rounds", "round-2/", "report-round-", "qwen-swarm"):
+        assert needle in t, needle
+    assert "planner" in DR_SKILL.read_text(encoding="utf-8")
+
+
+README = ROOT / "README.md"
+CONFIG_REF = REF / "configuration.md"
+INSTALL = ROOT / "install.sh"
+# the counts are prose in the pages a reader sees, so they go stale one skill at a time;
+# install.sh is the only thing that knows what it installs
+NUMBER_WORDS = "one two three four five six seven eight nine ten eleven twelve".split()
+
+
+def _installs():
+    """(skill names, command names) install.sh installs, read out of the installer."""
+    t = INSTALL.read_text(encoding="utf-8")
+    skills = re.search(r'SKILLS="([^"]*)"', t).group(1).split()
+    commands = re.findall(r"^forwarder\s+(\S+)", t, re.M)
+    assert skills and commands, "install.sh names nothing it installs"
+    return skills, commands
+
+
+def _number_word(n):
+    assert 0 < n <= len(NUMBER_WORDS), "install.sh installs %d; no word for that count" % n
+    return NUMBER_WORDS[n - 1]
+
+
+def test_readme_and_configuration_count_what_install_sh_installs():
+    skills, commands = _installs()
+    stated = {"skills": _number_word(len(skills)), "commands": _number_word(len(commands))}
+    for doc in (README, CONFIG_REF):
+        t = doc.read_text(encoding="utf-8")
+        for thing, word in stated.items():
+            assert "%s %s" % (word, thing) in t, \
+                "%s never says it installs %s %s" % (doc.name, word, thing)
+            stale = [w for w in NUMBER_WORDS if w != word and "%s %s" % (w, thing) in t]
+            assert not stale, "%s still says '%s %s'" % (doc.name, stale[0], thing)
+        for name in skills + commands:
+            assert name in t, "%s never names %s" % (doc.name, name)

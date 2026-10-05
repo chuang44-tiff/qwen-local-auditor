@@ -6,10 +6,15 @@ report. Every unit of work is a real session with real tools; the harness only s
 phases, splits the work, caps how many agents run at once, and does the mechanical steps in
 between. The short version your session loads is `skill/local-deep-research/SKILL.md`.
 
+`qwen-deep-research` is the built-in `research` workflow of `qwen-swarm`
+([swarm.md](swarm.md)) under its old name: `qwen-swarm research "QUESTION"` runs the same
+pipeline, and every flag, `QWEN_DR_*` variable, exit code and run-folder file below is
+unchanged.
+
 ## What it does
 
 Each phase's agents are named for the phase — scoper, searcher, reader, verifier,
-synthesizer:
+planner (from round 2), synthesizer:
 
 | phase | role | work per agent | tools |
 |---|---|---|---|
@@ -17,6 +22,7 @@ synthesizer:
 | search | searcher | one angle: its queries through `search`, the most useful sources picked | `search` |
 | fetch | reader | one source: fetched, its falsifiable claims pulled out with snippets | `WebFetch`, `search` |
 | verify | verifier | its votes, adversarially: break the claim, then check it again | `WebFetch`, `search` |
+| plan (round 2+) | planner | the claims so far and the last report's Gaps, into new angles and claims to re-check (1 agent) | none |
 | synthesize | synthesizer | the voted claims, into the report (1 agent) | none |
 
 Every agent is a Claude Code session on the local model, run through `qwen-agent`.
@@ -34,16 +40,36 @@ agreement, so a dropped verifier costs confidence instead of quietly helping.
 
 ### Depth presets
 
-| `--depth` | angles | sources | claims | voters | per-item budget | retries |
-|---|---|---|---|---|---|---|
-| `quick` | 3 | 6 | 10 | 1 | 240 s | 1 |
-| `standard` (default) | 5 | 15 | 25 | 3 | 240 s | 1 |
-| `deep` | 8 | 30 | 50 | 3 | 600 s | 2 |
-| `overnight` | 10 | 40 | 80 | 5 | 900 s | 3 |
+| `--depth` | angles | sources | claims | voters | per-item budget | retries | rounds |
+|---|---|---|---|---|---|---|---|
+| `quick` | 3 | 6 | 10 | 1 | 240 s | 1 | 1 |
+| `standard` (default) | 5 | 15 | 25 | 3 | 240 s | 1 | 1 |
+| `deep` | 8 | 30 | 50 | 3 | 600 s | 2 | 2 |
+| `overnight` | 10 | 40 | 80 | 5 | 900 s | 3 | until the 8 h deadline |
 
 With one voter, a single `refuted` vote kills the claim — so `quick` is a look-around, not a
 verdict. Use `standard` before you repeat anything the report says. Deeper presets are meant
 for long unattended runs: locally, time is cheap, so they trade wall time for completeness.
+
+### Rounds (deep, overnight)
+
+Round 1 is the pipeline above. From round 2 a planner reads the question, the claims so
+far by verdict and the last report's Gaps section, and returns new angles (each with a
+reason; an angle or query repeating an earlier one is dropped) plus unclear claims worth
+fresh votes. The round searches only the new angles (at most the `angles` cap — the
+preset's value, or `--set angles=N` on `qwen-swarm`), skips URLs seen in earlier rounds,
+drops claims that repeat an earlier claim, and verifies the new claims plus the re-checks:
+votes accumulate, and a claim's verdict is the majority of all votes requested for it.
+Synthesis runs after every round. The run stops when the rounds are done, the planner
+finds nothing new, a round adds no supported claim, or the deadline passes before the next
+round, and `totals.json` says which in `stop_reason`: `rounds` (the round count is done),
+`hours` (the `--hours` deadline passed, everything queued ran), `deadline` (the deadline
+passed and left items unrun) or `converged: <reason>`, where research's reasons are
+`units dropped in round <r>: --resume retries them`, `round <r> added no supported claim`,
+`the planner produced no plan` and `the planner found no new angle`.
+`--rounds N` (or `until`, which needs `--hours`) overrides the preset; a resume may change
+it too (the flag came in with the engine, so this command's own resume message does not
+name it — see the resume section below).
 
 ## Setup: a search backend
 
@@ -105,7 +131,7 @@ qwen-deep-research --check      # "ok: model and search reachable", or it names 
 ```bash
 qwen-deep-research "QUESTION" [--depth quick|standard|deep|overnight] [--max-agents N]
                    [--max-items N] [--seats N]
-                   [--web-seats N] [--timeout S] [--retries N] [--hours H]
+                   [--web-seats N] [--timeout S] [--retries N] [--rounds N|until] [--hours H]
                    [--effort LEVEL] [--role-effort ROLE=LEVEL[,ROLE=LEVEL...]] [--out DIR]
 qwen-deep-research --stdin                                     # the question from stdin
 qwen-deep-research --resume RUN_DIR [--seats N] [--web-seats N]
@@ -125,8 +151,9 @@ qwen-deep-research --check                                     # preflight only,
 | `--timeout S` | `QWEN_DR_TIMEOUT` | the depth preset's budget | **per-item** budget, not per-agent: an agent holding k items (angles, sources or claim votes) gets max(300, k x timeout) seconds; readers get twice the per-item budget, since each source is a whole page — a reader holding k sources gets max(300, 2 x k x timeout); scope and synthesis get max(300, 2 x timeout). An overrun drops that agent's items — until its retries run out (below). No unit's `--timeout` ever exceeds `MAX_UNIT_SECONDS` (`QWEN_DR_MAX_UNIT_SECONDS`, default 14400 s = 4 h), retry doublings included |
 | `--retries N` | `QWEN_DR_RETRIES` | the depth preset's | a unit is retried only when its last failure was qwen-agent exit 5 (a timeout), exit 3 or 4 after the backoff wait before re-spawning it (`QWEN_DR_BACKOFF` — seconds before re-spawning an agent after a server error (exit 3 or 4); 30), an empty result (exit 6, including on the repair call), or an unusable answer (after its repair round, or with no session to repair); any other exit code (1, 2, 7, 8, a negative/signal exit) drops the unit at once. Each try gets double the previous timeout (up to the 4 h cap); the repair call keeps its attempt's timeout, and only the final failure counts as dropped. N >= 0. A unit stopped by a stopping swarm, and a cached finished unit, are never retried. Every spawn of a re-spawned unit counts its tokens, so `run.log`'s token column and the report's token total cover all of them |
 | `--hours H` | `QWEN_DR_HOURS` | 8 for `overnight`, none otherwise | hard stop for the whole run, H > 0: a deadline H hours from the first start, stored in `config.json` as an absolute UTC time (and in `hours`). Once it passes, no new wave and no new unit starts — running units finish, queued units of the current wave are not started — every item not run gets a `deadline` line in `run.log` (not a drop), the phase continues with what it has and its phase file is **not** written, so a later `--resume` finishes the work; synthesis always runs. The report's Run table gains a "stopped at deadline" row, stderr names the count, and the exit code is 4 when anything was not run. Each agent is capped at 4 h; --hours bounds the whole run. On `--resume` the stored deadline stands unless `--hours` is given again, which sets a new deadline from then |
+| `--rounds N\|until` | | the depth preset's | rounds of research (above); `until` runs until the deadline or convergence and needs `--hours` |
 | `--effort LEVEL` | | qwen-agent's own | reasoning effort for every role, passed to qwen-agent as `-e LEVEL`; qwen-agent validates the level |
-| `--role-effort ROLE=LEVEL[,ROLE=LEVEL...]` | | none | effort for single roles: `ROLE=LEVEL[,ROLE=LEVEL...]` with ROLE one of scoper, searcher, reader, verifier, synthesizer; beats `--effort`. An unknown role, a pair without `=` or an empty level is a usage error (exit 2). Stored in `config.json` (reused on resume unless given again, when it merges into the stored dict — later wins) and part of each agent's cache key |
+| `--role-effort ROLE=LEVEL[,ROLE=LEVEL...]` | | none | effort for single roles: `ROLE=LEVEL[,ROLE=LEVEL...]` with ROLE one of scoper, searcher, reader, verifier, planner, synthesizer; beats `--effort`. An unknown role, a pair without `=` or an empty level is a usage error (exit 2). Stored in `config.json` (reused on resume unless given again, when it merges into the stored dict — later wins) and part of each agent's cache key |
 | `--out DIR` | | `./deep-research/<UTC timestamp>-<slug>` | the run folder |
 
 Flags beat the environment. `--check` is the same preflight every run starts with: the model
@@ -155,6 +182,13 @@ a resumed run's Run table does not undercount. A run folder cannot be reused wit
 `--resume`: pointing `--out` at one that exists is a usage error (exit 2), so a resume is
 the only way back into a half-finished run.
 
+A multi-round run (deep, overnight) also has `rounds.json` (the rounds started, so a
+resume finishes an interrupted round instead of starting a new one), one `round-2/`,
+`round-3/`, ... folder per later round holding that round's `plan.json`, `urls.json`,
+`claims.json`, `fetch_stats.json` and `votes.json` (round 1's stay at the top), unit
+names prefixed `r2-`, `r3-`, ..., a `report-round-<r>.md` per round beside `report.md`
+(the latest), a `rounds` row in the Run table, and `stop_reason` in `totals.json`.
+
 `report.md` is the direct answer and the findings with `[n]` citations, a "Refuted or
 unclear" section, a "Gaps" section, a `## Sources` list and a `## Run` table (sources
 fetched, claims extracted, supported, refuted, unclear, agents run, units dropped,
@@ -181,11 +215,17 @@ what follows it is leads, not conclusions.
 is already complete is skipped, and inside the interrupted phase only the agents whose answer
 never landed re-run — the rest are read back from `agents/<name>.json`. Phases left
 deadline-truncated have no phase file, so a resume finishes exactly the work `run.log`
-logged as `deadline`. A resume keeps the
-run's stored config (question, depth, caps, `--max-agents`, items per agent, budgets,
-retries, effort, deadline) so work is re-dealt exactly as it was; only `--seats`,
-`--web-seats`, `--timeout`, `--retries`, `--hours`, `--effort` and `--role-effort` may
-change, and asking for anything else is a usage error rather than a run that quietly
+logged as `deadline`. A resume keeps the run's stored config (question, depth, caps,
+`--max-agents`, items per agent, budgets, retries, effort, deadline) so work is re-dealt
+exactly as it was. A resume takes `--seats`, `--web-seats`, `--timeout`, `--retries`,
+`--hours`, `--effort` and `--role-effort`, and also the engine's `--rounds` (the new round
+count from then on) and `--keep-sandboxes`: this command's own resume message and its
+synopsis above name only the first seven, the wording this command shipped with before the
+engine existed, while `qwen-swarm --resume` names all nine ([`swarm.md`](swarm.md)) — and in
+a research run `--keep-sandboxes` keeps nothing, since no research role has a `sandbox`
+fence. Asking instead for a setting the run folder owns — a second goal word, `--stdin`,
+`--depth`, `--max-agents`, `--max-items`, `--out`, `--set`, `--target`, `--preflight`
+(which is what `--check` becomes here) — is a usage error rather than a run that quietly
 differs from the first one. The settings the resume actually ran with are written back to
 `config.json`, so a later resume reuses them unnamed; a `--hours` on resume sets a new
 deadline from then, and without one the stored deadline stands (an already-passed one
@@ -209,6 +249,11 @@ of yours is anywhere in an agent's reach.
 
 ## Research needs the internet
 
-`qwen-deep-research` is the only command here that needs internet access — a search backend,
-and pages to fetch. Everything else in the toolkit stays offline-capable; on a machine that
-has to stay air-gapped, this is the command to leave off it.
+`qwen-deep-research` is the command here that needs internet access — a search backend, and
+pages to fetch. The same holds for `qwen-swarm research` and for any workflow whose roles
+carry a `search` or `web` fence: those go online on purpose, through the `search` tool and
+`WebFetch` and nothing else. No other workflow needs the network for its work, and no other
+fence adds a network tool — but a `sandbox` role has Bash, and Bash in a sandbox is your
+shell, with your network: a sandbox is a copy of the target, not a jail
+([`swarm.md`](swarm.md)). On a machine that has to stay air-gapped, this is the command to
+leave off it.

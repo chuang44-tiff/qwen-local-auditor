@@ -2,8 +2,8 @@
 
 What the tools need from the machine, what `install.sh` does, where the config lives,
 every `QWEN_*` variable the commands read, and the messages preflight prints when
-something is off. `qwen-agent --help` and `qwen-deep-research --help` are the authoritative
-texts; this page arranges the same facts for lookup.
+something is off. `qwen-agent --help`, `qwen-swarm --help` and `qwen-deep-research --help`
+are the authoritative texts; this page arranges the same facts for lookup.
 
 ## Requirements
 
@@ -12,10 +12,10 @@ texts; this page arranges the same facts for lookup.
 | Claude Code CLI | `claude` on `PATH`, or `QWEN_CLAUDE_BIN` |
 | A model server | serves the **Anthropic Messages API** at `/v1/messages`, and ideally lists models at `/v1/models` |
 | bash | Linux, macOS (the stock bash 3.2 is fine), or **Git Bash** on Windows |
-| Python 3.8+ | stdlib only; used to parse results and build sweeps (the test suite needs 3.10+) |
-| curl, git | `git` for `qwen-sweep --builder diff`, for the throwaway worktrees `--test` uses, and for `--until-done`'s clean-tree check |
+| Python 3.8+ | stdlib only; used to parse results, build sweeps and run the swarm engine (the test suite needs 3.10+) |
+| curl, git | `git` for `qwen-sweep --builder diff`, for the throwaway worktrees `--test` uses, for `--until-done`'s clean-tree check, and for the sandbox copies a `qwen-swarm` workflow runs in |
 | tmux | only for `qwen-cc` (interactive sessions); Windows has none: run `qwen-agent --interactive` in a terminal there |
-| internet | only for `qwen-deep-research` (a search backend and pages to fetch); everything else works offline |
+| internet | needed only by research (a search backend and pages to fetch): `qwen-deep-research`, `qwen-swarm research`, or a workflow with a `search` or `web` fence. No other workflow needs it and no other fence adds a network tool, but a `sandbox` agent's Bash is your shell, with your network ([`swarm.md`](swarm.md)) |
 
 CI runs the whole suite on Linux, macOS (including `/bin/bash` 3.2) and Windows Git Bash.
 
@@ -45,14 +45,14 @@ cd qwen-local-auditor
 
 `install.sh`:
 
-- symlinks the five skills (`local-agent`, `local-coder`, `local-auditor`, `local-sweep`,
-  `local-deep-research`) into `~/.claude/skills/` (or `$CLAUDE_CONFIG_DIR/skills/`), so
-  `git pull` updates them; the skills install together, and an incomplete checkout is
-  refused;
-- writes `qwen-agent`, `qwen-cc`, `qwen-deep-research`, `qwen-sweep` and `qwen-test` into
-  `~/.local/bin` (keep that on `PATH`; it warns when it is not). Each is a forwarder that
-  execs the script inside the installed `local-auditor` skill, so the commands and the
-  skill cannot drift apart;
+- symlinks the six skills (`local-agent`, `local-coder`, `local-auditor`, `local-sweep`,
+  `local-deep-research`, `local-swarm`) into `~/.claude/skills/` (or
+  `$CLAUDE_CONFIG_DIR/skills/`), so `git pull` updates them; the skills install together,
+  and an incomplete checkout is refused;
+- writes `qwen-agent`, `qwen-cc`, `qwen-deep-research`, `qwen-sweep`, `qwen-swarm` and
+  `qwen-test` into `~/.local/bin` (keep that on `PATH`; it warns when it is not). Each is
+  a forwarder that execs the script inside the installed `local-auditor` skill, so the
+  commands and the skill cannot drift apart;
 - copies `config.example` to `~/.config/qwen-agent/config` (or
   `$XDG_CONFIG_HOME/qwen-agent/config`) **once**, and never overwrites it;
 - runs `qwen-agent --preflight-only` at the end when the config has been edited; with an
@@ -65,7 +65,7 @@ cd qwen-local-auditor
 |---|---|
 | `--no-preflight` | skip the server/python/claude checks |
 | `--force` | replace a non-symlink skill directory instead of moving it aside to `NAME.bak-<UTC timestamp>` |
-| `--uninstall` | remove the five skills and the five commands; keeps your config and past sweep runs |
+| `--uninstall` | remove the six skills and the six commands; keeps your config and past sweep runs |
 
 Then point the config at your server and check it:
 
@@ -165,7 +165,23 @@ See [`sweep.md`](sweep.md).
 `QWEN_SEARCH_BRAVE_URL`, and the `QWEN_DR_*` defaults for its flags (`MAX_AGENTS`,
 `MAX_ITEMS`, `SEATS`, `WEB_SEATS`, `TIMEOUT`, `RETRIES`, `HOURS`, `MAX_UNIT_SECONDS`,
 `BACKOFF`) all go in the same config file. They are documented with the flags they back in
-[`deep-research.md`](deep-research.md).
+[`deep-research.md`](deep-research.md). The `QWEN_DR_` defaults apply to `qwen-swarm`'s
+`research` workflow too, but a `QWEN_SWARM_` name of the same suffix wins there.
+
+### Swarms (`qwen-swarm`)
+
+| variable | default | meaning |
+|---|---|---|
+| `QWEN_SWARM_MAX_AGENTS`, `_MAX_ITEMS`, `_SEATS`, `_WEB_SEATS` | 8, 10, 4, `--seats` | defaults for the flags of the same names (the flags are in [`swarm.md`](swarm.md)) |
+| `QWEN_SWARM_TIMEOUT`, `_RETRIES`, `_HOURS` | the depth preset's | defaults for `--timeout` (the per-item budget), `--retries` and `--hours` |
+| `QWEN_SWARM_MAX_UNIT_SECONDS` | 14400 | the cap on one unit's timeout, retry doublings included; below 1 or non-numeric is a usage error (exit 2) |
+| `QWEN_SWARM_BACKOFF` | 30 | seconds before re-spawning an agent after a server error (exit 3 or 4) |
+| `QWEN_SWARM_SKIP_SEARCH_CHECK` | `0` | `1` skips the search half of the preflight, so a run of a search-using workflow and `--preflight WORKFLOW` check the model only and never probe the backend (`qwen-deep-research --check` is that preflight and is skipped too; a `qwen-swarm --check WORKFLOW` runs no preflight at all, set or not — it only dry-runs against fake agents. Test hook; `QWEN_DR_SKIP_SEARCH_CHECK` is the same on a research run) |
+| `QWEN_SWARM_AGENT_OVERRIDE` | | a stand-in for `bash qwen-agent.sh` as the agent command, split on spaces (test hook) |
+| `QWEN_SWARM_BASH` | set by `qwen-swarm.sh` to the bash that started it | the shell `wf.steps.run_cmd` uses in a sandbox: pins Git Bash on Windows instead of whatever a native interpreter finds on `PATH` |
+
+The `QWEN_SEARCH_*` variables above are what a workflow with a `search` or `web` fence
+searches through.
 
 ## Troubleshooting
 

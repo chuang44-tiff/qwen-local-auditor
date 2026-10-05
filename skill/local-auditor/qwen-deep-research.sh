@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # qwen-deep-research -- research one question on the web with a swarm of local-model
 # Claude Code sessions: scope -> search -> fetch -> verify -> synthesize.
-# lib/research.py sequences the phases and deals the work; every unit of work is a
-# qwen-agent session. This wrapper owns the bash-side setup: the skill directory
-# behind the install.sh symlink, the machine config, the interpreter, the env export.
+# It is qwen-swarm's built-in "research" workflow under its released name: this script
+# answers --help and --version itself, then execs qwen-swarm.sh, which owns the config,
+# the interpreter and the env export (QWEN_DR_* still work).
 #
 # Run `qwen-deep-research --help` for usage. Exit codes are documented there and
 # are deliberately distinct so a caller can tell failure modes apart.
@@ -44,11 +44,13 @@ FLAGS
                        preset below. Deeper presets are meant for long unattended
                        runs: locally time is cheap, so they trade wall time for
                        completeness.
-                        preset     angles  sources  claims  voters  budget  retries
-                        quick          3        6     10       1     240s       1
-                        standard       5       15     25       3     240s       1
-                        deep           8       30     50       3     600s       2
-                        overnight     10       40     80       5     900s       3
+                        preset     angles  sources  claims  voters  budget  retries  rounds
+                        quick          3        6     10       1     240s       1       1
+                        standard       5       15     25       3     240s       1       1
+                        deep           8       30     50       3     600s       2       2
+                        overnight     10       40     80       5     900s       3   until
+                       From round 2 a planner turns the last report's gaps into
+                       new angles; the run stops early when nothing new is found.
   --max-agents N       Most agents one phase starts; work is dealt among them,
                        never cut (default 8; env QWEN_DR_MAX_AGENTS). Must be at
                        least the voters per claim (3 for standard and deep, 5
@@ -104,7 +106,7 @@ FLAGS
                        level). qwen-agent validates the level.
   --role-effort ROLE=LEVEL[,ROLE=LEVEL...]
                        Effort for single roles, roles scoper, searcher,
-                       reader, verifier, synthesizer; beats --effort. An
+                       reader, verifier, planner, synthesizer; beats --effort. An
                        unknown role, a pair without = or an empty level is a
                        usage error. --effort and --role-effort
                        are stored in config.json (reused on resume unless given
@@ -171,65 +173,13 @@ QDR_HELP
 
 # Help and version answer before anything is probed: neither needs the config, a
 # Python or a server. They mean "print this" only as the FIRST argument; anywhere
-# else they are the caller's mistake and reach research.py, whose parser reports a
+# else they are the caller's mistake and reach the runner, whose parser reports a
 # usage error (exit 2) rather than printing a help screen nobody asked for.
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   --version) echo "qwen-deep-research $DR_VERSION"; exit 0 ;;
 esac
 
-_cfg="${QWEN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/qwen-agent/config}"
-if [ -f "$_cfg" ] && [ -r "$_cfg" ]; then
-  eval "$(tr -d '\r' < "$_cfg")"
-fi
-unset _cfg
-# research.py reads these from the ENVIRONMENT; eval set shell variables only.
-# Export whatever the config defined (guard unset ones for set -u).
-for _v in QWEN_SEARCH_BACKEND QWEN_SEARCH_URL QWEN_SEARCH_KEY QWEN_SEARCH_BRAVE_URL \
-          QWEN_DR_MAX_AGENTS QWEN_DR_MAX_ITEMS QWEN_DR_SEATS QWEN_DR_WEB_SEATS \
-          QWEN_DR_TIMEOUT QWEN_DR_RETRIES QWEN_DR_HOURS QWEN_DR_MAX_UNIT_SECONDS \
-          QWEN_DR_BACKOFF; do
-  eval "[ -n \"\${$_v:-}\" ] && export $_v"
-done
-unset _v
-# Native Windows Python defaults to cp1252 for files and pipes; everything here is UTF-8.
-export PYTHONUTF8=1
-
-# A python on PATH is not enough (on Windows `python3` is often a Store stub, and
-# old systems still call Python 2 `python`), so each candidate is RUN first.
-PY=""
-for _c in "${QWEN_PYTHON:-}" python3 python; do
-  [ -n "$_c" ] || continue
-  command -v "$_c" >/dev/null 2>&1 || continue
-  "$_c" -c 'import sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1 || continue
-  PY="$_c"
-  break
-done
-unset _c
-[ -n "$PY" ] || { echo "qwen-deep-research: no working Python 3.8+ found (set QWEN_PYTHON)" >&2; exit 2; }
-
-# Only a NATIVE Windows python needs Windows-form paths (an MSYS2 or Cygwin python
-# does not), so ask the interpreter rather than guessing from cygpath's presence.
-PY_NATIVE_WIN=0
-if command -v cygpath >/dev/null 2>&1 \
-   && [ "$("$PY" -c 'import os; print(os.sep)' | tr -d '\r')" = "\\" ]; then
-  PY_NATIVE_WIN=1
-fi
-native_path() { if [ "$PY_NATIVE_WIN" -eq 1 ]; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
-
-# The agent every worker runs, as one --agent argv entry per word: research.py
-# starts `bash qwen-agent.sh <flags>` per session unless the hook replaces it.
-if [ -n "${QWEN_DR_AGENT_OVERRIDE:-}" ]; then
-  # test hook: a stand-in agent command (split on spaces)
-  # shellcheck disable=SC2206
-  _agent=($QWEN_DR_AGENT_OVERRIDE)
-  _args=()
-  for _a in "${_agent[@]}"; do _args+=(--agent "$_a"); done
-else
-  # Both halves of the agent argv are native_path'd: a native Windows bash.exe
-  # path (/usr/bin/bash in MSYS form) is as unreadable to a native python as a
-  # native script path is to Git Bash.
-  _args=(--agent "$(native_path "${BASH:-bash}")" --agent "$(native_path "$SKILL_DIR/qwen-agent.sh")")
-fi
-PYTHONPATH="$(native_path "$SKILL_DIR")" exec "$PY" "$(native_path "$SKILL_DIR/lib/research.py")" \
-  "${_args[@]}" "$@"
+# Everything else is qwen-swarm's research workflow; --as-deep-research keeps this
+# command's flags, messages, exit codes and run folder exactly as they were.
+exec "${BASH:-bash}" "$SKILL_DIR/qwen-swarm.sh" --as-deep-research "$@"
