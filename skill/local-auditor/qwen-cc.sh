@@ -31,6 +31,9 @@ CR=$(printf '\r')
 PANE=""
 QC_DEFAULT_LINES=60          # --peek's default history
 QC_STOP_WAIT=10              # seconds --stop waits for the session to end
+# The hold before Enter waits on a pty, not on a result, so a caller that confirms what
+# it waits for some other way -- a test that polls the pane -- may shorten it.
+QC_SAY_GAP="${QC_SAY_GAP:-0.3}"      # seconds between the text --say types and its Enter
 
 usage() {
   cat <<EOF
@@ -284,8 +287,8 @@ case "$MODE" in
     esac
     tmux send-keys -t "$PANE" -l -- "$text"
     # A moment before Enter, so the burst of text is not taken for a paste that the
-    # Enter then lands inside of.
-    sleep 0.3
+    # Enter then lands inside of. QC_SAY_GAP is how long that moment is.
+    sleep "$QC_SAY_GAP"
     tmux send-keys -t "$PANE" Enter
     exit 0
     ;;
@@ -305,7 +308,7 @@ case "$MODE" in
     fi
     tmux send-keys -t "$PANE" C-c
     tmux send-keys -t "$PANE" -l -- '/exit'
-    sleep 0.3
+    sleep "$QC_SAY_GAP"          # the same moment --say gives a typed line
     tmux send-keys -t "$PANE" Enter
     i=0
     while [ "$i" -lt "$QC_STOP_WAIT" ]; do

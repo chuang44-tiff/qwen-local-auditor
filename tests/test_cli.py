@@ -93,7 +93,10 @@ def server():
     httpd.models = [{"id": "local-model", "object": "model", "max_model_len": 262144}]
     httpd.payload = None
     httpd.key = None
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    # poll_interval keeps shutdown() snappy: the default 0.5 s idle select
+    # would make every teardown wait out up to half a second.
+    threading.Thread(target=lambda: httpd.serve_forever(poll_interval=0.02),
+                     daemon=True).start()
     yield httpd
     httpd.shutdown()
     httpd.server_close()

@@ -60,7 +60,8 @@ class _H(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def web():
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    # poll_interval keeps shutdown() snappy (see the server fixture in test_cli.py).
+    t = threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.02), daemon=True)
     t.start()
     yield "http://127.0.0.1:%d" % srv.server_address[1]
     srv.shutdown()

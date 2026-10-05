@@ -19,6 +19,7 @@ def fake(tmp_path, monkeypatch):
     d = tmp_path / "fake"
     d.mkdir()
     monkeypatch.setenv("FAKE_SWARM_DIR", str(d))
+    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0")
     return d
 
 
@@ -163,7 +164,7 @@ def counts(fake):
 
 
 def test_swarm_never_exceeds_seats(tmp_path, fake, monkeypatch):
-    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.6")
+    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.2")
     s = swarm(tmp_path, seats=3)
     res = s.run_phase([unit(tmp_path, "u%d" % i) for i in range(9)])
     assert all(r["ok"] for r in res)
@@ -171,7 +172,7 @@ def test_swarm_never_exceeds_seats(tmp_path, fake, monkeypatch):
 
 
 def test_run_phase_seats_override(tmp_path, fake, monkeypatch):
-    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.3")
+    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.12")
     s = swarm(tmp_path, seats=4)
     res = s.run_phase([unit(tmp_path, "u%d" % i) for i in range(8)], seats=1)
     assert all(r["ok"] for r in res)
@@ -705,7 +706,7 @@ def test_no_retry_after_the_deadline(tmp_path, fake, monkeypatch):
     # a retry is new work: once the run's deadline has passed during the first attempt,
     # the unit is dropped instead of starting a second attempt with a doubled budget
     import time
-    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.5")
+    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.3")
     (fake / "worker.py").write_text("def answer(p, r):\n    return 5, ''\n")
     u = unit(tmp_path, "a")
     u.retries = 3

@@ -121,12 +121,21 @@ def _sock_root(tmp_path):
 def _base_env(tmp_path, path=None):
     """The environment every tmux / qwen-cc call gets: private server, no TMUX,
     no display (so no window is opened by accident), no SSH session (so no remote
-    attach line) and no QWEN_* from the host."""
-    skip = ("TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "PATH", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
+    attach line), no QWEN_* from the host, and --say's hold before Enter at 0.02
+    seconds instead of the 0.3 it ships with.
+
+    That hold is a fixed pause, not a check: what proves a line arrived is the pane
+    showing GOT: <it>, which every test confirms in the pane (wait_for), not by timing. At the default, a
+    --say/--stop-heavy test spends most of its wall time asleep instead. The host's own
+    value is dropped, so a QC_SAY_GAP in a developer's shell cannot move a
+    timing a test then races."""
+    skip = ("TMUX", "TMUX_PANE", "DISPLAY", "WAYLAND_DISPLAY", "PATH", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY",
+            "QC_SAY_GAP")
     env = {k: v for k, v in os.environ.items()
            if k not in skip and not k.startswith(("QWEN_", "CLAUDE_", "ANTHROPIC_"))}
     env["TMUX_TMPDIR"] = _sock_root(tmp_path)
     env["PATH"] = path if path is not None else str(tmp_path / "bin") + os.pathsep + os.environ["PATH"]
+    env["QC_SAY_GAP"] = "0.02"
     return env
 
 

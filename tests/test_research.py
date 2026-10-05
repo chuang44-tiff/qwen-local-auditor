@@ -833,10 +833,11 @@ def test_wave_votes_independent_mid_claim(tmp_path, env):
 # ---------------------------------------------------------------- the run deadline
 
 def test_deadline_stops_new_work(tmp_path, env, capsys, monkeypatch):
-    # ~1 s of runway against agents that take at least a second each: the phases the
-    # deadline caught mid-stride log their unrun items and stop; synthesis still runs
-    monkeypatch.setenv("QWEN_DR_HOURS", "0.0003")
-    monkeypatch.setenv("FAKE_SWARM_SLEEP", "1")
+    # a ~0.5 s deadline (stored to the whole second, so the real runway is anywhere from just
+    # past to ~0.54 s) against agents that hold 0.5 s each: new work stops at the deadline --
+    # before or right after the scoper -- and synthesis still runs
+    monkeypatch.setenv("QWEN_DR_HOURS", "0.00015")
+    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.5")
     assert main(tmp_path, "--depth", "quick", "q") == 4
     captured = capsys.readouterr()
     assert "--resume" in captured.err
@@ -845,6 +846,9 @@ def test_deadline_stops_new_work(tmp_path, env, capsys, monkeypatch):
     assert "stopped at deadline | yes" in report
     log = (run / "run.log").read_text(encoding="utf-8")
     assert "deadline" in log
+    # the hold only existed to race the deadline above; the resume runs with a
+    # fresh hour-long deadline, so its agents may return at once
+    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0")
     # a resume with --hours sets a new deadline from now and finishes the run
     (env / "calls.jsonl").unlink()
     assert rs.main(["--agent", sys.executable, "--agent", str(FAKE),
@@ -895,7 +899,7 @@ def test_verifier_role_defines_independence():
 
 
 def test_web_seats_cap_web_phases(tmp_path, env, monkeypatch):
-    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.3")
+    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.12")
     assert main(tmp_path, "--depth", "quick", "--seats", "4", "--web-seats", "1", "q") == 0
     rows = [line.split() for line in (env / "counts").read_text(encoding="utf-8").splitlines()
             if line.strip()]
@@ -913,7 +917,7 @@ def test_web_seats_usage_errors(tmp_path, env, capsys):
 
 def test_web_seats_defaults_to_seats(tmp_path, env, monkeypatch):
     # web agents call one tool at a time, so the web phases no longer run narrowed
-    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.3")
+    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0.12")
 
     def web_counts():
         rows = [line.split() for line in (env / "counts").read_text(encoding="utf-8").splitlines()

@@ -248,7 +248,7 @@ def test_parallel_runs_do_not_overlap(repo, tmp_path):
     script = tmp_path / "timed.py"
     script.write_text(
         "import time\n"
-        "t0 = time.time(); time.sleep(0.4); t1 = time.time()\n"
+        "t0 = time.time(); time.sleep(0.15); t1 = time.time()\n"
         "open(%r, 'a').write('%%f %%f\\n' %% (t0, t1))\n" % str(log))
     wt = testrun.prepare(str(repo))
     try:
@@ -289,7 +289,7 @@ def test_killed_lock_holder_frees_the_lock_at_once(repo):
         holder = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
         assert holder.stdout.readline().strip() == "held"
         with pytest.raises(RuntimeError):
-            with testrun._lock(wt, 1):          # held: a short wait times out
+            with testrun._lock(wt, 0.3):        # held: a short wait times out
                 pass
         holder.kill(); holder.wait()
         t0 = time.time()

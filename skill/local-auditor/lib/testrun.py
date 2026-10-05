@@ -238,7 +238,9 @@ def _lock(wt, timeout):
         while not _try_lock(fd):
             if time.time() > deadline:
                 raise RuntimeError("another qwen-test run holds %s" % path)
-            time.sleep(0.2)
+            # 20ms: a contended handover should cost milliseconds, not a fifth of a
+            # second; the deadline above is wall-clock, so a short wait still times out.
+            time.sleep(0.02)
         try:
             yield
         finally:

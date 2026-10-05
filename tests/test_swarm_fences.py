@@ -41,6 +41,7 @@ def test_fence_reaches_the_agent_argv(tmp_path, monkeypatch, fence, present, abs
     d = tmp_path / "fake"
     d.mkdir()
     monkeypatch.setenv("FAKE_SWARM_DIR", str(d))
+    monkeypatch.setenv("FAKE_SWARM_SLEEP", "0")
     role = tmp_path / "r.md"
     role.write_text("role", encoding="utf-8")
     mcp = tmp_path / "mcp.json"
