@@ -1,0 +1,22 @@
+{
+ "name": "debug",
+ "description": "Root cause and a tested patch for a bug in a codebase: triage, reproduce, hypothesize, probe in sandboxes, check fixes, review",
+ "goal": "the symptom to debug",
+ "target": "required",
+ "roles": {
+  "triager": {"file": "roles/triager.md", "fence": "read"},
+  "hypothesizer": {"file": "roles/hypothesizer.md", "fence": "read"},
+  "prober": {"file": "roles/prober.md", "fence": "sandbox"},
+  "reviewer": {"file": "roles/reviewer.md", "fence": "read"},
+  "planner": {"file": "roles/planner.md", "fence": "none"},
+  "writer": {"file": "roles/writer.md", "fence": "none"}
+ },
+ "knobs": {"hypotheses": "int", "voters": "int", "repro": "str", "tests": "str"},
+ "presets": {
+  "quick": {"hypotheses": 3, "voters": 1, "repro": "", "tests": "", "budget": 600, "retries": 1, "rounds": 1},
+  "standard": {"hypotheses": 5, "voters": 3, "repro": "", "tests": "", "budget": 900, "retries": 1, "rounds": 2},
+  "deep": {"hypotheses": 8, "voters": 3, "repro": "", "tests": "", "budget": 1200, "retries": 2, "rounds": 3},
+  "overnight": {"hypotheses": 12, "voters": 5, "repro": "", "tests": "", "budget": 1800, "retries": 3, "rounds": "until", "hours": 8}
+ },
+ "default_depth": "standard"
+}
