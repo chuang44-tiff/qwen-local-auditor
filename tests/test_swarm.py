@@ -712,3 +712,69 @@ def test_no_retry_after_the_deadline(tmp_path, fake, monkeypatch):
     res = swarm(tmp_path, deadline=time.time() + 0.2).run_phase([u])
     assert not res[0]["ok"]
     assert len((fake / "calls.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+# ---------------------------------------------------------------- engine hooks (part C)
+
+def test_unit_cwd_replaces_the_agent_folder(tmp_path, fake):
+    work = tmp_path / "elsewhere"
+    work.mkdir()
+    u = unit(tmp_path, "read-1")
+    u.cwd = work
+    swarm(tmp_path).run_phase([u])
+    argv = json.loads((fake / "calls.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert argv[argv.index("-C") + 1] == str(work)
+    assert (tmp_path / "run" / "agents" / "read-1").is_dir()     # its files still live there
+
+
+def test_key_extra_changes_the_key_only_when_set(tmp_path, fake):
+    s = swarm(tmp_path)
+    plain, extra = unit(tmp_path, "a"), unit(tmp_path, "a")
+    extra.key_extra = "target:git:abc"
+    blob = "%s\n%s\n%s\n%s\n%s\n%s\n%s" % ("role worker", "do a", "none", "", False, "", "")
+    assert s._key(plain) == hashlib.sha256(blob.encode("utf-8")).hexdigest()   # the released command's key
+    assert s._key(extra) == hashlib.sha256(
+        (blob + "\ntarget:git:abc").encode("utf-8")).hexdigest()
+
+
+def test_setup_and_teardown_run_once_around_a_real_start(tmp_path, fake):
+    seen = []
+    u = unit(tmp_path, "a")
+    u.setup, u.teardown = (lambda: seen.append("setup")), (lambda: seen.append("teardown"))
+    s = swarm(tmp_path)
+    assert s.run_phase([u])[0]["ok"]
+    assert seen == ["setup", "teardown"]
+    seen.clear()
+    assert s.run_phase([u])[0]["cached"]            # a cache hit starts nothing
+    assert seen == []
+
+
+def test_cache_record_round_trips_surrogates(tmp_path, fake):
+    # An answer whose bytes are not valid UTF-8 -- what a patch echoed back looks like:
+    # sandbox.diff() carries such a byte as a lone surrogate -- is cached as those exact
+    # bytes and read back as the very data that was parsed from it.
+    (fake / "worker.py").write_text(r'''
+def answer(p, r):
+    return 0, '```json\n["caf\udce9"]\n```'
+''')
+    res = swarm(tmp_path).run_phase([unit(tmp_path, "a")])
+    assert res[0]["ok"] and res[0]["data"] == ["caf\udce9"]     # not dropped
+    agents = tmp_path / "run" / "agents"
+    assert b'["caf\xe9"]' in (agents / "a.out").read_bytes()    # the byte survived, no '?'
+    assert b"caf\xe9" in (agents / "a.json").read_bytes()
+    res2 = swarm(tmp_path).run_phase([unit(tmp_path, "a")])
+    assert res2[0]["cached"] and res2[0]["data"] == res[0]["data"]
+
+
+def test_setup_is_skipped_past_the_deadline_and_teardown_errors_are_swallowed(tmp_path, fake):
+    seen = []
+    u = unit(tmp_path, "a")
+    u.setup = lambda: seen.append("setup")
+    late = swarm(tmp_path, deadline=time.time() - 1)
+    assert late.run_phase([u])[0]["deadline"] and seen == []
+
+    def boom():
+        raise OSError("cannot remove")
+    v = unit(tmp_path, "b")
+    v.setup, v.teardown = (lambda: None), boom
+    assert swarm(tmp_path).run_phase([v])[0]["ok"]   # a failing cleanup never fails the unit

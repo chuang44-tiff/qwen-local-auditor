@@ -13,6 +13,14 @@ re-spawn after a server error. An absolute `deadline` stops new units from start
 a unit whose session would begin after it is returned as never started (not dropped)
 and the caller records its work.
 Role-agnostic: research.py (web) is the first user.
+An answer may echo bytes that are not valid UTF-8 (a patch carries them as lone
+surrogates): the answer files, the cache records and the cache key are written and read
+as bytes through utf-8/surrogateescape, so such an answer round-trips exactly and valid
+text is written byte for byte as before. Byte writes mean no newline translation either:
+a record or answer holding a patch keeps the patch's own line endings on every platform
+(on POSIX these are the same bytes a text write produced). The prompt files a model
+reads, and the lines of run.log, are written with errors="replace": a surrogate becomes
+'?' there rather than failing the unit.
 On Windows stop_all can only kill the direct child process; Ctrl-C reaches the agents
 through the shared console.
 """
@@ -111,7 +119,8 @@ def install_stop_signals():
 class Unit:
     def __init__(self, name, role_file, prompt, toolset="none", grants="", web=False,
                  mcp_config=None, parse=extract_json, cache=True, timeout=None, retries=0,
-                 effort=None, ignore_deadline=False):
+                 effort=None, ignore_deadline=False, cwd=None, key_extra="", setup=None,
+                 teardown=None):
         # fullmatch, not match: "a\n" must not pass on the strength of the trailing $.
         if not _SAFE_NAME.fullmatch(name or ""):
             raise ValueError("unit name must match %s (got %r)" % (_SAFE_NAME.pattern, name))
@@ -128,6 +137,13 @@ class Unit:
         self.effort = effort        # qwen-agent -e LEVEL; None = qwen-agent's own default
         # the one unit a passed deadline must not stop: the caller always runs it
         self.ignore_deadline = ignore_deadline
+        # the agent's working directory; None = its own empty agents/<name>/ folder
+        self.cwd = cwd
+        # extra cache-key text (a fence's working tree); "" keeps the released command's key exactly
+        self.key_extra = key_extra
+        # called once when the unit really starts (never for a cache hit or a unit the
+        # deadline stopped), and teardown once when it ends, whatever the outcome
+        self.setup, self.teardown = setup, teardown
 
 
 class Swarm:
@@ -155,7 +171,8 @@ class Swarm:
                                  "--role-file", str(u.role_file),
                                  "--toolset", u.toolset or "none",
                                  "--permission-mode", "dontAsk", "--timeout", str(timeout),
-                                 "-C", str(self.agents_dir / u.name), "-f", str(prompt_path)]
+                                 "-C", str(self.agents_dir / u.name if u.cwd is None else u.cwd),
+                                 "-f", str(prompt_path)]
         if u.effort:
             argv += ["-e", u.effort]
         if u.grants:
@@ -240,7 +257,9 @@ class Swarm:
         line = "\t".join([u.name, pathlib.Path(u.role_file).stem, str(rc), str(tokens),
                           "%.0f" % secs, status])
         with self._lock:
-            with open(self.run_dir / "run.log", "a", encoding="utf-8") as fh:
+            # errors="replace": a status quoting an answer must never fail the log write
+            # (an answer can carry a byte that is not valid UTF-8 as a lone surrogate).
+            with open(self.run_dir / "run.log", "a", encoding="utf-8", errors="replace") as fh:
                 fh.write(line + "\n")
 
     def _key(self, u):
@@ -253,12 +272,19 @@ class Swarm:
         mcp_text = "" if u.mcp_config is None else pathlib.Path(u.mcp_config).read_text(encoding="utf-8")
         blob = "%s\n%s\n%s\n%s\n%s\n%s\n%s" % (role_text, u.prompt, u.toolset, u.grants,
                                                u.web, mcp_text, u.effort or "")
-        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        if u.key_extra:
+            blob += "\n" + u.key_extra
+        # surrogateescape: a prompt may embed a patch whose bytes are not valid UTF-8;
+        # valid text encodes byte-for-byte as before, so no existing cache key changes.
+        return hashlib.sha256(blob.encode("utf-8", "surrogateescape")).hexdigest()
 
     def _cached(self, u):
         """Return (found, data); found is True only when the cached key still matches."""
         try:
-            rec = json.loads((self.agents_dir / ("%s.json" % u.name)).read_text(encoding="utf-8"))
+            # the record is read as bytes and decoded with surrogateescape, so an answer
+            # carrying a non-UTF-8 byte comes back as the very str that was cached.
+            rec = json.loads((self.agents_dir / ("%s.json" % u.name)).read_bytes()
+                             .decode("utf-8", "surrogateescape"))
         except (ValueError, OSError):
             return False, None
         if not isinstance(rec, dict) or "data" not in rec or rec.get("key") != self._key(u):
@@ -287,10 +313,16 @@ class Swarm:
         # that attempt alone, so the token column of run.log sums to self.tokens
         t_start, tokens_before = start, 0
         timeout = min(self.timeout if u.timeout is None else u.timeout, self.max_unit_seconds)
+        set_up = False
         try:
             (self.agents_dir / u.name).mkdir(parents=True, exist_ok=True)
+            if u.setup is not None:
+                u.setup()
+                set_up = True
             prompt_path = self.agents_dir / ("%s.prompt.md" % u.name)
-            prompt_path.write_text(u.prompt, encoding="utf-8")
+            # A prompt is for a model to read: errors="replace" turns a lone surrogate
+            # (a non-UTF-8 byte carried in a patch) into '?' instead of raising.
+            prompt_path.write_bytes(u.prompt.encode("utf-8", "replace"))
             why, data, attempt, retryable = "", None, 0, False
             while True:
                 for suffix in (".out", ".repair.out"):    # each attempt starts from clean files
@@ -309,7 +341,10 @@ class Swarm:
                     # is the same answer the next time
                     retryable = rc == AGENT_TIMEOUT or rc in (AGENT_PREFLIGHT, AGENT_APIERR)
                 else:
-                    (self.agents_dir / ("%s.out" % u.name)).write_text(rec["result"], encoding="utf-8")
+                    # The answer is kept as its exact bytes: an echoed patch carries a
+                    # non-UTF-8 byte as a lone surrogate, which surrogateescape restores.
+                    (self.agents_dir / ("%s.out" % u.name)).write_bytes(
+                        rec["result"].encode("utf-8", "surrogateescape"))
                     try:
                         if rc == 6:
                             raise ValueError("qwen-agent ran clean but returned an empty result")
@@ -320,14 +355,15 @@ class Swarm:
                             retryable = True
                         else:
                             repair = self.agents_dir / ("%s.repair.md" % u.name)
-                            repair.write_text(REPAIR.format(why=e), encoding="utf-8")
+                            # for a model to read, like the prompt: replace, not raise
+                            repair.write_bytes(REPAIR.format(why=e).encode("utf-8", "replace"))
                             # the repair keeps this attempt's timeout: it is a
                             # continuation of the attempt, not a new one
                             rc, rec2, err = self._call(self._argv(u, repair, timeout, resume=rec["session"]))
                             tokens += rec2["tokens"]   # on any rc, count the repair record's usage
                             if rc == 0:
-                                (self.agents_dir / ("%s.repair.out" % u.name)).write_text(
-                                    rec2["result"], encoding="utf-8")
+                                (self.agents_dir / ("%s.repair.out" % u.name)).write_bytes(
+                                    rec2["result"].encode("utf-8", "surrogateescape"))
                                 try:
                                     data, status = u.parse(rec2["result"]), "repaired"
                                 except ValueError as e2:
@@ -370,14 +406,20 @@ class Swarm:
             else:
                 out_path = self.agents_dir / ("%s.json" % u.name)
                 tmp_path = self.agents_dir / ("%s.json.tmp" % u.name)
-                tmp_path.write_text(json.dumps({"data": data, "key": self._key(u)},
-                                               ensure_ascii=False, indent=1), encoding="utf-8")
+                # bytes through surrogateescape: parsed data may carry a non-UTF-8 byte of
+                # a patch as a lone surrogate, and the cache must hold the exact bytes.
+                tmp_path.write_bytes(json.dumps({"data": data, "key": self._key(u)},
+                                                ensure_ascii=False, indent=1)
+                                     .encode("utf-8", "surrogateescape"))
                 os.replace(tmp_path, out_path)
                 res.update(ok=True, data=data)
         except Exception as e:      # a crashing parse still leaves the unit logged below
             res["why"] = "internal error: %s" % type(e).__name__
             raise
         finally:
+            if set_up and u.teardown is not None:
+                with contextlib.suppress(Exception):     # cleanup must not mask the result
+                    u.teardown()
             # Tokens already spent by this unit reach self.tokens on every exit path,
             # including one where u.parse raises a non-ValueError. Its log line reports
             # only the last attempt — the earlier ones wrote their own retry lines, so

@@ -2,7 +2,8 @@
 
 Reads its own argv: --role-file R, -f PROMPT, -C CWD, optional --resume SID.
 Behaviour comes from $FAKE_SWARM_DIR/<role-stem>.py if present: a python file defining
-answer(prompt: str, resumed: bool) -> (rc, text). Otherwise it answers '```json\n[]\n```'.
+answer(prompt: str, resumed: bool) -> (rc, text), or answer_cwd(prompt, resumed, cwd) when the
+behaviour must edit files in the agent's -C directory. Otherwise it answers '```json\n[]\n```'.
 Concurrency is observed with marker files in $FAKE_SWARM_DIR/live/: every agent appends
 "<role-stem> <count>" (the count of markers it saw, itself included) as one line to
 $FAKE_SWARM_DIR/counts.
@@ -71,7 +72,10 @@ try:
     if beh.exists():
         ns = {}
         exec(beh.read_text(encoding="utf-8"), ns)
-        rc, text = ns["answer"](prompt, opt("--resume") is not None)
+        if "answer_cwd" in ns:      # a behaviour that edits files gets the agent's -C dir
+            rc, text = ns["answer_cwd"](prompt, opt("--resume") is not None, opt("-C"))
+        else:
+            rc, text = ns["answer"](prompt, opt("--resume") is not None)
 finally:
     me.unlink()
 if rc == 0 or str(rc) in os.environ.get("FAKE_SWARM_RC_RECORD", "").split(","):
