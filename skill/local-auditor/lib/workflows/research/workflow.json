@@ -1,0 +1,79 @@
+{
+ "name": "research",
+ "description": "Cited report on a question: scope, search, fetch, verify, synthesize",
+ "goal": "the question to research",
+ "target": "none",
+ "roles": {
+  "scoper": {
+   "file": "roles/scoper.md",
+   "fence": "none"
+  },
+  "searcher": {
+   "file": "roles/searcher.md",
+   "fence": "search"
+  },
+  "reader": {
+   "file": "roles/reader.md",
+   "fence": "web",
+   "budget_weight": 2
+  },
+  "verifier": {
+   "file": "roles/verifier.md",
+   "fence": "web"
+  },
+  "planner": {
+   "file": "roles/planner.md",
+   "fence": "none"
+  },
+  "synthesizer": {
+   "file": "roles/synthesizer.md",
+   "fence": "none"
+  }
+ },
+ "knobs": {
+  "angles": "int",
+  "sources": "int",
+  "claims": "int",
+  "voters": "int"
+ },
+ "presets": {
+  "quick": {
+   "angles": 3,
+   "sources": 6,
+   "claims": 10,
+   "voters": 1,
+   "budget": 240,
+   "retries": 1,
+   "rounds": 1
+  },
+  "standard": {
+   "angles": 5,
+   "sources": 15,
+   "claims": 25,
+   "voters": 3,
+   "budget": 240,
+   "retries": 1,
+   "rounds": 1
+  },
+  "deep": {
+   "angles": 8,
+   "sources": 30,
+   "claims": 50,
+   "voters": 3,
+   "budget": 600,
+   "retries": 2,
+   "rounds": 2
+  },
+  "overnight": {
+   "angles": 10,
+   "sources": 40,
+   "claims": 80,
+   "voters": 5,
+   "budget": 900,
+   "retries": 3,
+   "rounds": "until",
+   "hours": 8
+  }
+ },
+ "default_depth": "standard"
+}

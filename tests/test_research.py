@@ -6,6 +6,8 @@ import sys
 
 import pytest
 
+import lib.swarm_engine.runner as runner
+import lib.swarm_engine.steps as steps
 import lib.research as rs
 
 FAKE = pathlib.Path(__file__).resolve().parent / "fake_swarm_agent.py"
@@ -532,7 +534,7 @@ def test_internal_error_exits_8_without_traceback(tmp_path, env, capsys, monkeyp
     def boom(*args, **kw):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(rs, "merge_claims", boom)
+    monkeypatch.setattr(steps, "merge_claims", boom)
     assert main(tmp_path, "q") == 8
     captured = capsys.readouterr()
     assert "internal error: RuntimeError: boom" in captured.err
@@ -545,7 +547,7 @@ def test_internal_error_writes_error_log(tmp_path, env, capsys, monkeypatch):
     def boom(*args, **kw):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(rs, "merge_claims", boom)
+    monkeypatch.setattr(steps, "merge_claims", boom)
     assert main(tmp_path, "q") == 8
     captured = capsys.readouterr()
     assert "see" in captured.err and "error.log" in captured.err
@@ -563,7 +565,7 @@ def test_internal_error_without_run_folder_leaves_no_pointer(tmp_path, env, caps
     def boom(*args, **kw):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(rs, "preflight", boom)   # dies before the run folder exists
+    monkeypatch.setattr(runner, "preflight", boom)   # dies before the run folder exists
     assert main(tmp_path, "q") == 8
     captured = capsys.readouterr()
     assert "internal error: RuntimeError: boom" in captured.err
@@ -580,7 +582,7 @@ def test_keyboard_interrupt_exits_130(tmp_path, env, capsys, monkeypatch):
         raise KeyboardInterrupt
 
     # Ctrl-C in preflight: the run folder does not exist yet, nothing may leak a traceback
-    monkeypatch.setattr(rs, "preflight", stopper)
+    monkeypatch.setattr(runner, "preflight", stopper)
     assert main(tmp_path, "q") == 130
     captured = capsys.readouterr()
     assert "interrupted; resume with --resume" in captured.err
@@ -588,7 +590,7 @@ def test_keyboard_interrupt_exits_130(tmp_path, env, capsys, monkeypatch):
     assert not (tmp_path / "run").exists()
 
     # Ctrl-C while a phase runs
-    monkeypatch.setattr(rs, "preflight", lambda agent: True)
+    monkeypatch.setattr(runner, "preflight", lambda agent: True)
     monkeypatch.setattr(rs.swarm.Swarm, "run_phase", stopper)
     assert main(tmp_path, "q") == 130
     captured = capsys.readouterr()
