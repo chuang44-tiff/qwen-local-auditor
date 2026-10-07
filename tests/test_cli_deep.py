@@ -150,7 +150,7 @@ def test_role_variant_usage_errors(tmp_path, server, fake, args, needle):
 
 def test_list_roles_is_unchanged(tmp_path):
     r = run(tmp_path, ["--list-roles"])
-    assert r.stdout.splitlines()[0] == "built-in: auditor, coder, mechanic, plain"
+    assert r.stdout.splitlines()[0] == "built-in: auditor, coder, mechanic, plain, tester"
 
 
 # ------------------------------------------------------------------ --subagents-nudge

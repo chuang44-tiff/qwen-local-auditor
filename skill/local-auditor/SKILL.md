@@ -53,6 +53,7 @@ qwen-agent -r auditor -C <dir> -f brief.md -o out.md
   single biggest lever on output quality.
 - Roles: `auditor` (grounded, cites `path:line`), `mechanic` (may edit), `plain`. Pass
   `-r auditor` for review work: with no `-r` there is no role prompt at all.
+- Browser/UI audits use `-r tester` — a real browser through Playwright (`--headed` to watch).
 - A bare run is read-only with MCP dropped. Writing requires `--write` or an explicit
   `--toolset` naming Edit/Write/Bash.
 - `-o` is relative to your current directory, never to `-C`.

@@ -112,6 +112,7 @@ TOOLS=""            # --allowed-tools : GRANTS permission, does not restrict
 TOOLS_EXPLICIT=0
 TOOLSET=""          # --tools         : RESTRICTS the available built-in set
 TOOLSET_EXPLICIT=0
+DISALLOWED=""       # --disallowedTools: HIDES tools from the model, grant or no grant
 READ_ONLY_FLAG=0    # --read-only given (refused with --test)
 WRITE_MODE=0       # --write     : allow Edit/Write
 ALL_TOOLS=0         # --all-tools : no restriction at all (dangerous)
@@ -119,6 +120,13 @@ WEB_MODE=0          # --web       : web access is opt-in (adds WebFetch only, ne
 case "${QWEN_WEB:-}" in 1) WEB_MODE=1 ;; esac
 SUBAGENTS=0         # --subagents : opt-in Task tool (each subagent is one more concurrent request)
 case "${QWEN_SUBAGENTS:-}" in 1) SUBAGENTS=1 ;; esac
+BROWSER=0           # --browser : a real browser through the Playwright MCP server (role tester implies it)
+HEADED=0            # --headed      : --browser with a visible window (implies --browser)
+BROWSER_EVAL=0      # --browser-eval: add mcp__playwright__browser_evaluate (implies --browser)
+BROWSER_DIR=""      # the browser run folder: made just before claude starts, kept after
+                    # the run -- it is the evidence
+BROWSER_ROOT=""     # its parent (QWEN_BROWSER_DIR or the cache dir), resolved against the
+                    # caller HERE, before the -C chdir; created with the folder itself
 STRICT_MCP=0
 STRICT_MCP_EXPLICIT=0
 MCP_CONFIG=""       # --mcp-config: load ONLY the MCP servers named in this file
@@ -187,7 +195,8 @@ PROMPT INPUT (exactly one)
       --stdin          Read the prompt from stdin.
 
 ROLE / SYSTEM PROMPT
-  -r, --role NAME      Prepend a role. Built-ins: auditor, coder, mechanic, plain.
+  -r, --role NAME      Prepend a role. Built-ins: auditor, coder, mechanic,
+                       plain, tester (browser testing; implies --browser).
                        Also resolves \$QWEN_ROLE_DIR/NAME.md (or .txt), then a
                        literal file path. Roles are APPENDED to Claude Code's
                        own system prompt, never replacing it (replacing it
@@ -392,6 +401,41 @@ DEPTH  (opt-in switches for deeper sessions; recorded under qwen_agent in --json
                        --subagents-nudge. Needs -r auditor or -r coder, or
                        --until-done.
 
+BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
+      --browser        Load exactly ONE MCP server, "playwright", which qwen-agent
+                       writes (npx -y --prefer-offline @playwright/mcp@0.0.83,
+                       headless, isolated; on Git Bash 'cmd /c npx -y
+                       --prefer-offline @playwright/mcp@0.0.83' -- native Claude
+                       Code cannot spawn npx directly) into a fresh browser run
+                       folder and passes with --mcp-config --strict-mcp-config: no
+                       other MCP server loads. The mcp__playwright__ browser tools
+                       join the run's --allowed-tools list on top of whatever
+                       toolset the run already has. Screenshots and page snapshots
+                       land in that folder; its path is printed on stderr and the
+                       folder is kept after the run -- it is the evidence. The
+                       folder is made only when the run actually starts: a refused
+                       run, a failed preflight and --dry-run leave none (--dry-run
+                       shows '<browser run folder>/mcp.json' as the config path).
+                       The browser opens any URL, the internet included,
+                       independently of --web; with --test a warning is printed:
+                       tests and checks can be gamed by browsing upstream answers.
+                       The server offers more tools than are granted; the ones no
+                       run gets (browser_run_code_unsafe, browser_install, and
+                       browser_evaluate without --browser-eval) are passed as
+                       --disallowedTools too, so the model never sees them.
+                       Refused with --mcp-config, --until-done and --interactive;
+                       allowed with --probe and --write. Role 'tester' implies
+                       this. (env QWEN_BROWSER_DIR, QWEN_PLAYWRIGHT_MCP)
+      --headed         --browser with a visible window instead of headless. Needs
+                       DISPLAY or WAYLAND_DISPLAY set, else exit 2; DISPLAY (and
+                       XAUTHORITY when set), else WAYLAND_DISPLAY (and
+                       XDG_RUNTIME_DIR when set), is passed to the browser.
+                       Implies --browser.
+      --browser-eval   --browser plus mcp__playwright__browser_evaluate: JavaScript
+                       run inside the page, the one browser tool that can do
+                       anything the page can. Off by default -- and hidden from the
+                       model's tools until asked for. Implies --browser.
+
 ENVIRONMENT  (also settable in the config file; flags win)
   QWEN_BASE_URL, QWEN_MODEL, QWEN_CTX, QWEN_AUTOCOMPACT, QWEN_EFFORT, QWEN_TIMEOUT
                        Defaults for the flags above.
@@ -414,6 +458,17 @@ ENVIRONMENT  (also settable in the config file; flags win)
   QWEN_CLAUDE_BIN      The claude executable. Default: claude.
   QWEN_TIMEOUT_BIN     A GNU timeout to use, or 'none' for the built-in watchdog.
   QWEN_ROLE_DIR        Extra roles as NAME.md or NAME.txt.
+  QWEN_BROWSER_DIR     Where --browser run folders go; a relative value is
+                       relative to the caller's directory (like QWEN_OUTDIR).
+                       Default: \$XDG_CACHE_HOME/qwen-agent/browser (else
+                       ~/.cache/qwen-agent/browser).
+  QWEN_PLAYWRIGHT_MCP  Replaces the browser MCP server command --browser writes
+                       into its config (default 'npx -y --prefer-offline
+                       @playwright/mcp@0.0.83'; on Git Bash the built-in default
+                       is 'cmd /c npx -y --prefer-offline @playwright/mcp@0.0.83'
+                       and this variable overrides that too). Split on whitespace
+                       with no pathname expansion: the first word is the command,
+                       the rest its leading args; a '*' stays literal.
   QWEN_OUTDIR          Where -w puts generated output files. Default: cwd.
                        A --probe patch with no -o goes here only when you set
                        it; unset, it goes to the probe directory instead.
@@ -554,6 +609,23 @@ You are performing a MECHANICAL task. Rules:
 - Finish with a terse list of every location you changed.
 ROLE_EOF
       ;;
+    tester)
+      cat <<'ROLE_EOF'
+You are operating as a BROWSER TESTER. You drive a real browser through the
+Playwright tools. Method: open the page and take an accessibility snapshot;
+exercise every control and flow named in the task as a user would, including
+empty, invalid and repeated input; chain actions into sequences (do something,
+reset or undo it, then do it again) and check that the state after the sequence
+is what a user would expect, not only what the screen shows right after each
+click; after each action take a snapshot and compare what the page shows with
+what a user would expect; take a screenshot whenever the evidence is visual
+(layout, images, canvas, colours) and look at it. Report each defect with:
+steps to reproduce, expected, actual, and evidence (the snapshot lines or the
+screenshot file name). Then list what you tested that worked. Only report what
+you observed in the browser; if a tool failed or an image was not visible to
+you, say so. Do not read or change source files unless the task asks you to.
+ROLE_EOF
+      ;;
     *) return 1 ;;
   esac
 }
@@ -612,7 +684,7 @@ ROLE_EOF
 REVIEW_PROMPT='Review round: before your answer is final, try to break it. Go back over every claim you made and every change you made. For each one, look for the input, state or code path that would make it wrong, and check it: read the code again and, where you have a shell, run a probe or a test. Correct or drop anything that does not survive, and add anything you missed. Then reply with your complete revised answer. It replaces your previous answer, so repeat everything that still stands, in exactly the format your previous answer had to follow.'
 
 list_roles() {
-  echo "built-in: auditor, coder, mechanic, plain"
+  echo "built-in: auditor, coder, mechanic, plain, tester"
   if [ -d "$ROLE_DIR" ]; then
     echo "from $ROLE_DIR:"
     # Portable on purpose: no find -printf, no GNU sed alternation (BSD/macOS).
@@ -648,6 +720,11 @@ apply_role_defaults() {
         WRITE_MODE=1
       fi
       ;;
+    tester)
+      # A tester drives a real browser: it implies --browser. The MCP config, the
+      # run folder and the grants are wired to BROWSER below, where this takes hold.
+      BROWSER=1
+      ;;
   esac
 }
 
@@ -666,7 +743,8 @@ while [ $# -gt 0 ]; do
   # flag. The --interactive refusals below list the =-forms of their switches too;
   # the until-done refusals of the switches named here need no such repeat.
   case "$arg" in
-    --probe=*|--probe-here=*|--keep-sandbox=*|--review-round=*|--deep=*|--subagents-nudge=*)
+    --probe=*|--probe-here=*|--keep-sandbox=*|--review-round=*|--deep=*|--subagents-nudge=*|\
+    --browser=*|--headed=*|--browser-eval=*)
       die "option ${arg%%=*} takes no value (got '$arg')"; exit $QA_USAGE ;;
   esac
   # support --opt=value
@@ -715,6 +793,9 @@ while [ $# -gt 0 ]; do
                           # the flag.
                           [ -n "$2" ] || { die "--mcp-config needs a file path, not an empty string"; exit $QA_USAGE; }
                           MCP_CONFIG="$2"; shift 2 ;;
+    --browser)            BROWSER=1; shift ;;
+    --headed)             HEADED=1; BROWSER=1; shift ;;
+    --browser-eval)       BROWSER_EVAL=1; BROWSER=1; shift ;;
     -e|--effort)          need_arg "$1" $(($#-1)); EFFORT="$2"; shift 2 ;;
     -m|--model)           need_arg "$1" $(($#-1)); MODEL="$2"; shift 2 ;;
     -b|--base)            need_arg "$1" $(($#-1)); BASE="$2"; shift 2 ;;
@@ -816,9 +897,30 @@ if [ "$INTERACTIVE" -eq 1 ]; then
       # Same reason: it only steers the headless fence (a strict MCP load an
       # interactive session never gets), so it would be silently dropped.
       --mcp-config|--mcp-config=*)       _ia_refuse "--mcp-config" ;;
+      # --browser writes its own MCP config and grants its tools as a headless run
+      # does; an interactive session passes neither, so the browser would not come.
+      --browser|--browser=*)             _ia_refuse "--browser" ;;
+      --headed|--headed=*)               _ia_refuse "--headed" ;;
+      --browser-eval|--browser-eval=*)   _ia_refuse "--browser-eval" ;;
     esac
   done
   unset _a
+fi
+
+# --------------------------------------------------------- --browser refusals
+# Before the until-done block below (which execs the supervisor and never returns)
+# and before anything is created: the loop's rounds are headless coder runs that get
+# no browser, and --browser writes its own single-server MCP config -- a caller's
+# --mcp-config would leave two claims on which servers load. --interactive is refused
+# by the loop above. The --mcp-config check repeats below, after role resolution,
+# where a 'tester' role turns --browser on beside a caller's --mcp-config too.
+if [ "$BROWSER" -eq 1 ]; then
+  [ -z "$MCP_CONFIG" ] || {
+    die "--browser brings its own MCP config (one server: playwright): --mcp-config cannot be combined with --browser"
+    exit $QA_USAGE; }
+  [ -z "$UNTIL_DONE" ] || {
+    die "--browser cannot be combined with --until-done: the loop's rounds are headless coder runs without a browser"
+    exit $QA_USAGE; }
 fi
 
 # ------------------------------------------------- probe git hygiene / --deep
@@ -1136,6 +1238,35 @@ if [ -n "$EXTRA_SYS" ]; then
 
 $EXTRA_SYS"; else SYSTEM="$EXTRA_SYS"; fi
 fi
+
+# ------------------------------------------------------------- --browser setup
+# Resolved after the role so -r tester can imply --browser. ONE MCP server, named
+# "playwright", is written as a config into a fresh browser run folder and passed with
+# --mcp-config, which implies --strict-mcp: no other MCP server loads. Nothing is
+# CREATED here: the folder is made just before claude is started (below the preflight),
+# after every refusal, validation and preflight has had its chance to exit -- a run
+# that dies before claude starts leaves no browser folder behind, and --dry-run makes
+# nothing at all. The folder is NEVER the caller's directory or the -C directory: it
+# lives under QWEN_BROWSER_DIR (default $XDG_CACHE_HOME/qwen-agent/browser, else
+# ~/.cache/...; a RELATIVE value resolves against the caller, like QWEN_OUTDIR), and
+# its root is absolutized HERE -- before the -C chdir below -- while this process
+# still stands in the caller's directory.
+if [ "$BROWSER" -eq 1 ]; then
+  [ -z "$MCP_CONFIG" ] || {
+    die "--browser brings its own MCP config (one server: playwright): --mcp-config cannot be combined with --browser"
+    exit $QA_USAGE; }
+  if [ "$HEADED" -eq 1 ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    die "--headed needs a display (DISPLAY is not set)"
+    exit $QA_USAGE
+  fi
+  BROWSER_ROOT="${QWEN_BROWSER_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/qwen-agent/browser}"
+  case "$BROWSER_ROOT" in /*|[A-Za-z]:*) ;; *) BROWSER_ROOT="$PWD/$BROWSER_ROOT" ;; esac
+  # --dry-run shows this in place of the real path: the run folder's name comes from
+  # mktemp, so there is no real config path until a run that starts makes the folder.
+  [ "$DRY_RUN" -eq 1 ] && MCP_CONFIG='<browser run folder>/mcp.json'
+  STRICT_MCP=1
+fi
+
 # ------------------------------------------------------ effective tool policy
 # The SAFE path is the one you get by typing nothing. Mutation is opt-in.
 if [ "$TOOLSET_EXPLICIT" -eq 0 ]; then
@@ -1437,6 +1568,42 @@ $_nudge"; else SYSTEM="$_nudge"; fi
   unset _nudge
 fi
 
+# --browser: the Playwright tools join the ONE --allowed-tools list the run already
+# built (a second -t would replace it, not extend it), on top of whatever toolset the
+# run has -- --tools governs built-ins only, MCP tools survive it, so the read-only
+# default stays read-only. The server OFFERS more tools than are granted, and a tool
+# that is merely not granted still shows up in the model's tool list: it gets tried and
+# the run dies on the refusal. So the ones no run gets are passed to claude as
+# --disallowedTools too, which keeps them out of the model's sight. browser_evaluate
+# runs arbitrary JavaScript inside the page: it is granted, and left visible, only when
+# --browser-eval asked for it. browser_run_code_unsafe runs arbitrary code in the
+# browser's own process and browser_install downloads a browser: never either.
+if [ "$BROWSER" -eq 1 ]; then
+  for _t in browser_navigate browser_navigate_back browser_snapshot browser_find \
+            browser_click browser_type browser_fill_form browser_press_key \
+            browser_select_option browser_hover browser_drag browser_drop \
+            browser_file_upload browser_handle_dialog browser_tabs browser_resize \
+            browser_emulate_media browser_wait_for browser_take_screenshot \
+            browser_console_messages browser_network_requests browser_network_request \
+            browser_close; do
+    TOOLS="${TOOLS:+$TOOLS,}mcp__playwright__$_t"
+  done
+  unset _t
+  DISALLOWED="mcp__playwright__browser_run_code_unsafe,mcp__playwright__browser_install"
+  if [ "$BROWSER_EVAL" -eq 1 ]; then
+    TOOLS="${TOOLS:+$TOOLS,}mcp__playwright__browser_evaluate"
+  else
+    DISALLOWED="$DISALLOWED,mcp__playwright__browser_evaluate"
+  fi
+  if [ "$TEST_MODE" -eq 1 ]; then
+    # Raw printf, not die(): like the --web warning this line must START with
+    # "WARNING: --browser with --test", and unconditional (not note()) so -q cannot
+    # hide it: the browser opens the same upstream pages -- internet included,
+    # independently of --web -- that a run's tests should derive their answers from.
+    printf 'WARNING: --browser with --test: tests and checks can be gamed by browsing upstream answers\n' >&2
+  fi
+fi
+
 # ------------------------------------------------------- validate -o target
 # Do this BEFORE spending a model call: a completed run thrown away because of a
 # typo'd path is the worst outcome, and with --timeout 1800 it can cost 30 min.
@@ -1589,6 +1756,86 @@ if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# ------------------------------------------------------- the browser run folder
+# Made HERE -- after every refusal, validation and preflight, and never for --dry-run
+# (which exits below): a run that never gets to start claude leaves no browser folder
+# behind. BROWSER_ROOT was resolved against the caller's directory up in the
+# --browser setup; nothing since has needed the folder. The folder name is a fresh
+# mktemp -d and is kept when the run ends: the screenshots and page snapshots inside
+# are the evidence. The MCP config file lives in it.
+if [ "$BROWSER" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+  mkdir -p -- "$BROWSER_ROOT" \
+    || { die "--browser: cannot create the run folder root: $BROWSER_ROOT"; exit $QA_HARNESS; }
+  BROWSER_DIR="$(mktemp -d "$BROWSER_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")" \
+    || { die "--browser: could not create a run folder under $BROWSER_ROOT"; exit $QA_HARNESS; }
+  # The server command line. QWEN_PLAYWRIGHT_MCP replaces the whole
+  # `npx -y --prefer-offline @playwright/mcp@0.0.83` part (and the Git Bash `cmd /c`
+  # form of it): split on whitespace, the first word the command, the rest its
+  # leading args (before the browser switches). Pathname expansion is OFF across the
+  # split -- "node /x/*.js" names a literal file and must reach the config as one
+  # word even when files match the pattern.
+  _pw="${QWEN_PLAYWRIGHT_MCP:-}"
+  case "$_pw" in
+    *[![:space:]]*) ;;
+    # Native Windows Claude Code cannot spawn `npx` directly as a stdio MCP server
+    # (it is npx.cmd, and without the wrapper the connection just closes). cygpath
+    # on PATH is what says Git Bash: there the server is started through cmd /c.
+    *) if command -v cygpath >/dev/null 2>&1; then
+         _pw="cmd /c npx -y --prefer-offline @playwright/mcp@0.0.83"
+       else
+         _pw="npx -y --prefer-offline @playwright/mcp@0.0.83"
+       fi ;;
+  esac
+  PW_CMD=""
+  PW_ARGS=()
+  set -f
+  # shellcheck disable=SC2086  # deliberate word split: the value is a whole command line
+  for _w in $_pw; do
+    if [ -z "$PW_CMD" ]; then PW_CMD="$_w"; else PW_ARGS+=("$_w"); fi
+  done
+  set +f
+  unset _pw _w
+  [ "$HEADED" -eq 1 ] || PW_ARGS+=("--headless")
+  # --output-dir takes the NATIVE spelling: claude starts the server natively, and on
+  # Git Bash a POSIX /c/... path would not mean anything to it.
+  PW_ARGS+=("--isolated" "--output-dir" "$(native_path "$BROWSER_DIR")"
+            "--image-responses" "allow" "--viewport-size" "1280,900")
+  MCP_CONFIG="$BROWSER_DIR/mcp.json"
+  # The argv is handed over verbatim (MSYS2_ARG_CONV_EXCL, the same guard the child
+  # gets): an override like "node /x/cli.js" must reach the JSON unconverted.
+  if ! MSYS2_ARG_CONV_EXCL='*' "$QA_PY" - "$(native_path "$MCP_CONFIG")" "$HEADED" \
+       "$PW_CMD" ${PW_ARGS[@]+"${PW_ARGS[@]}"} <<'PY'
+import json, os, sys
+out, headed, cmd = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
+server = {"command": cmd, "args": sys.argv[4:]}
+if headed:
+    # The browser needs the caller's session: copy what qwen-agent has -- the X
+    # display when there is one, else the Wayland socket (which lives under
+    # XDG_RUNTIME_DIR, so the server needs that too). No empty DISPLAY key on a
+    # Wayland session: it would only send the server looking for an X display.
+    env = {}
+    if os.environ.get("DISPLAY"):
+        env["DISPLAY"] = os.environ["DISPLAY"]
+        if os.environ.get("XAUTHORITY"):
+            env["XAUTHORITY"] = os.environ["XAUTHORITY"]
+    elif os.environ.get("WAYLAND_DISPLAY"):
+        env["WAYLAND_DISPLAY"] = os.environ["WAYLAND_DISPLAY"]
+        if os.environ.get("XDG_RUNTIME_DIR"):
+            env["XDG_RUNTIME_DIR"] = os.environ["XDG_RUNTIME_DIR"]
+    server["env"] = env
+with open(out, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump({"mcpServers": {"playwright": server}}, fh, indent=2)
+    fh.write("\n")
+PY
+  then
+    die "--browser: could not write the MCP config: $MCP_CONFIG"
+    exit $QA_HARNESS
+  fi
+  unset PW_CMD PW_ARGS
+  # die, not note: -q must not hide where the evidence of a browser run lands.
+  die "browser: screenshots and page snapshots in $(native_path "$BROWSER_DIR")"
+fi
+
 # --------------------------------------------------- build the claude argv
 if [ "$INTERACTIVE" -eq 1 ]; then
   # No -p/--print, and none of the flags a headless run needs a fence for: no
@@ -1610,6 +1857,11 @@ else
     --model "$MODEL"
     --output-format json
     --allowed-tools "$TOOLS")
+  # --disallowedTools HIDES a tool from the model. A tool that is merely not granted
+  # still reaches the model's tool list, where it gets tried and the run dies on the
+  # refusal; the browser tools are collected into ONE comma-joined value above, so
+  # this is one flag, ever. (The review round reuses it: it is part of the base argv.)
+  [ -n "$DISALLOWED" ] && CLAUDE_ARGV+=(--disallowedTools "$DISALLOWED")
   [ "$EFFORT" = default ] || CLAUDE_ARGV+=(--effort "$EFFORT")
   # --test must not depend on any settings file, and --restricted ignores them
   # anyway -- passing the flag there would only advertise a door the fence shuts.
@@ -1620,7 +1872,16 @@ else
   if [ -n "$TOOLSET" ]; then CLAUDE_ARGV+=(--tools "$TOOLSET")
   elif [ "$TOOLSET_NONE" -eq 1 ]; then CLAUDE_ARGV+=(--tools "")
   fi
-  [ -n "$MCP_CONFIG" ] && CLAUDE_ARGV+=(--mcp-config "$(native_path "$MCP_CONFIG")")
+  if [ -n "$MCP_CONFIG" ]; then
+    if [ "$BROWSER" -eq 1 ] && [ "$DRY_RUN" -eq 1 ]; then
+      # --browser's dry-run value is the "<browser run folder>/mcp.json" placeholder,
+      # not a path yet (only a run that starts makes the folder): print it verbatim,
+      # never converted to a native spelling by cygpath.
+      CLAUDE_ARGV+=(--mcp-config "$MCP_CONFIG")
+    else
+      CLAUDE_ARGV+=(--mcp-config "$(native_path "$MCP_CONFIG")")
+    fi
+  fi
   [ "$STRICT_MCP" -eq 1 ] && CLAUDE_ARGV+=(--strict-mcp-config)
   [ -n "$SYSTEM" ]    && CLAUDE_ARGV+=(--append-system-prompt "$SYSTEM")
   [ -n "$PERM_MODE" ] && CLAUDE_ARGV+=(--permission-mode "$PERM_MODE")
@@ -1862,6 +2123,10 @@ if mode == "json":
         if e.get("QA_META_PROBE") == "1":
             meta["patch"] = e.get("QA_META_PATCH") or None
             meta["sandbox"] = e.get("QA_META_SANDBOX") or None
+        if e.get("QA_META_BROWSER") == "1":
+            meta["browser"] = {"dir": e.get("QA_META_BROWSER_DIR") or None,
+                               "headed": e.get("QA_META_BROWSER_HEADED") == "1",
+                               "eval": e.get("QA_META_BROWSER_EVAL") == "1"}
         obj["qwen_agent"] = meta
     json.dump(obj, sys.stdout, indent=2); sys.stdout.write("\n")
 else:
@@ -1929,16 +2194,21 @@ repro_section() {  # the '## REPRO FILES' block for the newline-separated files 
   done
 }
 
-# The depth switches this run used, for the qwen_agent key of --json's record. Exported
-# only when one is set, so a run without them emits Claude Code's record unchanged.
+# The switches this run used (depth switches, --browser), for the qwen_agent key of
+# --json's record. Exported only when one is set, so a run without any emits Claude
+# Code's record unchanged.
 export_meta() {
-  [ -n "$ROLE_VARIANT" ] || [ "$NUDGE" -eq 1 ] || [ "$REVIEW_ROUND" -eq 1 ] || [ "$PROBING" -eq 1 ] || return 0
-  local kept=""
+  [ -n "$ROLE_VARIANT" ] || [ "$NUDGE" -eq 1 ] || [ "$REVIEW_ROUND" -eq 1 ] || [ "$PROBING" -eq 1 ] \
+    || [ "$BROWSER" -eq 1 ] || return 0
+  local kept="" browser_dir_meta=""
   [ "$KEEP_SANDBOX" -eq 1 ] && kept="$PROBE_CWD"
+  browser_dir_meta="$(native_path "$BROWSER_DIR")"
   export QA_META=1 QA_META_VARIANT="$ROLE_VARIANT" QA_META_NUDGE="$NUDGE" \
          QA_META_REVIEW="$REVIEW_ROUND" QA_META_REVIEW_STATUS="$REVIEW_STATUS" \
          QA_META_REVIEW_FIRST="$REVIEW_FIRST" QA_META_REVIEW_WARNING="$REVIEW_WARNING" \
-         QA_META_PROBE="$PROBING" QA_META_PATCH="$PROBE_PATCH" QA_META_SANDBOX="$kept"
+         QA_META_PROBE="$PROBING" QA_META_PATCH="$PROBE_PATCH" QA_META_SANDBOX="$kept" \
+         QA_META_BROWSER="$BROWSER" QA_META_BROWSER_DIR="$browser_dir_meta" \
+         QA_META_BROWSER_HEADED="$HEADED" QA_META_BROWSER_EVAL="$BROWSER_EVAL"
 }
 
 # --probe --write: the session's edits as a patch -- FILE.patch next to -o FILE (always

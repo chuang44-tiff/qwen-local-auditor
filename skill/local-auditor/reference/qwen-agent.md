@@ -33,6 +33,7 @@ passed through verbatim; nothing is eval'd, and a prompt starting with `-` is sa
 | `auditor` | grounded review: cites `path:line`. Pass it for review work; with no `-r` there is no role prompt at all |
 | `mechanic` | may edit; implies `--write` |
 | `coder` | the role `--until-done` always runs with |
+| `tester` | drives a real browser through the Playwright tools; implies `--browser` (see "Browser testing" below) |
 | `plain` | an empty role: no role instructions are added |
 | anything else | resolved as `$QWEN_ROLE_DIR/NAME.md` (or `.txt`), then as a literal file path |
 
@@ -44,8 +45,8 @@ Code's own system prompt, never replacing it (replacing it breaks tool use).
 
 The default is read-only; every widening is a flag. Any run that can modify files or run
 a shell (`--write`, the `coder` and `mechanic` roles, `--all-tools`, a `--toolset` naming Edit/Write/Bash, a
-read-only `--test` run) prints a warning on stderr, and so does `--web` combined with
-`--test`.
+read-only `--test` run) prints a warning on stderr, and so does `--web` or `--browser`
+combined with `--test`.
 
 | you pass | the run gets |
 |---|---|
@@ -108,6 +109,90 @@ own fields (a run without one emits Claude Code's record unchanged):
 `review_round` (`status` `ok`, `failed` or `skipped`) is present with `--review-round`,
 `patch` and `sandbox` (the kept path, else `null`) with `--probe`/`--probe-here`. With
 `--until-done` the switches behave as described in [`coding.md`](coding.md).
+
+## Browser testing (opt-in)
+
+`--browser` gives the session a real browser. qwen-agent writes an MCP config for
+**one server**, `playwright` — the command `npx -y --prefer-offline
+@playwright/mcp@0.0.83` with `--headless --isolated --output-dir <run folder>
+--image-responses allow --viewport-size 1280,900` — into a fresh browser run folder
+and passes it with `--mcp-config`, which implies `--strict-mcp-config`: no other MCP
+server loads. On Git Bash (native Windows Claude Code) the built-in command is written
+as `cmd /c npx -y --prefer-offline @playwright/mcp@0.0.83`: Claude Code cannot spawn
+`npx` there (it is `npx.cmd`, and without the `cmd /c` wrapper the server connection
+just closes); `QWEN_PLAYWRIGHT_MCP` overrides that form too (below). The browser tools
+join the run's existing `--allowed-tools` list (one
+list, on top of whatever toolset the run has — `--tools` governs built-ins only, MCP
+tools survive it, so the read-only default stays):
+
+```
+browser_navigate, browser_navigate_back, browser_snapshot, browser_find, browser_click,
+browser_type, browser_fill_form, browser_press_key, browser_select_option, browser_hover,
+browser_drag, browser_drop, browser_file_upload, browser_handle_dialog, browser_tabs,
+browser_resize, browser_emulate_media, browser_wait_for, browser_take_screenshot,
+browser_console_messages, browser_network_requests, browser_network_request, browser_close
+```
+
+Each is granted as `mcp__playwright__<name>`. The server **offers more tools than that**,
+and a tool that is merely not granted still reaches the model's tool list — where the model
+tries it and the run dies on the refusal. So the tools qwen-agent does not grant go to
+Claude Code as one `--disallowedTools` value (comma-joined, one flag) too, which keeps them
+out of the model's sight entirely:
+
+| hidden tool | why |
+|---|---|
+| `mcp__playwright__browser_run_code_unsafe` | runs arbitrary code in the browser's own process; never granted, always hidden |
+| `mcp__playwright__browser_install` | downloads a browser mid-run; never granted, always hidden |
+| `mcp__playwright__browser_evaluate` | runs arbitrary JavaScript inside the page; ungranted **and** hidden unless `--browser-eval`, which both grants it and stops hiding it |
+
+| switch | effect |
+|---|---|
+| `--browser` | refused with `--mcp-config` ("--browser brings its own MCP config"), `--until-done` and `--interactive` (exit 2); allowed with `--probe` and `--write`; the `tester` role implies it |
+| `--headed` | a visible browser instead of headless. Needs `DISPLAY` or `WAYLAND_DISPLAY` set, else exit 2 ("--headed needs a display (DISPLAY is not set)"). The server entry carries an `env` copied from qwen-agent's environment: `DISPLAY` (and `XAUTHORITY` when set), or — with only `WAYLAND_DISPLAY` set — `WAYLAND_DISPLAY` (and `XDG_RUNTIME_DIR` when set) and no `DISPLAY` key at all. Implies `--browser` |
+| `--browser-eval` | grants `mcp__playwright__browser_evaluate` and stops hiding it; implies `--browser` |
+
+`--browser` can open **any URL, the internet included**, independently of `--web`:
+`--web` gates only the `WebFetch` built-in, and the browser needs no web opt-in to
+navigate off localhost. With `--test` it prints the same style of warning as `--web`
+with `--test` (`WARNING: --browser with --test: tests and checks can be gamed by
+browsing upstream answers`): the browser reaches the same upstream pages a run's
+tests and checks should derive their answers from.
+
+The run folder is
+`${QWEN_BROWSER_DIR:-$XDG_CACHE_HOME/qwen-agent/browser}/<UTC stamp>-XXXXXX` (else
+`~/.cache/...`; `mktemp -d`) — the default is never the caller's or the `-C`
+directory; a RELATIVE `QWEN_BROWSER_DIR` resolves against the caller's directory
+(like `QWEN_OUTDIR`). It is made only once every refusal, validation and preflight
+has passed and claude is about to start: a run that fails before that, and every
+`--dry-run`, creates nothing (`--dry-run` shows `<browser run folder>/mcp.json` as
+the would-be config path). It is the server's `--output-dir`: screenshots, page
+snapshots and downloads land there. Its path is printed on stderr (`browser:
+screenshots and page snapshots in PATH`) and the folder is **kept** after the run:
+it is the evidence. Under `--probe` or `--test` the session may be unable to `Read`
+screenshot files from the run folder; the screenshot image itself still reaches the
+model inline (`--image-responses allow`).
+`QWEN_BROWSER_DIR` moves it; `QWEN_PLAYWRIGHT_MCP` replaces the whole
+`npx -y --prefer-offline @playwright/mcp@0.0.83` part of the server command (and the
+Git Bash `cmd /c` form of it), split on whitespace with pathname expansion off: the
+first word is the command, the rest its leading args, and a `*` in the value stays
+literal (`node /x/*.js` reaches the config as one word).
+
+The role `tester` implies `--browser` and carries the browser-testing method (snapshot,
+exercise, chain actions into sequences and check the state they leave, compare, screenshot;
+defects with steps/expected/actual/evidence). It has no role variants. With `--json`,
+`qwen_agent` carries `"browser": {"dir": PATH, "headed": bool, "eval": bool}`.
+
+The first run needs the npm package and a Playwright browser installed:
+
+```bash
+npx -y @playwright/mcp@0.0.83 --help      # fetches the package; --help proves it runs
+npx playwright install chromium           # fetches the browser itself
+```
+
+```bash
+qwen-agent -r tester "test the sign-up form at http://localhost:3000"
+qwen-agent -r tester --headed "watch the checkout flow at http://localhost:3000"
+```
 
 ## Model, context and effort
 
