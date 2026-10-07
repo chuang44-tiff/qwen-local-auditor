@@ -6,6 +6,7 @@ fake records every call's argv NUL-separated), and the MCP config is read back f
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 
@@ -41,6 +42,18 @@ def mcp_entry(argv):
     return cfg, servers["playwright"]
 
 
+def assert_env_path(got, want):
+    """A POSIX path qwen-agent copied from its environment into the config. Under Git
+    Bash the MSYS runtime rewrites such a value into a Windows path (/tmp -> %TEMP%,
+    /run -> the Git install) when it starts native Python -- the spelling the native
+    server needs -- so there the copy is checked by its shape and its last part."""
+    if os.name == "nt":
+        assert re.match(r"^[A-Za-z]:[/\\]", got), got
+        assert got.replace("\\", "/").endswith("/" + want.rsplit("/", 1)[1]), got
+    else:
+        assert got == want
+
+
 def out_dir(entry):
     args = entry["args"]
     return args[args.index("--output-dir") + 1]
@@ -54,8 +67,13 @@ def test_browser_writes_one_playwright_server_and_passes_it(tmp_path, server, fa
     argv, _ = calls(tmp_path)[0]
     assert "--strict-mcp-config" in argv                    # no other MCP server loads
     cfg, entry = mcp_entry(argv)
-    assert entry["command"] == "npx"
-    assert entry["args"][:3] == ["-y", "--prefer-offline", "@playwright/mcp@0.0.83"]
+    args = entry["args"]
+    if os.name == "nt":                     # Git Bash: the cmd /c form (next test)
+        assert entry["command"] == "cmd" and args[:2] == ["/c", "npx"]
+        args = args[2:]
+    else:
+        assert entry["command"] == "npx"
+    assert args[:3] == ["-y", "--prefer-offline", "@playwright/mcp@0.0.83"]
     assert "--headless" in entry["args"] and "--isolated" in entry["args"]
     d = out_dir(entry)
     assert same_path(d).startswith(same_path(tmp_path / "browser"))
@@ -248,7 +266,7 @@ def test_headed_drops_headless_and_passes_display(tmp_path, server, fake):
     _, entry = mcp_entry(argv)
     assert "--headless" not in entry["args"]
     assert entry["env"]["DISPLAY"] == ":9"
-    assert entry["env"]["XAUTHORITY"] == "/tmp/xauth.1"
+    assert_env_path(entry["env"]["XAUTHORITY"], "/tmp/xauth.1")
 
 
 def test_headed_on_wayland_passes_wayland_env(tmp_path, server, fake):
@@ -262,7 +280,7 @@ def test_headed_on_wayland_passes_wayland_env(tmp_path, server, fake):
     _, entry = mcp_entry(argv)
     assert "--headless" not in entry["args"]
     assert entry["env"]["WAYLAND_DISPLAY"] == "wayland-1"
-    assert entry["env"]["XDG_RUNTIME_DIR"] == "/run/x"
+    assert_env_path(entry["env"]["XDG_RUNTIME_DIR"], "/run/x")
     assert "DISPLAY" not in entry["env"]
     assert "XAUTHORITY" not in entry["env"]
 

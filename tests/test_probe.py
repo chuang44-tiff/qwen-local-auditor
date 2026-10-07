@@ -230,7 +230,12 @@ def test_create_and_diff_never_write_the_target_index(tmp_path, root):
 
 NAMES = ["café-ü"]
 if os.name == "posix":
-    NAMES.append(os.fsdecode(b"caf\xe9") + "-raw")     # byte 0xE9 alone: not UTF-8 decodable
+    # byte 0xE9 alone: not UTF-8 decodable. Linux keeps such a name as raw bytes;
+    # macOS' APFS refuses to create it at all (EILSEQ), so there is nothing to test.
+    NAMES.append(pytest.param(
+        os.fsdecode(b"caf\xe9") + "-raw",
+        marks=pytest.mark.skipif(sys.platform == "darwin",
+                                 reason="APFS rejects file names that are not UTF-8")))
 
 
 @pytest.mark.parametrize("name", NAMES)
