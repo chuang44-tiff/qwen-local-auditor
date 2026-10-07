@@ -154,6 +154,16 @@ class Workflow:
         base = "%s-%d" % (name, k) if wave == 1 else "%s-w%d-%d" % (name, wave, k)
         return ("r%d-" % self.round if self.round > 1 else "") + base
 
+    def browser_dir(self, unit_name):
+        """<run>/browser/<unit_name>: the evidence root of one browser-fenced unit, the
+        path _unit hands its session as QWEN_BROWSER_DIR. qwen-agent --browser makes a
+        fresh timestamped folder inside it for every call it runs -- a repair round or a
+        retry gets one of its own -- and writes that call's screenshots and page snapshots
+        there, so a report that names this folder points at every session the unit ran. The
+        engine only names the path: qwen-agent creates it, and nothing here removes it
+        afterwards -- it is the evidence."""
+        return self.run_dir / "browser" / str(unit_name)
+
     def _past_deadline(self):
         return self.sw.deadline is not None and time.time() >= self.sw.deadline
 
@@ -183,6 +193,10 @@ class Workflow:
         if r.fence == "read":
             u.cwd = self.target
             u.key_extra = "target:%s" % self._fingerprint()
+        if r.fence == "browser":
+            # one evidence root per unit, inside the run folder: what the unit's session
+            # is given is QWEN_BROWSER_DIR, and wf.browser_dir(unit) names the same path
+            u.env = {"QWEN_BROWSER_DIR": str(self.browser_dir(u.name))}
         if r.fence == "sandbox":
             self._sandbox_unit(u)
             u.parse = self._sandbox_parse(u, parse, batch)

@@ -2,15 +2,26 @@
 
 Each fence maps to the qwen-agent flags hardened for the released qwen-deep-research. Every unit also gets
 --permission-mode dontAsk and --warn-denials from swarm.Swarm. The flag values are part
-of each unit's cache key (Swarm._key hashes toolset, grants, web and the mcp.json text).
+of each unit's cache key (Swarm._key hashes toolset, grants, web and the mcp.json text, and
+--browser for a browser-fenced unit only: every other fence's key is exactly as it was).
 
 | fence   | toolset                        | grants (-t)             | --web | --mcp-config | -C           |
 |---------|--------------------------------|-------------------------|-------|--------------|--------------|
 | none    | none                           | -                       | no    | no           | agents/<unit>|
+| browser | none (--browser)               | -                       | no    | its own      | agents/<unit>|
 | search  | none                           | mcp__search__search     | no    | yes          | agents/<unit>|
 | web     | none                           | mcp__search__search     | yes   | yes          | agents/<unit>|
 | read    | Read,Glob,Grep                 | Read,Glob,Grep          | no    | no           | --target     |
 | sandbox | Read,Edit,Write,Bash,Glob,Grep | the same six            | no    | no           | a sandbox    |
+
+The `browser` row is `none` plus qwen-agent --browser: qwen-agent writes its own ONE-server
+Playwright MCP config and grants the mcp__playwright__ tools itself, so a browser unit
+carries no --mcp-config of ours to begin with (qwen-agent refuses the pair). Its
+QWEN_BROWSER_DIR is set per unit by api.Workflow to <run>/browser/<unit>: qwen-agent makes a
+fresh timestamped folder inside that root and its screenshots and page snapshots land there,
+so a unit's evidence stays inside the run folder, beside the unit that made it. It is not a
+web fence: a UI suite runs against local URLs, so browser units run at --seats and need no
+search preflight.
 """
 import json
 import os
@@ -23,15 +34,23 @@ SANDBOX_TOOLS = "Read,Edit,Write,Bash,Glob,Grep"
 WEB_FENCES = ("search", "web")         # run at --web-seats; need mcp.json and a search preflight
 TARGET_FENCES = ("read", "sandbox")    # need --target
 SEARCH_SERVER = pathlib.Path(__file__).resolve().parents[1] / "search_mcp.py"
-DESCRIBE = {"none": "no tools", "search": "search", "web": "search + WebFetch",
+DESCRIBE = {"none": "no tools", "browser": "a real browser (Playwright)", "search": "search",
+            "web": "search + WebFetch",
             "read": "Read/Glob/Grep in --target", "sandbox": "edit + Bash in a sandbox copy"}
 
 
 def unit_fields(fence, mcp=None):
     """swarm.Unit keyword arguments for `fence` (cwd is set by the caller for read and
-    sandbox). `mcp` is the run's mcp.json path, required for the web fences."""
+    sandbox, and the browser fence's QWEN_BROWSER_DIR by api.Workflow). `mcp` is the run's
+    mcp.json path, required for the web fences."""
     if fence == "none":
         return {"toolset": "none", "grants": "", "web": False, "mcp_config": None}
+    if fence == "browser":
+        # --browser: qwen-agent writes the Playwright MCP config itself and grants its
+        # tools, so the unit asks for no toolset, no grants and no --mcp-config of ours
+        # (qwen-agent refuses --browser beside a caller's --mcp-config).
+        return {"toolset": "none", "grants": "", "web": False, "mcp_config": None,
+                "browser": True}
     if fence in WEB_FENCES:
         if mcp is None:
             raise ValueError("fence %r needs the run's mcp.json" % fence)

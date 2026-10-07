@@ -27,10 +27,11 @@ and how to use these, so "have the local model review this" is enough.
   `/v1/messages`. vLLM does, and also lists models at `/v1/models`, which the tools use to
   pick the model and read its context window.
 - bash (Linux, macOS, or Git Bash on Windows), Python 3.8+ (stdlib only), curl, git.
-- tmux for `qwen-cc`. Internet and a search backend (SearXNG or a Brave key) are needed only
-  by research — `qwen-deep-research`, or a `qwen-swarm` workflow whose roles have a `search`
-  or `web` fence. Nothing else needs the network to do its work, and no other fence adds a
-  network tool; a swarm `sandbox` agent does have a shell, and that shell is yours.
+- tmux for `qwen-cc`. A search backend (SearXNG or a Brave key) is needed only by research
+  — `qwen-deep-research`, or a `qwen-swarm` workflow whose roles have a `search` or `web`
+  fence. Nothing else asks for one, and no other fence adds a search or fetch tool; a swarm
+  `browser` agent drives a real browser, which opens whatever URL it is told to, and a swarm
+  `sandbox` agent does have a shell, and that shell is yours.
 
 Servers without `/v1/models`, Windows and macOS notes:
 [reference/configuration.md](skill/local-auditor/reference/configuration.md).
@@ -130,10 +131,14 @@ editing, shell access, web access and subagents are each a separate flag; any ru
 modify files or run a shell prints a warning. `--test` opens exactly one command,
 `qwen-test`, under `claude --restricted`, but the tests it runs are your repository's code
 running as you, so use it only on code you would run yourself. A `qwen-agent` run reaches
-the web only when you pass `--web`, which adds `WebFetch` and nothing else. Research goes
+the web only when you pass `--web`, which adds `WebFetch` and nothing else, or `--browser`,
+which gives it a real browser that opens whatever URL it is told to — `--headed`,
+`--browser-eval`, `--scenarios` and `-r tester` each turn that browser on too. Research goes
 online on purpose — `qwen-deep-research`, `qwen-swarm research`, or any workflow with a
 `search` or `web` fence — and its agents work in empty folders with no file tools. A swarm
-never writes its `--target`: `read` roles only read it, and the edits and shell of a
+`browser` role is meant for a local UI suite, and what it sees is kept: its screenshots and
+page snapshots are written under `RUN/browser/<unit>/`. A swarm never writes its
+`--target`: `read` roles only read it, and the edits and shell of a
 `sandbox` role, along with the commands the engine runs to reproduce the bug and check a
 patch, happen in a throwaway clone of it; you apply a winning patch with `git apply`. That
 clone is a copy, not a jail — its shell runs as you, with your network — so run such a

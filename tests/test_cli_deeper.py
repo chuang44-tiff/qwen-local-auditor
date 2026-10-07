@@ -48,7 +48,10 @@ UNCHANGED_TEXTS = {
     "auditor": "dbcc0b8e488b3f4fc5ab2afc65903656dcb84b2cb55d7e467e7ba55c25d47e81",
     "coder": "ef4b57eae82a310a5b8cb9595d53e1be6719bb21e46d5d27252409b1d56ce652",
     "mechanic": "1648791f6b4b6e46f0c62696bb763bae30b5bb9aa3d8ac8a8d924ab27f34238d",
-    "tester": "8f63322f6d60c0cbe7433535c817537054f6b518d4ff5471a248c00e390bf492",
+    # the tester text gained the black-box sentence (the source-reaching browser
+    # tools are hidden by default now); re-pinned as released with it -- the
+    # other four are untouched
+    "tester": "640d1ebeec3e33228cb89c10d60e3dc4fca3998fabdac7e9418de6178df3bc1e",
 }
 
 

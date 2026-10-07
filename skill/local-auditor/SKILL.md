@@ -54,6 +54,8 @@ qwen-agent -r auditor -C <dir> -f brief.md -o out.md
 - Roles: `auditor` (grounded, cites `path:line`), `mechanic` (may edit), `plain`. Pass
   `-r auditor` for review work: with no `-r` there is no role prompt at all.
 - Browser/UI audits use `-r tester` — a real browser through Playwright (`--headed` to watch).
+- Scripted UI suites: `qwen-agent --scenarios suite.md` runs a written scenario file through the tester and scores it (exit 9 = a scenario FAILED or BLOCKED; `reference/qwen-agent.md`, "Scripted UI suites").
+- Repeated UI checks: record once — `qwen-agent --scenarios suite.md --record DIR` (the scripts are kept only when replaying them reproduces what the run recorded) — then `qwen-agent --replay DIR`, which reruns them with no model at all: seconds, the same result every time, exit 9 for a FAILED or ERRORED scenario.
 - A bare run is read-only with MCP dropped. Writing requires `--write` or an explicit
   `--toolset` naming Edit/Write/Bash.
 - `-o` is relative to your current directory, never to `-C`.

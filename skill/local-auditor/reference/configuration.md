@@ -15,7 +15,7 @@ are the authoritative texts; this page arranges the same facts for lookup.
 | Python 3.8+ | stdlib only; used to parse results, build sweeps and run the swarm engine (the test suite needs 3.10+) |
 | curl, git | `git` for `qwen-sweep --builder diff`, for the throwaway worktrees `--test` uses, for `--until-done`'s clean-tree check, and for the sandbox copies a `qwen-swarm` workflow runs in |
 | tmux | only for `qwen-cc` (interactive sessions); Windows has none: run `qwen-agent --interactive` in a terminal there |
-| internet | needed only by research (a search backend and pages to fetch): `qwen-deep-research`, `qwen-swarm research`, or a workflow with a `search` or `web` fence. No other workflow needs it and no other fence adds a network tool, but a `sandbox` agent's Bash is your shell, with your network ([`swarm.md`](swarm.md)) |
+| internet | needed by research (a search backend and pages to fetch): `qwen-deep-research`, `qwen-swarm research`, or a workflow with a `search` or `web` fence; and a browser's first run needs it too, for the `@playwright/mcp` npm package and the Playwright browser install it drives (`npx -y @playwright/mcp@0.0.83 --help` fetches the package, `npx playwright install chromium` the browser; [`qwen-agent.md`](qwen-agent.md) "Scripted UI suites"). No other fence adds a search or fetch tool, but a `browser` role drives a real browser, which opens whatever URL it is told to, and a `sandbox` agent's Bash is your shell, with your network ([`swarm.md`](swarm.md)) |
 
 CI runs the whole suite on Linux, macOS (including `/bin/bash` 3.2) and Windows Git Bash.
 

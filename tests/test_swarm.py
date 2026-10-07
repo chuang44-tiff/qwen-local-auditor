@@ -831,3 +831,64 @@ def test_deep_switches_change_the_cache_key_only_when_set(tmp_path, fake):
     assert s._key(plain) == hashlib.sha256(blob.encode("utf-8")).hexdigest()
     assert s._key(deep) == hashlib.sha256(
         (blob + "\ndeep:review_round,subagents").encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------- the browser fence, the unit's environment
+
+def test_the_browser_flag_is_on_the_repair_call_too(tmp_path, fake):
+    s = swarm(tmp_path)
+    u = unit(tmp_path, "a")
+    u.browser = True
+    assert "--browser" in s._argv(u, "p.md", 60)
+    # a repair round resumes the same session, so it keeps the browser that session has
+    assert "--browser" in s._argv(u, "p.md", 60, resume="sess-1")
+    assert "--browser" not in s._argv(unit(tmp_path, "b"), "p.md", 60)
+
+
+def test_browser_changes_the_cache_key_only_when_set(tmp_path, fake):
+    s = swarm(tmp_path)
+    plain, browsed = unit(tmp_path, "a"), unit(tmp_path, "a")
+    browsed.browser = True
+    blob = "%s\n%s\n%s\n%s\n%s\n%s\n%s" % ("role worker", "do a", "none", "", False, "", "")
+    # no --browser, no extra line: every other fence keeps the key it had before
+    assert s._key(plain) == hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    assert s._key(browsed) == hashlib.sha256((blob + "\n--browser").encode("utf-8")).hexdigest()
+
+
+PROBE = '''
+import os
+def answer(p, r):
+    line = "%s/%s\\n" % (os.environ.get("QWEN_UNIT_PROBE"),
+                         "seen" if os.environ.get("PATH") else "gone")
+    with open(os.path.join(os.environ["FAKE_SWARM_DIR"], "saw.txt"), "a",
+              encoding="utf-8") as fh:
+        fh.write(line)
+    if os.environ.get("QWEN_UNIT_PROBE_RC") == "5":
+        return 5, ""                      # a timeout: the unit's retries each re-spawn it
+    return 0, "```json\\n[]\\n```"
+'''
+
+
+def test_a_units_own_environment_reaches_the_agent(tmp_path, fake):
+    # A unit's extra variables are how a session is told where to write (a browser unit's
+    # QWEN_BROWSER_DIR): they must reach the child process, and a unit that names none
+    # must still see the inherited environment.
+    (fake / "worker.py").write_text(PROBE, encoding="utf-8")
+    s = swarm(tmp_path)
+    browsed, plain = unit(tmp_path, "a"), unit(tmp_path, "b")
+    browsed.env = {"QWEN_UNIT_PROBE": "mine"}
+    s.run_phase([browsed, plain])
+    assert sorted((fake / "saw.txt").read_text(encoding="utf-8").split()) == ["None/seen",
+                                                                              "mine/seen"]
+
+
+def test_a_retry_gets_the_units_environment_again(tmp_path, fake):
+    # The environment belongs to the unit, not to one attempt: every try of a retried
+    # unit gets its variables, and so keeps the folder it was told to write in.
+    (fake / "worker.py").write_text(PROBE, encoding="utf-8")
+    u = unit(tmp_path, "a")
+    u.retries = 1
+    u.env = {"QWEN_UNIT_PROBE": "mine", "QWEN_UNIT_PROBE_RC": "5"}
+    res = swarm(tmp_path).run_phase([u])
+    assert res[0]["why"] and not res[0]["ok"]          # timed out twice, so dropped
+    assert (fake / "saw.txt").read_text(encoding="utf-8").split() == ["mine/seen", "mine/seen"]

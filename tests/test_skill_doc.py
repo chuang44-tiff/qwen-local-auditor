@@ -209,10 +209,14 @@ def test_swarm_reference_covers_the_api_and_the_fences():
     t = SW_REF.read_text(encoding="utf-8")
     for needle in ("wf.agent", "wf.fan_out", "wf.vote", "wf.rounds()", "wf.converged",
                    "wf.steps.run_cmd", "wf.save", "wf.report", "wf.fail", "wf.goal_unmet",
-                   "validate(cfg)", "check.py", "--keep-sandboxes", "stop_reason"):
+                   "wf.browser_dir", "validate(cfg)", "check.py", "--keep-sandboxes",
+                   "stop_reason"):
         assert needle in t, needle
-    for fence in ("`none`", "`search`", "`web`", "`read`", "`sandbox`"):
+    for fence in ("`none`", "`browser`", "`search`", "`web`", "`read`", "`sandbox`"):
         assert fence in t, fence
+    # the browser fence's own page: where its evidence goes, and that it is not a web fence
+    for needle in ("QWEN_BROWSER_DIR", "RUN/browser/<unit>", "--seats"):
+        assert needle in t, needle
 
 
 def test_swarm_reference_matches_the_debug_manifest():

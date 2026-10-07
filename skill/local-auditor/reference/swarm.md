@@ -7,8 +7,9 @@ running at once, one repair round for an unusable answer, retries for timeouts, 
 answer cached in the run folder so `--resume` continues where a run stopped, and a hard
 `--hours` deadline. The short version your session loads is `skill/local-swarm/SKILL.md`.
 
-Built-ins: `research` (this is `qwen-deep-research`; see [deep-research.md](deep-research.md))
-and `debug`. `qwen-swarm --list` prints them.
+Built-ins: `research` (this is `qwen-deep-research`; see [deep-research.md](deep-research.md)),
+`debug` and `ui-test` (a scripted UI suite), each documented under its own heading below.
+`qwen-swarm --list` prints them.
 
 ## A workflow folder
 
@@ -49,7 +50,7 @@ my-workflow/
 | `description`, `goal` | non-empty strings; `goal` is quoted in the "no goal given" error |
 | `target` | `none`, or `required`: the run needs `--target DIR`, an existing directory |
 | `roles.R.file` | a file inside the folder (no `..`, no absolute path) |
-| `roles.R.fence` | `none`, `search`, `web`, `read` or `sandbox` (below); `read` and `sandbox` need `"target": "required"` |
+| `roles.R.fence` | `none`, `browser`, `search`, `web`, `read` or `sandbox` (below); `read` and `sandbox` need `"target": "required"` |
 | `roles.R.budget_weight` | number >= 1 (default 1): the per-item budget multiplier |
 | `roles.R.effort` | optional default effort; `--effort` and `--role-effort` beat it |
 | `roles.R.deep` | optional, and **the default is depth**: no `deep` field (or `true`) gives the role both switches, `"deep": false` is the shallow opt-out, and a list of `"review_round"` (qwen-agent `--review-round`), `"subagents"` (`--subagents-nudge`) and `"subagents_push"` (`--subagents-push`, the delegation mandate that replaces the nudge when a list names both) picks the list's own; nudging stays the default a `true` or absent field gives. `"probe"` is refused: a `sandbox` role already has a shell. `--deep ROLE` forces both on a role, `--shallow ROLE` forces none. The switches are part of each unit's cache key (a shallow unit's key is the one the released command computed), and a repair round never carries them |
@@ -67,10 +68,25 @@ A role's fence is the only way a workflow chooses tools. Every agent also gets
 | fence | tools | working directory | runs at |
 |---|---|---|---|
 | `none` | none | its own empty folder in the run | `--seats` |
+| `browser` | a real browser: the Playwright tools qwen-agent `--browser` grants | its own empty folder | `--seats` |
 | `search` | the `search` MCP tool | its own empty folder | `--web-seats` |
 | `web` | `search` + `WebFetch` | its own empty folder | `--web-seats` |
 | `read` | Read, Glob, Grep | `--target` | `--seats` |
 | `sandbox` | Read, Edit, Write, Bash, Glob, Grep | a fresh copy of `--target` per agent | `--seats` |
+
+A `browser` role is a `none` role plus qwen-agent `--browser`: qwen-agent writes the one
+Playwright MCP server config itself and grants the `mcp__playwright__` tools itself, so
+the unit carries no `--mcp-config` of the engine's (qwen-agent refuses the pair) and no
+`--target` is asked for. Its toolset stays `none`; qwen-agent adds `Read` for its own
+browser folder, so the session can look at the screenshots it took. Each unit is given
+`QWEN_BROWSER_DIR=RUN/browser/<unit>`, under which qwen-agent makes a fresh timestamped
+folder for every call it runs — a repair round or a retry gets one of its own — and writes
+the screenshots and page snapshots there: `wf.browser_dir(unit)` names that root, so a
+report can point at the evidence of each unit. It is NOT a web fence — a UI suite is driven
+against local URLs — so it runs at `--seats` and asks for no search preflight, but the
+browser is a network tool: a browser agent can navigate wherever it is told to. `--browser`
+is refused with `--interactive` and `--until-done`, which a swarm unit never passes. A
+browser unit's cache key carries the `--browser` flag: no other fence's key moved.
 
 A sandbox is an independent copy of the target, never a link into it. When the target is
 the top of a git repository it is a `git clone --shared` of it, checked out detached at
@@ -110,6 +126,7 @@ its patch. `--target` itself is never an agent's working directory unless the fe
 | `wf.steps.run_cmd(cmd, patch=None, timeout=600)` | `bash -c cmd` in a fresh sandbox of the target, `patch` applied first; returns `{applied, rc, timed_out, output_tail}` |
 | `wf.save(key, data)` / `wf.load(key)` / `wf.exists(key)` / `wf.forget(*keys)` | JSON artifacts `<key>.json` in the run folder (`round-<r>/` from round 2) |
 | `wf.write(relpath, text)` | a text file in the run folder, e.g. `patches/1.diff` |
+| `wf.browser_dir(unit)` | the `RUN/browser/<unit>` folder a browser-fenced unit's session was given as its `QWEN_BROWSER_DIR`: qwen-agent's timestamped folders of screenshots and page snapshots are made inside it, so a report names this path as the unit's evidence |
 | `wf.report(markdown)` | writes `report.md` (and `report-round-<r>.md` in a multi-round run) |
 | `wf.totals()` | the run's cumulative `agents_run`, `tokens`, `seconds`, `invocations` (for a Run table) |
 | `wf.fail(message)` | stop: nothing usable, exit 5 |
@@ -150,7 +167,10 @@ preset, with `rounds` capped at 2; no agent starts, no command runs, nothing tou
 target), failing with exit 2 when the script raises or the two runs make different calls.
 A `check.py` in the folder may define `answer(role, prompt) -> text`,
 `run_cmd(cmd, patch) -> dict` and `patch(role, prompt) -> str` so the dry run reaches every
-phase; without it each unit gets the first of `[]` and `{}` its parse accepts.
+phase; without it each unit gets the first of `[]` and `{}` its parse accepts. A workflow that
+cannot start without a knob the preset leaves empty (`ui-test`'s `scenarios` file) ends its dry
+run at that `wf.fail`, so what `--check` proves there is its manifest and that `run(wf)` ends
+cleanly, not its agents.
 
 ## Flags and env
 
@@ -213,8 +233,10 @@ them in the user's tree. The runner refuses either nesting before it creates any
 The folder holds `config.json` (the resolved settings and the manifest summary), the goal file
 (`goal.md`; `question.md` for research), `run.log`, `totals.json` (cumulative; with
 `stop_reason` in a multi-round run: `rounds`, `hours`, `deadline` or `converged: ...`),
-`report.md`, `error.log` after an exit 8, `agents/<unit>.*` per agent, and the workflow's
-own `<key>.json` artifacts. `rounds.json` (the rounds started, so a resume finishes the
+`report.md`, `error.log` after an exit 8, `agents/<unit>.*` per agent, `browser/<unit>/`
+(qwen-agent's own timestamped folders of screenshots and page snapshots, inside the evidence
+root a `browser` unit was given) as soon as such a unit runs, and the workflow's own
+`<key>.json` artifacts. `rounds.json` (the rounds started, so a resume finishes the
 interrupted one), the `round-<r>/` directories (round 2 onwards; round 1 writes at the top
 level) and `report-round-<r>.md` are a multi-round run's: they appear only when `rounds` is
 above 1 (from `--rounds`, a resume's or a preset's) and the workflow works in a
@@ -255,3 +277,52 @@ hypotheses) -> report (`none`; the writer is shown the winning patch).
 Patches are ranked into `RUN/patches/<n>.diff`; exit 0 when one passed, was approved,
 leaves the tests alone and was reviewed whole, exit 4 otherwise. The engine never writes
 `--target`; you apply a patch with `git apply`.
+
+## The ui-test workflow
+
+```bash
+qwen-swarm ui-test "RUN NAME" --set scenarios=SUITE.md --out RUN_DIR [--set base=URL]
+```
+
+The suite file is the `scenarios` knob: the `# Suite:` markdown `qwen-agent --scenarios` takes
+([qwen-agent.md](qwen-agent.md), "Scripted UI suites"), and the goal only names the run. The
+same `lib/scenarios.py` validates the file, writes each tester's prompt and scores its answer
+— what a tester was asked and what its answer is judged against are one description of one
+job. The file is read and parsed before anything starts, as `qwen-agent --scenarios` does: no
+knob, an unreadable file or a suite that does not parse is exit 2 naming its line, with no run
+folder and no agent. The parsed suite is saved as `RUN/suite.json`, so a `--resume` replays the
+same scenarios from the artifact rather than from the file. A relative `--set scenarios=PATH`
+is resolved against the directory the command ran in and stored as an absolute path: the run's
+`config.json` and `report.md` name the very file it read, whichever directory a `--resume`
+happens to run from.
+
+The app under test must already be listening at the suite's URLs: the workflow starts no
+server. `--set base=URL` points the whole suite somewhere other than the file's `base:` line.
+
+The manifest has one depth, `quick`: 900 s per scenario, one retry, one round. A suite's size
+comes from its scenario count and from `--seats` / `--max-agents`, not from depth, and `--hours`
+bounds a long suite. The `tester` role says `"deep": false` — a review round would be a second
+browser session for the same scenario — which `--deep tester` overrides. The browsers run
+headless: `--headed` is qwen-agent's own per-session flag (it implies `--browser` and needs a
+display), and the swarm never passes it — watch one scenario with
+`qwen-agent -r tester --headed "open http://localhost:3000 ..."`.
+
+Every scenario is dealt to a `browser` agent of its own (`max_items=1`), so a suite of twenty
+scenarios is twenty browser sessions at `--seats` rather than one long one, and a suite the
+deadline stops names the scenarios that never got an agent.
+
+`RUN/results.json` holds one entry per scenario, in file order (`id`, `status`,
+`failed_expectations`, `evidence`, `notes`, and `unit`: which agent ran it, `null` if none
+did); `report.md` holds the suite's own table with this workflow's fourth status added to
+its counts (`PASS n / FAIL n / BLOCKED n / NOT RUN n`), the `RUN/browser/<unit>/` evidence
+root of every unit that ran and, under each scenario, the evidence its tester named and
+what did not hold — a PASS listed with what it rests on, not just its status. A scenario is
+scored, not trusted: an answer with no json block is BLOCKED (`no result block`), and so is
+a unit whose call failed or timed out — BLOCKED with the unit's own reason (`agent failed:
+...`). A scenario whose unit the deadline kept from starting is `NOT RUN` instead, with
+`unit` null and the note `deadline: not started; --resume runs it`: that unit made no
+session and no browser folder, so the report names none for it, and the counts hold these
+apart from the BLOCKED ones. No scenario is ever left out of the report. Exit 0 when every
+scenario passed, 4 when any ended FAIL, BLOCKED or NOT RUN (or an agent was dropped): a
+suite the deadline only stopped — every unfinished scenario NOT RUN — still ends with its
+goal unmet, naming the count, and `--resume RUN_DIR --hours H` runs those scenarios.

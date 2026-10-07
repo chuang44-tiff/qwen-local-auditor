@@ -45,6 +45,7 @@ QA_TIMEOUT=5       # wall-clock timeout tripped
 QA_EMPTY=6         # ran clean but produced no usable text
 QA_DENIED=7        # a tool call was blocked by the permission system
 QA_HARNESS=8       # claude binary missing, or its output was unparseable
+QA_SCENARIO_FAIL=9 # --scenarios: at least one scripted scenario ended FAIL or BLOCKED
 
 # Parent-session variables NOT to pass down to the headless child:
 #  - the parent's control channel and session identity;
@@ -129,6 +130,14 @@ BROWSER_DIR=""      # the browser run folder: made just before claude starts, ke
                     # the run -- it is the evidence
 BROWSER_ROOT=""     # its parent (QWEN_BROWSER_DIR or the cache dir), resolved against the
                     # caller HERE, before the -C chdir; created with the folder itself
+SCENARIOS=""        # --scenarios FILE: the scripted UI suite (implies --browser and -r tester)
+SCENARIOS_GIVEN=""  # FILE as the caller typed it, for the --json record
+SCEN_RESULTS=""     # the results.json written into the browser run folder,
+SCEN_PASS="" SCEN_FAIL="" SCEN_BLOCKED=""   # and the per-status counts of its summary
+RECORD=""           # --record DIR: after the suite is scored, resume the session ONCE to
+                    # write one deterministic replay script per scenario, and keep in DIR
+                    # the scripts whose replay reproduces the verdict the run recorded
+REPLAY=""           # --replay DIR: run DIR's recorded scripts with NO model call at all
 STRICT_MCP=0
 STRICT_MCP_EXPLICIT=0
 MCP_CONFIG=""       # --mcp-config: load ONLY the MCP servers named in this file
@@ -474,8 +483,9 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
                        tests and checks can be gamed by browsing upstream answers.
                        The server offers more tools than are granted; the ones no
                        run gets (browser_run_code_unsafe, browser_install, and
-                       browser_evaluate without --browser-eval) are passed as
-                       --disallowedTools too, so the model never sees them.
+                       browser_evaluate and browser_network_request without
+                       --browser-eval) are passed as --disallowedTools too, so
+                       the model never sees them.
                        Refused with --mcp-config, --until-done and --interactive;
                        allowed with --probe and --write. Role 'tester' implies
                        this. (env QWEN_BROWSER_DIR, QWEN_PLAYWRIGHT_MCP)
@@ -484,10 +494,54 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
                        XAUTHORITY when set), else WAYLAND_DISPLAY (and
                        XDG_RUNTIME_DIR when set), is passed to the browser.
                        Implies --browser.
-      --browser-eval   --browser plus mcp__playwright__browser_evaluate: JavaScript
-                       run inside the page, the one browser tool that can do
-                       anything the page can. Off by default -- and hidden from the
-                       model's tools until asked for. Implies --browser.
+      --browser-eval   --browser plus the two source-reaching browser tools:
+                       mcp__playwright__browser_evaluate (JavaScript run inside
+                       the page, the one browser tool that can do anything the
+                       page can) and mcp__playwright__browser_network_request
+                       (one request WITH its response body). Both off by
+                       default -- and hidden from the model's tools until asked
+                       for. Implies --browser.
+      --scenarios FILE Scripted UI suite for the tester: implies --browser and
+                       -r tester. The file (format: reference/qwen-agent.md,
+                       "Scripted UI suites") is validated FIRST -- a parse error
+                       is exit 2 with the line named and claude never started.
+                       The prompt IS the suite's task text built by
+                       lib/scenarios.py, so a prompt argument, -f, --stdin,
+                       --until-done, --interactive and another -r are all
+                       refused (exit 2). After the run the answer is scored
+                       against the suite: <browser run folder>/results.json and
+                       summary.md are written, the summary table and
+                       'results: PATH' print on stderr (the answer keeps stdout
+                       or -o), and the exit is $QA_SCENARIO_FAIL when any
+                       scenario is FAIL or BLOCKED -- unless the run itself
+                       failed, whose code then wins.
+      --record DIR     With --scenarios: turn the suite into a replayable recording.
+                       After the scoring, the session is resumed ONCE with a fixed
+                       prompt that writes one deterministic Playwright script per
+                       scenario (<browser run folder>/replay/<id>.mjs; for that call
+                       alone the session may write inside that replay folder, and
+                       nowhere else). Every script is then replayed and kept only
+                       when it answers what the run answered: PASS replays PASS, FAIL
+                       replays FAIL. A BLOCKED or unreported scenario gets no script,
+                       and a script that disagrees is rejected with its reason. The
+                       kept scripts are copied into DIR with a manifest.json; the
+                       table 'recorded: N of M scenarios (rejected: ids)' and the
+                       manifest path print on stderr. Needs node and the playwright
+                       package, like --replay. Replay the result: --replay DIR.
+      --replay DIR     Run DIR's recorded scripts with NO model call at all -- no
+                       preflight, no claude: seconds, and the same result every time.
+                       Each script's sha256 is verified against the manifest first (a
+                       script that changed since recording is ERROR and never runs),
+                       then node runs it (120 s each) and its 'RESULT <id> ...' line
+                       is the verdict: PASS, FAIL (with the expectation that did not
+                       hold) or ERROR (it crashed, printed no RESULT line, or timed
+                       out). The summary table and 'PASS n / FAIL n / ERROR n' print
+                       on stderr; exit 0 when every scenario PASSED, 9 when any is
+                       FAIL or ERROR. Every model-related flag (-r, -f, a prompt,
+                       --scenarios, --until-done, --interactive, --deep, a model, a
+                       timeout) is refused with exit 2 — a replay asks nothing. -b
+                       and -q are accepted: -b URL is the base the scripts open.
+                       Needs node on PATH and the playwright package.
 
 ENVIRONMENT  (also settable in the config file; flags win)
   QWEN_BASE_URL, QWEN_MODEL, QWEN_CTX, QWEN_AUTOCOMPACT, QWEN_EFFORT, QWEN_TIMEOUT
@@ -527,6 +581,17 @@ ENVIRONMENT  (also settable in the config file; flags win)
                        and this variable overrides that too). Split on whitespace
                        with no pathname expansion: the first word is the command,
                        the rest its leading args; a '*' stays literal.
+  QWEN_PLAYWRIGHT_NODE_PATH
+                       A node_modules DIRECTORY holding the playwright package,
+                       for --replay (and --record, which replays once to validate
+                       what it records; node must be on PATH). Unset, the package
+                       is looked for in the npx cache under "\$(npm config get
+                       cache)/_npx/*/node_modules"; found nowhere, the replay
+                       stops with the install hint instead of skipping scripts.
+  QWEN_REPLAY_BASE     The URL a recorded script opens, overriding the base in its
+                       manifest — point the same scripts at another deployment.
+                       Set by --replay --base; a recorded script's own default is
+                       the base URL of the suite that was recorded.
   QWEN_OUTDIR          Where -w puts generated output files. Default: cwd.
                        A --probe patch with no -o goes here only when you set
                        it; unset, it goes to the probe directory instead.
@@ -545,6 +610,9 @@ EXIT CODES
   $QA_EMPTY  ran clean but returned no usable text
   $QA_DENIED  a tool call was blocked by the permission system (see --warn-denials)
   $QA_HARNESS  harness failure (claude missing, or unparseable output)
+  $QA_SCENARIO_FAIL  --scenarios: at least one scripted scenario ended FAIL or BLOCKED;
+                     --replay: at least one recorded script ended FAIL or ERROR (the
+                     same verdicts taken again exit the same way)
   11  --until-done stopped at the round limit or a budget; also checks pass but the
       deviation audit was unusable twice -- review the diff manually (partial; report written)
   12  --until-done made no progress (same checks failed two rounds in a row)
@@ -559,6 +627,8 @@ EXAMPLES
   $QA_SELF -r mechanic "add a trailing newline to every .sh that lacks one"
   $QA_SELF --write --toolset 'Read,Edit,Glob,Grep' "retitle every heading"
   $QA_SELF --interactive -C ./proj      # an interactive session on the local model
+  $QA_SELF --scenarios cart.md --record ./cart-replay   # suite run, verdicts recorded
+  $QA_SELF --replay ./cart-replay       # the same verdicts again, with no model at all
 
 SAFETY
   A bare run is read-only: --tools 'Read,Glob,Grep' --strict-mcp-config, which
@@ -677,11 +747,18 @@ reset or undo it, then do it again) and check that the state after the sequence
 is what a user would expect, not only what the screen shows right after each
 click; after each action take a snapshot and compare what the page shows with
 what a user would expect; take a screenshot whenever the evidence is visual
-(layout, images, canvas, colours) and look at it. Report each defect with:
+(layout, images, canvas, colours) and look at it: call browser_take_screenshot
+WITHOUT a filename so the image comes back to you; a filename only saves the
+file (open a saved one with Read if you need to see it again). Check the layout
+at a narrow phone width too (browser_resize to 400x800, then back), and repeat
+a key flow with any dark or alternate theme the app offers. Report each
+defect with:
 steps to reproduce, expected, actual, and evidence (the snapshot lines or the
 screenshot file name). Then list what you tested that worked. Only report what
 you observed in the browser; if a tool failed or an image was not visible to
-you, say so. Do not read or change source files unless the task asks you to.
+you, say so. Test as a user would, from the outside: do not open, fetch or quote
+the application's source code (scripts, styles, server files) unless the task asks
+you to, and never base a verdict on reading code instead of on what the page does.
 ROLE_EOF
       ;;
     *) return 1 ;;
@@ -756,6 +833,14 @@ REVIEW_PROMPT='Review round: before your answer is final, try to break it. Go ba
 # With --subagents-push the review round also delegates: appended to REVIEW_PROMPT
 # only when PUSH is on, so a nudge-only review round keeps the prompt above verbatim.
 REVIEW_PUSH_TEXT=' Hand the re-verification of your three most important claims to a subagent, and compare its result with yours.'
+
+# The one fixed prompt of --record, sent to the session that just ran the suite. The
+# script contract it states -- one RESULT line on stdout, exit 0 after it, exit 1 on a
+# script error, the base URL from QWEN_REPLAY_BASE -- is what lib/scenarios.py replays
+# and parses, so the two must not drift: that file documents the same contract. The
+# @FOLDER@ placeholder is replaced with the run's browser folder (the one directory the
+# recording may write in) because the session knows its own evidence only by that path.
+RECORD_PROMPT="Now turn each scenario you ran into a deterministic replay script. For each scenario id write the file @FOLDER@/replay/<id>.mjs: a self-contained Node ES module that imports { chromium } from 'playwright', launches it headless, opens the page fresh, performs the scenario's steps exactly with stable selectors (roles, labels, visible text; never coordinates), checks EVERY expectation with an explicit assertion, and prints exactly one line: 'RESULT <id> PASS' or 'RESULT <id> FAIL: <the expectation that did not hold>'. Read the base URL from the environment variable QWEN_REPLAY_BASE (default: the suite's base URL). Handle dialogs explicitly. Exit 0 after printing the line; exit 1 only on a script error. Do not change anything else. Reply with the list of files written."
 
 list_roles() {
   echo "built-in: auditor, coder, mechanic, plain, tester"
@@ -872,6 +957,21 @@ while [ $# -gt 0 ]; do
     --browser)            BROWSER=1; shift ;;
     --headed)             HEADED=1; BROWSER=1; shift ;;
     --browser-eval)       BROWSER_EVAL=1; BROWSER=1; shift ;;
+    --scenarios)          need_arg "$1" $(($#-1))
+                          # The same empty-value trap as --mcp-config: an empty
+                          # path would survive every later [ -n "$SCENARIOS" ] as
+                          # "no suite given" and the run would go out promptless.
+                          [ -n "$2" ] || { die "--scenarios needs a file path, not an empty string"; exit $QA_USAGE; }
+                          SCENARIOS="$2"; shift 2 ;;
+    --record)             need_arg "$1" $(($#-1))
+                          # The empty-value trap of --mcp-config again: an empty
+                          # directory would survive every later [ -n "$RECORD" ] as
+                          # "no --record given" and silently skip the recording.
+                          [ -n "$2" ] || { die "--record needs a directory, not an empty string"; exit $QA_USAGE; }
+                          RECORD="$2"; shift 2 ;;
+    --replay)             need_arg "$1" $(($#-1))
+                          [ -n "$2" ] || { die "--replay needs a directory, not an empty string"; exit $QA_USAGE; }
+                          REPLAY="$2"; shift 2 ;;
     -e|--effort)          need_arg "$1" $(($#-1)); EFFORT="$2"; shift 2 ;;
     -m|--model)           need_arg "$1" $(($#-1)); MODEL="$2"; shift 2 ;;
     -b|--base)            need_arg "$1" $(($#-1)); BASE="$2"; shift 2 ;;
@@ -1049,6 +1149,109 @@ if [ "$BROWSER" -eq 1 ]; then
   [ -z "$UNTIL_DONE" ] || {
     die "--browser cannot be combined with --until-done: the loop's rounds are headless coder runs without a browser"
     exit $QA_USAGE; }
+fi
+
+# -------------------------------------------------------- --scenarios refusals
+# The suite file supplies the prompt, the tester role and the browser, so every
+# other source of a prompt or role is refused -- before the until-done block
+# below (which would consume --until-done, exec the supervisor and never return)
+# and before anything is created. --interactive: an interactive session has no
+# headless answer to score, so the suite would run and go unscored; the refusal
+# loop above does not list --scenarios because this block owns it.
+if [ -n "$SCENARIOS" ]; then
+  _sc_refuse() {
+    die "--scenarios cannot be combined with $1: the scenario file supplies the prompt,"
+    die "the tester role and the browser (drop $1, or drop --scenarios)"
+    exit $QA_USAGE
+  }
+  [ "$INTERACTIVE" -eq 0 ] || _sc_refuse "--interactive"
+  [ "$PROMPT_SET" -eq 0 ]  || _sc_refuse "a prompt argument"
+  [ -z "$PROMPT_FILE" ]    || _sc_refuse "-f/--prompt-file"
+  [ "$READ_STDIN" -eq 0 ]  || _sc_refuse "--stdin"
+  [ -z "$UNTIL_DONE" ]     || _sc_refuse "--until-done"
+  [ -z "$ROLE" ] || [ "$ROLE" = tester ] || _sc_refuse "-r $ROLE"
+  BROWSER=1
+  [ -n "$ROLE" ] || ROLE=tester
+fi
+
+# ---------------------------------------------------------- --record refusal
+# --record is how a suite's verdicts become replayable: one deterministic script per
+# scenario, replayed later by --replay. What a script has to reproduce is a scenario's
+# verdict, and only a suite run produces those -- on its own --record records nothing.
+if [ -n "$RECORD" ] && [ -z "$SCENARIOS" ]; then
+  die "--record needs --scenarios FILE: the replay scripts record what the suite's"
+  die "scenarios did, so there is nothing to record without a suite (drop --record)"
+  exit $QA_USAGE
+fi
+
+# ------------------------------------------------------------- --replay
+# A recorded suite replays with NO model at all: no preflight (nothing to ask a
+# server), no role, no browser, no claude -- the scripts carry the verdicts a model
+# recorded once, and node runs them in seconds. That is why this block stands above
+# every model-shaped block below and exits here: any flag it was given that it does
+# not act on (-r, -f, a prompt, --scenarios, --until-done, --interactive, --deep, a
+# model or a timeout) would be silently dropped, and a run that drops the role or the
+# suite the caller typed answers a question nobody asked. So only its own directory,
+# the app's base URL and -q are accepted; everything else is refused, where the
+# message can name the flag.
+if [ -n "$REPLAY" ]; then
+  _rp_refuse() {
+    die "--replay cannot be combined with $1: --replay runs the recorded scripts with no"
+    die "model call at all (drop $1, or drop --replay)"
+    exit $QA_USAGE
+  }
+  [ "$PROMPT_SET" -eq 0 ] || _rp_refuse "a prompt argument"
+  _rp_base=""
+  _rp_val=""
+  for _a in ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}; do
+    if [ -n "$_rp_val" ]; then                 # the value of a switch that takes one
+      [ "$_rp_val" = base ] && _rp_base="$_a"
+      _rp_val=""
+      continue
+    fi
+    case "$_a" in
+      --replay)                  _rp_val=dir ;;
+      --replay=*)                : ;;
+      -b|--base)                 _rp_val=base ;;
+      --base=*)                  _rp_base="${_a#*=}" ;;
+      -q|--quiet|-h|--help|-V|--version) : ;;
+      --)                        break ;;       # the rest is a prompt, refused above
+      *)                         _rp_refuse "$_a" ;;
+    esac
+  done
+  unset _a _rp_val
+  if ! resolve_py; then
+    die "no working Python 3.8+ found (tried \$QWEN_PYTHON, python3, python): --replay"
+    die "runs the scripts through lib/scenarios.py. Set QWEN_PYTHON, or put one in $QA_CONFIG."
+    exit $QA_HARNESS
+  fi
+  # DIR names the CALLER's directory (like -o and --mcp-config), never -C's -- and
+  # there is no -C here anyway: a replay touches no tree but its own temp directory.
+  case "$REPLAY" in /*|[A-Za-z]:*) ;; *) REPLAY="$PWD/$REPLAY" ;; esac
+  # The calls inline what skill_py (defined further down) does: this block runs before
+  # that function exists, exactly as --scenarios validation does.
+  _rp_py() { PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" \
+               "$(native_path "$SKILL_DIR/lib/scenarios.py")" "$@"; }
+  _rp_err="${TMPDIR:-/tmp}/qwen-replay-err.$$"
+  _rp_argv=(replay "$(native_path "$REPLAY")")
+  [ -n "$_rp_base" ] && _rp_argv+=(--base "$_rp_base")
+  note "replay: $(native_path "$REPLAY")"
+  _rp_sum="$(_rp_py ${_rp_argv[@]+"${_rp_argv[@]}"} 2>"$_rp_err")"; _rp_rc=$?
+  _rp_e="$(cat "$_rp_err" 2>/dev/null)"; rm -f "$_rp_err"
+  case "$_rp_rc" in
+    0|9) : ;;
+    2)   die "--replay: ${_rp_e#scenarios.py: }"
+         exit $QA_USAGE ;;
+    *)   [ -z "$_rp_e" ] || die "--replay: ${_rp_e#scenarios.py: }"
+         die "--replay: could not run the recorded scripts (exit $_rp_rc)"
+         exit $QA_HARNESS ;;
+  esac
+  unset _rp_err _rp_e _rp_argv
+  # The table and its counts, on stderr like the scored suite's: the answer of a
+  # replay is the verdict, and a replay has no answer but that. die, not note: -q
+  # must not hide which scenarios did not hold.
+  [ -z "$_rp_sum" ] || die "$_rp_sum"
+  exit "$_rp_rc"
 fi
 
 # ------------------------------------------------- probe git hygiene / --deep
@@ -1256,6 +1459,9 @@ if [ "$PROBE" -eq 1 ] || [ "$PROBE_HERE" -eq 1 ]; then
   [ "$TOOLSET_EXPLICIT" -eq 0 ]   || _probe_refuse "--toolset/--read-only" "$_pf sets the toolset itself"
   [ "$TOOLS_EXPLICIT" -eq 0 ]     || _probe_refuse "-t/--tools" "$_pf grants Bash, Edit and Write itself"
   [ "$PERM_MODE_EXPLICIT" -eq 0 ] || _probe_refuse "--permission-mode" "$_pf fixes the permission mode to dontAsk"
+  # Only the CALLER's -D/--add-dir stands here: --browser's own entry, the run
+  # folder, joins ADD_DIRS later, where that folder is made -- it is never the
+  # user's tree, so this refusal is exempt for it by construction.
   [ "${#ADD_DIRS[@]}" -eq 0 ]     || _probe_refuse "-D/--add-dir" "edits are granted everywhere the session can reach, and that must stay the sandbox"
   [ "$PROBE" -eq 0 ] || [ -z "$RESUME_ID" ] || _probe_refuse "--resume" "a new sandbox has a new path and Claude Code finds a session by its directory; keep the first sandbox (--keep-sandbox) and resume in it with --probe-here -C <its path>"
   # --probe-here has no sandbox of this run to point qwen-test at: the session stands IN
@@ -1338,6 +1544,37 @@ case "$MCP_CONFIG" in ''|/*|[A-Za-z]:*) ;; *) MCP_CONFIG="$PWD/$MCP_CONFIG" ;; e
 if [ -n "$MCP_CONFIG" ]; then
   [ -f "$MCP_CONFIG" ] || { die "--mcp-config: no such file: $MCP_CONFIG"; exit $QA_USAGE; }
   STRICT_MCP=1
+fi
+
+# ------------------------------------------------------- --scenarios validation
+# The suite is checked BEFORE claude could ever start: a broken file is exit 2
+# naming its line, and nothing runs. A RELATIVE FILE NAMES THE CALLER'S FILE --
+# absolutized here against the caller's directory, like --mcp-config and -o,
+# never against -C. The prompt is scenarios.py's own task text for the suite, so
+# what the tester is handed and what the answer is later scored against cannot
+# drift apart. resolve_py runs here (not at its usual place below) because a
+# suite with no python to parse it must fail as a harness problem, once.
+SCENARIOS_GIVEN="$SCENARIOS"
+if [ -n "$SCENARIOS" ]; then
+  case "$SCENARIOS" in /*|[A-Za-z]:*) ;; *) SCENARIOS="$PWD/$SCENARIOS" ;; esac
+  [ -r "$SCENARIOS" ] || { die "--scenarios: cannot read the scenario file: $SCENARIOS_GIVEN"; exit $QA_USAGE; }
+  if ! resolve_py; then
+    die "no working Python 3.8+ found (tried \$QWEN_PYTHON, python3, python)."
+    die "set QWEN_PYTHON to a real interpreter, or put one in $QA_CONFIG."
+    exit $QA_HARNESS
+  fi
+  # The calls inline what skill_py (defined further down) does: this block runs
+  # before that function exists.
+  _sc_py() { PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" \
+               "$(native_path "$SKILL_DIR/lib/scenarios.py")" "$@"; }
+  _sc_err="${TMPDIR:-/tmp}/qwen-scenarios-err.$$"
+  if ! _sc_py check "$(native_path "$SCENARIOS")" >/dev/null 2>"$_sc_err"; then
+    _e="$(cat "$_sc_err" 2>/dev/null)"; rm -f "$_sc_err"
+    die "--scenarios: ${_e#scenarios.py: }"
+    exit $QA_USAGE
+  fi
+  rm -f "$_sc_err"
+  PROMPT="$(_sc_py prompt "$(native_path "$SCENARIOS")")"
 fi
 
 # Prompt sources are mutually exclusive.
@@ -1572,6 +1809,10 @@ if [ "$PROBE" -eq 1 ] && [ "$QWEN_OUTDIR_SET" -eq 0 ]; then
   QWEN_OUTDIR="${QWEN_PROBE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/qwen-agent/probes}"
   case "$QWEN_OUTDIR" in /*|[A-Za-z]:*) ;; *) QWEN_OUTDIR="$PWD/$QWEN_OUTDIR" ;; esac
 fi
+# --record DIR is the caller's directory too -- never the -C directory's, which is the
+# tree under test and has no business holding the replay scripts of a suite run against
+# it. Same caller-side absolutizing as -o, one line before the -C chdir.
+case "$RECORD" in ''|/*|[A-Za-z]:*) ;; *) RECORD="$PWD/$RECORD" ;; esac
 
 # ------------------------------------------------------------- working dir
 if [ -n "$WORKDIR" ]; then
@@ -1845,16 +2086,20 @@ fi
 # that is merely not granted still shows up in the model's tool list: it gets tried and
 # the run dies on the refusal. So the ones no run gets are passed to claude as
 # --disallowedTools too, which keeps them out of the model's sight. browser_evaluate
-# runs arbitrary JavaScript inside the page: it is granted, and left visible, only when
-# --browser-eval asked for it. browser_run_code_unsafe runs arbitrary code in the
-# browser's own process and browser_install downloads a browser: never either.
+# runs arbitrary JavaScript inside the page and browser_network_request answers one
+# request WITH its response body -- the app's scripts, styles and server replies are
+# the source a black-box tester must not read -- so both are granted, and left
+# visible, only when --browser-eval asked for them; the LIST browser_network_requests
+# (URLs, methods, statuses, no bodies) stays granted. browser_run_code_unsafe runs
+# arbitrary code in the browser's own process and browser_install downloads a browser:
+# never either.
 if [ "$BROWSER" -eq 1 ]; then
   for _t in browser_navigate browser_navigate_back browser_snapshot browser_find \
             browser_click browser_type browser_fill_form browser_press_key \
             browser_select_option browser_hover browser_drag browser_drop \
             browser_file_upload browser_handle_dialog browser_tabs browser_resize \
             browser_emulate_media browser_wait_for browser_take_screenshot \
-            browser_console_messages browser_network_requests browser_network_request \
+            browser_console_messages browser_network_requests \
             browser_close; do
     TOOLS="${TOOLS:+$TOOLS,}mcp__playwright__$_t"
   done
@@ -1862,8 +2107,20 @@ if [ "$BROWSER" -eq 1 ]; then
   DISALLOWED="mcp__playwright__browser_run_code_unsafe,mcp__playwright__browser_install"
   if [ "$BROWSER_EVAL" -eq 1 ]; then
     TOOLS="${TOOLS:+$TOOLS,}mcp__playwright__browser_evaluate"
+    TOOLS="${TOOLS:+$TOOLS,}mcp__playwright__browser_network_request"
   else
     DISALLOWED="$DISALLOWED,mcp__playwright__browser_evaluate"
+    DISALLOWED="$DISALLOWED,mcp__playwright__browser_network_request"
+  fi
+  # Playwright 0.0.83 answers a browser_take_screenshot GIVEN a filename with a LINK
+  # only: the image itself comes back just when no filename is given. A saved
+  # screenshot is worth nothing to a session that cannot open it, so Read joins the
+  # grants even when the toolset is none -- Read ONLY, never Glob/Grep/Bash/Write.
+  # With --toolset none Read joins the TOOLSET too (the way --web adds WebFetch), or
+  # the empty --tools would take back the tool this whole grant exists to hand out.
+  case ",$TOOLS," in *,Read,*) ;; *) TOOLS="${TOOLS:+$TOOLS,}Read" ;; esac
+  if [ "$TOOLSET_NONE" -eq 1 ]; then
+    case ",$TOOLSET," in *,Read,*) ;; *) TOOLSET="${TOOLSET:+$TOOLSET,}Read" ;; esac
   fi
   if [ "$TEST_MODE" -eq 1 ]; then
     # Raw printf, not die(): like the --web warning this line must START with
@@ -1883,6 +2140,22 @@ if [ -n "$OUT" ]; then
   [ -w "$outdir" ] || { die "--out: directory is not writable: $outdir"; exit $QA_USAGE; }
   if [ -e "$OUT" ] && [ ! -w "$OUT" ]; then
     die "--out: exists and is not writable: $OUT"; exit $QA_USAGE
+  fi
+fi
+
+# --record DIR, checked before the same model call: the recording is the run's whole
+# point, and finding at the end of it that the scripts had nowhere to go wastes the
+# suite. The directory itself is made by scenarios.py when the first script is kept.
+if [ -n "$RECORD" ]; then
+  if [ -e "$RECORD" ]; then
+    [ -d "$RECORD" ] || { die "--record: not a directory: $RECORD"; exit $QA_USAGE; }
+    [ -w "$RECORD" ] || { die "--record: directory is not writable: $RECORD"; exit $QA_USAGE; }
+  else
+    _rec_parent="$(dirname -- "$RECORD")"
+    { [ -d "$_rec_parent" ] && [ -w "$_rec_parent" ]; } || {
+      die "--record: cannot create $RECORD (its parent is absent or not writable)"
+      exit $QA_USAGE; }
+    unset _rec_parent
   fi
 fi
 
@@ -2102,6 +2375,12 @@ PY
     exit $QA_HARNESS
   fi
   unset PW_CMD PW_ARGS
+  # The session must be able to Read its own evidence (a screenshot saved by
+  # filename, the snapshot files): the folder joins the extra readable dirs. It is
+  # added HERE, not up in the --browser setup, precisely because the --probe
+  # refusals ran long above: the browser folder is never the user's tree, so the
+  # -D/--add-dir refusal must not (and here cannot) see it.
+  ADD_DIRS+=("$BROWSER_DIR")
   # die, not note: -q must not hide where the evidence of a browser run lands.
   die "browser: screenshots and page snapshots in $(native_path "$BROWSER_DIR")"
 fi
@@ -2228,6 +2507,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
   # a dry run prints the first call's argv (delegation text and Task included -- they are
   # part of it) and notes the round it would have made.
   [ "$REVIEW_ROUND" -eq 1 ] && echo "# review round: one --resume call after the first"
+  # --record is a second resume call after the scoring, plus scenarios.py replay-check
+  # over what it wrote: a dry run prints neither (both need the run's browser folder).
+  [ -n "$RECORD" ] && echo "# record: one --resume call with the record prompt after the"
+  [ -n "$RECORD" ] && echo "#   suite is scored, then scenarios.py replay-check into $RECORD"
   if [ "$INTERACTIVE" -eq 1 ]; then
     echo "# timeout: not applied (--interactive: the session ends when the person at the keyboard leaves)"
   else
@@ -2408,6 +2691,15 @@ if mode == "json":
             meta["browser"] = {"dir": e.get("QA_META_BROWSER_DIR") or None,
                                "headed": e.get("QA_META_BROWSER_HEADED") == "1",
                                "eval": e.get("QA_META_BROWSER_EVAL") == "1"}
+        if e.get("QA_META_SCEN_FILE"):
+            def _count(v):
+                v = (v or "").strip()
+                return int(v) if v.isdigit() else 0
+            meta["scenarios"] = {"file": e.get("QA_META_SCEN_FILE"),
+                                 "results": e.get("QA_META_SCEN_RESULTS") or None,
+                                 "pass": _count(e.get("QA_META_SCEN_PASS")),
+                                 "fail": _count(e.get("QA_META_SCEN_FAIL")),
+                                 "blocked": _count(e.get("QA_META_SCEN_BLOCKED"))}
         obj["qwen_agent"] = meta
     json.dump(obj, sys.stdout, indent=2); sys.stdout.write("\n")
 else:
@@ -2485,7 +2777,8 @@ export_meta() {
   # in stderr a caller may not have kept.
   [ -n "$ROLE_VARIANT" ] || [ "$NUDGE" -eq 1 ] || [ "$PUSH" -eq 1 ] \
     || [ "$REVIEW_ROUND" -eq 1 ] || [ "$PROBING" -eq 1 ] \
-    || [ "$BROWSER" -eq 1 ] || [ "$DEPTH_MODE" != shallow ] || [ "$SHORT_ANSWER_WARNING" -eq 1 ] || return 0
+    || [ "$BROWSER" -eq 1 ] || [ "$DEPTH_MODE" != shallow ] || [ "$SHORT_ANSWER_WARNING" -eq 1 ] \
+    || [ -n "$SCENARIOS" ] || return 0
   local kept="" browser_dir_meta=""
   [ "$KEEP_SANDBOX" -eq 1 ] && kept="$PROBE_CWD"
   browser_dir_meta="$(native_path "$BROWSER_DIR")"
@@ -2495,7 +2788,10 @@ export_meta() {
          QA_META_PROBE="$PROBING" QA_META_PATCH="$PROBE_PATCH" QA_META_SANDBOX="$kept" \
          QA_META_BROWSER="$BROWSER" QA_META_BROWSER_DIR="$browser_dir_meta" \
          QA_META_BROWSER_HEADED="$HEADED" QA_META_BROWSER_EVAL="$BROWSER_EVAL" \
-         QA_META_DEPTH="$DEPTH_MODE" QA_META_SHORT="$SHORT_ANSWER_WARNING"
+         QA_META_DEPTH="$DEPTH_MODE" QA_META_SHORT="$SHORT_ANSWER_WARNING" \
+         QA_META_SCEN_FILE="$SCENARIOS_GIVEN" QA_META_SCEN_RESULTS="$SCEN_RESULTS" \
+         QA_META_SCEN_PASS="$SCEN_PASS" QA_META_SCEN_FAIL="$SCEN_FAIL" \
+         QA_META_SCEN_BLOCKED="$SCEN_BLOCKED"
 }
 
 # --probe --write: the session's edits as a patch -- FILE.patch next to -o FILE (always
@@ -2673,8 +2969,128 @@ short_answer_guard() {
   fi
 }
 
+# --scenarios: score the FINAL answer against the suite -- $RAW here, so when a
+# review round ran it is the round's answer that gets scored. The result list
+# goes to <browser run folder>/results.json and the table to summary.md beside
+# the screenshots (they are the evidence, and belong together); the table and
+# 'results: PATH' print on stderr -- stdout and -o keep belonging to the answer.
+# The run's own code wins when the run itself failed; otherwise 0 when every
+# scenario PASSED, $QA_SCENARIO_FAIL when any is FAIL or BLOCKED (a scenario the
+# answer never mentioned is BLOCKED, so a silent run cannot pass a suite).
+scenario_score() {
+  local run_code="$1" ans sum line t p="" f="" b=""
+  if [ -z "$BROWSER_DIR" ]; then    # cannot happen: --scenarios implies --browser
+    die "--scenarios: no browser run folder to write the results into"
+    return "$run_code"
+  fi
+  ans="$(extract text)"
+  if ! printf '%s' "$ans" > "$TMPD/scenario-answer.txt"; then
+    die "--scenarios: cannot write the answer for scoring"
+    return "$run_code"
+  fi
+  if ! sum="$(skill_py scenarios.py results "$(native_path "$SCENARIOS")" \
+               "$(native_path "$TMPD/scenario-answer.txt")" \
+               "$(native_path "$BROWSER_DIR/results.json")")"; then
+    die "--scenarios: could not score the answer against $SCENARIOS_GIVEN"
+    return "$run_code"
+  fi
+  printf '%s\n' "$sum" > "$BROWSER_DIR/summary.md" \
+    || die "--scenarios: could not write $BROWSER_DIR/summary.md"
+  die "$sum"
+  die "results: $BROWSER_DIR/results.json"
+  line="$(printf '%s\n' "$sum" | tail -n 1)"
+  case "$line" in
+    "PASS "*" / FAIL "*" / BLOCKED "*) : ;;
+    *) die "--scenarios: could not read the counts off the summary"
+       return "$run_code" ;;
+  esac
+  t="${line#PASS }";  p="${t%% / FAIL *}"
+  t="${t#* / FAIL }"; f="${t%% / BLOCKED *}"
+  t="${t#* / BLOCKED }"; b="$t"
+  SCEN_RESULTS="$(native_path "$BROWSER_DIR/results.json")"
+  SCEN_PASS="$p" SCEN_FAIL="$f" SCEN_BLOCKED="$b"
+  [ "$run_code" -ne 0 ] && return "$run_code"
+  if [ "$f" -gt 0 ] || [ "$b" -gt 0 ]; then return "$QA_SCENARIO_FAIL"; fi
+  return 0
+}
+
+# --record: resume the session that ran the suite ONCE with RECORD_PROMPT so it turns
+# each scenario into a deterministic script, then let scenarios.py replay-check decide
+# which of those scripts reproduce the verdicts the run recorded. Only a session that
+# ended cleanly is resumed (a failed run has verdicts worth nothing, and resuming a
+# session that never got its answer is not recording); the record round is NOT the run's
+# answer -- its answer is the list of files it wrote -- so $RAW is put back afterwards
+# whatever it did: stdout, -o and the scored report keep belonging to the tester's
+# report, and --json keeps the usage of the call that produced it, not of the recording.
+# The write fence of this one call: Write inside <browser folder>/replay/ and nowhere
+# else (the rule names that path, and the Write tool joins the TOOLSET of this call
+# alone -- the run's own toolset never had it, and nothing else gains it).
+record_scripts() {
+  local rc code _i _dir _prompt _rec_tools _rec_toolset _rec_argv _out _line _errf _msg
+  if [ -z "$BROWSER_DIR" ]; then          # cannot happen: --scenarios implies --browser
+    die "--record: no browser run folder to write the replay scripts into"
+    return 0
+  fi
+  if [ -z "${qa_session:-}" ]; then
+    die "WARNING: --record: no session id to resume; no replay scripts were written"
+  else
+    _dir="$(native_path "$BROWSER_DIR")"
+    _prompt="${RECORD_PROMPT//@FOLDER@/$_dir}"
+    # Claude Code matches file-write permissions through Edit(...) path rules (they cover
+    # every file-editing tool); a Write(...) path rule alone was not honoured in use, so
+    # both are given, exactly as --test grants its worktree.
+    _rec_tools="$TOOLS,Edit($(rule_path "$BROWSER_DIR/replay")/**),Write($(rule_path "$BROWSER_DIR/replay")/**)"
+    case ",$TOOLS," in *,Write,*) _rec_tools="$TOOLS" ;; esac     # already write-enabled
+    _rec_toolset="$TOOLSET"
+    case ",$TOOLSET," in
+      *,Write,*) : ;;
+      *) _rec_toolset="${TOOLSET:+$TOOLSET,}Write" ;;
+    esac
+    mv -f "$RAW" "$RAW.record"
+    # Same base argv as the review round (every flag before CLAUDE_BASE_N), with this
+    # call's two tool-policy values swapped into it.
+    _rec_argv=("${CLAUDE_ARGV[@]:0:$CLAUDE_BASE_N}")
+    for _i in "${!_rec_argv[@]}"; do
+      case "${_rec_argv[$_i]}" in
+        --allowed-tools) _rec_argv[_i + 1]="$_rec_tools" ;;
+        --tools)         _rec_argv[_i + 1]="$_rec_toolset" ;;
+      esac
+    done
+    CLAUDE_ARGV=("${_rec_argv[@]}" --resume "$qa_session" -- "$_prompt")
+    if [ -n "$TIMEOUT" ] && [ -n "$TIMEOUT_BIN" ]; then
+      RUN_ARGV=("$TIMEOUT_BIN" -k 10 "$TIMEOUT" "${CLAUDE_ARGV[@]}")
+    else
+      RUN_ARGV=("${CLAUDE_ARGV[@]}")
+    fi
+    rm -f "$TMPD/timed_out"
+    run_claude; rc=$?
+    classify "$rc"; code=$?
+    [ "$code" -eq 0 ] || die "WARNING: --record: the record round failed (exit $code);"
+    [ "$code" -eq 0 ] || die "the scripts it wrote are validated as they stand"
+    mv -f "$RAW.record" "$RAW"
+  fi
+  # Whatever exists is validated -- nothing, when the round could not run at all: the
+  # manifest then keeps no scripts and says why per scenario, which is the honest
+  # record of a run that recorded nothing.
+  _errf="${TMPDIR:-/tmp}/qwen-record-err.$$"
+  _out="$(skill_py scenarios.py replay-check "$(native_path "$SCENARIOS")" \
+            "$(native_path "$BROWSER_DIR/results.json")" \
+            "$(native_path "$BROWSER_DIR/replay")" \
+            "$(native_path "$RECORD")" 2>"$_errf")"; rc=$?
+  _msg="$(cat "$_errf" 2>/dev/null)"; rm -f "$_errf"
+  if [ "$rc" -ne 0 ]; then
+    [ -z "$_msg" ] || die "--record: ${_msg#scenarios.py: }"
+    die "--record: could not validate the replay scripts; nothing was recorded"
+    return 0
+  fi
+  while IFS= read -r _line; do
+    [ -n "$_line" ] && die "$_line"
+  done <<< "$_out"
+  return 0
+}
+
 emit() {
-  local rc code fmt
+  local rc code fmt _run_code
   run_claude; rc=$?
   classify "$rc"; code=$?
   if [ "$REVIEW_ROUND" -eq 1 ]; then review_round "$code"; code=$?; fi
@@ -2684,6 +3100,21 @@ emit() {
   fi
   if [ "$PROBE" -eq 1 ] && [ "$KEEP_SANDBOX" -eq 1 ] && [ -n "$PROBE_RUN" ]; then
     die "sandbox kept: $PROBE_CWD (remove it with: rm -rf $(sq "$PROBE_RUN"))"
+  fi
+  if [ -n "$SCENARIOS" ]; then
+    _run_code="$code"                     # the run's own code, before the verdicts
+    scenario_score "$code"; code=$?
+    if [ -n "$RECORD" ]; then
+      # A FAIL verdict does not stop the recording: a scenario that failed and replays
+      # as FAILED is exactly the deterministic reproduction a later run needs, and a
+      # BLOCKED scenario is rejected by name at validation. What stops it is the run
+      # itself having failed -- no clean session to resume, no verdicts to reproduce.
+      if [ "$_run_code" -eq 0 ]; then
+        record_scripts
+      else
+        die "WARNING: --record: the run did not finish cleanly; nothing was recorded"
+      fi
+    fi
   fi
   export_meta
 

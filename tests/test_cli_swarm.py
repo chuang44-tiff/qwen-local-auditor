@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 
-from swarm_fixtures import make_workflow
+from swarm_fixtures import calls, make_workflow
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WRAP = ROOT / "skill" / "local-auditor" / "qwen-swarm.sh"
@@ -180,3 +180,55 @@ def test_engine_only_flags_are_not_advertised_in_the_alias_help(tmp_path):
     assert r.returncode == 0 and "EXIT CODES" in r.stdout
     for flag in ("--set", "--list", "--rounds", "--target", "--keep-sandboxes"):
         assert flag not in r.stdout, flag
+
+
+# ---------------------------------------------------------------- the browser fence
+BROWSER_WORKFLOW = r'''
+import json
+def run(wf):
+    seen = wf.agent("look", "tester", "open the page", wf.steps.extract_json)
+    wf.write("saw.json", json.dumps(seen))
+    wf.report("# UI\n\nwhat the session saw: saw.json\n")
+'''
+SEES_BROWSER_DIR = r'''
+import json, os
+def answer(p, r):
+    return 0, "```json\n" + json.dumps({"dir": os.environ.get("QWEN_BROWSER_DIR")}) + "\n```"
+'''
+
+
+def browser_folder(tmp_path):
+    return make_workflow(tmp_path / "wfs",
+                         {"roles": {"tester": {"file": "roles/tester.md",
+                                               "fence": "browser"}}},
+                         script=BROWSER_WORKFLOW, roles=("tester",))
+
+
+def test_a_browser_role_gets_its_browser_and_its_own_folder(tmp_path):
+    # The shipped command, end to end: a browser role's unit is passed qwen-agent
+    # --browser and no --mcp-config of the engine's, and its session is told its
+    # QWEN_BROWSER_DIR is RUN/browser/<unit> -- so the screenshots of a UI suite stay with
+    # the run that made them. No search backend and no --target is involved anywhere.
+    d = tmp_path / "fake"
+    d.mkdir(exist_ok=True)
+    (d / "tester.py").write_text(SEES_BROWSER_DIR, encoding="utf-8")
+    folder = browser_folder(tmp_path)
+    out = tmp_path / "run"
+    r = run(tmp_path, [str(folder), "check the ui", "--out", str(out)], **fake_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert json.loads((out / "saw.json").read_text(encoding="utf-8")) == {
+        "dir": str(out / "browser" / "look-1")}
+    argv = calls(d)[0]
+    assert "--browser" in argv and "--mcp-config" not in argv and "--web" not in argv
+    assert not (out / "mcp.json").exists()              # a browser run needs no search setup
+
+
+def test_a_browser_workflow_checks_and_preflights_without_a_search_backend(tmp_path):
+    # A UI suite runs against local URLs: a browser role is not a web fence, so neither
+    # the dry run nor the preflight asks for mcp.json or a reachable search backend.
+    folder = browser_folder(tmp_path)
+    r = run(tmp_path, ["--check", str(folder)], **fake_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("ok: echo:")
+    r = run(tmp_path, ["--preflight", str(folder)], **fake_env(tmp_path))
+    assert r.returncode == 0, r.stderr

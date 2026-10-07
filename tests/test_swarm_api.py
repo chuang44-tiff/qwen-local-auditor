@@ -363,3 +363,61 @@ def test_read_units_run_in_the_target_and_key_on_its_head(tmp_path, fake, bash):
     assert pathlib.Path(argv[argv.index("-C") + 1]) == repo.resolve()
     assert argv[argv.index("--toolset") + 1] == "Read,Glob,Grep"
     assert wf._fingerprint().startswith("git:")
+
+
+# ---------------------------------------------------------------- the browser fence
+BROWSER_ROLES = {"tester": {"file": "roles/tester.md", "fence": "browser"},
+                 "writer": {"file": "roles/writer.md", "fence": "none"}}
+SEES_DIR = r"""
+import json, os
+def answer(p, r):
+    return 0, "```json\n" + json.dumps([{"dir": os.environ.get("QWEN_BROWSER_DIR")}]) + "\n```"
+"""
+
+
+def browser_workflow(tmp_path, fake, web_seats=1):
+    """A run with one browser role and one plain role, and NO mcp.json at all: the
+    browser fence is not a web fence, so such a manifest needs neither mcp nor --target.
+    Every role answers with the QWEN_BROWSER_DIR its own session was given."""
+    for role in ("tester", "writer"):
+        (fake / ("%s.py" % role)).write_text(SEES_DIR, encoding="utf-8")
+    folder = make_workflow(tmp_path / "wf", {"roles": BROWSER_ROLES}, roles=("tester", "writer"))
+    m = manifest.load(folder)
+    cfg = {"goal": "g", "depth": "quick", "items": 3, "max_agents": 3, "max_items": 2,
+           "timeout_per_item": 100, "retries": 0, "effort": None, "role_effort": {},
+           "hours": None, "deadline": None, "rounds": 1, "target": None}
+    run = tmp_path / "run"
+    run.mkdir(exist_ok=True)
+    sw = swarm.Swarm([sys.executable, str(FAKE)], run, seats=2, timeout=60, backoff=0)
+    return api.Workflow(m, cfg, run, sw, goal="g", web_seats=web_seats), run
+
+
+def test_a_browser_unit_is_told_its_own_folder_under_the_run(tmp_path, fake):
+    wf, run = browser_workflow(tmp_path, fake)
+    res = wf.fan_out("ui", "tester", items(2), prompt,
+                     lambda text, batch: steps.extract_json(text), max_items=1)
+    got = [r["dir"] for r in res.rows]
+    assert got == [str(run / "browser" / "ui-1"), str(run / "browser" / "ui-2")]
+    for d in got:                                       # one folder per unit, inside RUN
+        assert pathlib.Path(d).parent == run / "browser"
+    # wf.browser_dir(unit) is the very path the session was handed, so a report can name it
+    assert [str(wf.browser_dir(u)) for u in ("ui-1", "ui-2")] == got
+    argv = calls(fake)[0]
+    assert "--browser" in argv and "--mcp-config" not in argv
+
+
+def test_only_a_browser_role_is_given_the_variable(tmp_path, fake):
+    wf, run = browser_workflow(tmp_path, fake)
+    res = wf.fan_out("note", "writer", items(1), prompt,
+                     lambda text, batch: steps.extract_json(text))
+    assert [r["dir"] for r in res.rows] == [None]       # a plain unit inherits, nothing added
+
+
+def test_a_browser_role_runs_at_the_seats_and_needs_no_mcp(tmp_path, fake):
+    # A UI suite runs against local URLs, so the fence is not a web fence: no search
+    # preflight, no --web-seats cap. The run above was built with no mcp.json at all.
+    wf, run = browser_workflow(tmp_path, fake)
+    assert wf._seats("tester") is None and wf._seats("writer") is None
+    assert wf.mcp is None
+    assert wf.fan_out("ui", "tester", items(1), prompt,
+                      lambda text, batch: steps.extract_json(text)).ok

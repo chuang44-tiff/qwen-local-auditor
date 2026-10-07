@@ -1,0 +1,14 @@
+{
+ "name": "ui-test",
+ "description": "A scripted UI suite as a swarm: one browser agent per scenario, every answer scored against the suite, one report",
+ "goal": "a name for the suite run (the scenario file is --set scenarios=PATH)",
+ "target": "none",
+ "roles": {
+  "tester": {"file": "roles/tester.md", "fence": "browser", "deep": false}
+ },
+ "knobs": {"scenarios": "str", "base": "str"},
+ "presets": {
+  "quick": {"scenarios": "", "base": "", "budget": 900, "retries": 1, "rounds": 1}
+ },
+ "default_depth": "quick"
+}

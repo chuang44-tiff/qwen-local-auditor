@@ -262,7 +262,8 @@ of yours is anywhere in an agent's reach.
 pages to fetch. The same holds for `qwen-swarm research` and for any workflow whose roles
 carry a `search` or `web` fence: those go online on purpose, through the `search` tool and
 `WebFetch` and nothing else. No other workflow needs the network for its work, and no other
-fence adds a network tool — but a `sandbox` role has Bash, and Bash in a sandbox is your
+fence adds a search or fetch tool — but a `browser` role drives a real browser, which opens
+whatever URL it is told to, and a `sandbox` role has Bash, and Bash in a sandbox is your
 shell, with your network: a sandbox is a copy of the target, not a jail
 ([`swarm.md`](swarm.md)). On a machine that has to stay air-gapped, this is the command to
 leave off it.

@@ -177,7 +177,7 @@ browser_navigate, browser_navigate_back, browser_snapshot, browser_find, browser
 browser_type, browser_fill_form, browser_press_key, browser_select_option, browser_hover,
 browser_drag, browser_drop, browser_file_upload, browser_handle_dialog, browser_tabs,
 browser_resize, browser_emulate_media, browser_wait_for, browser_take_screenshot,
-browser_console_messages, browser_network_requests, browser_network_request, browser_close
+browser_console_messages, browser_network_requests, browser_close
 ```
 
 Each is granted as `mcp__playwright__<name>`. The server **offers more tools than that**,
@@ -190,13 +190,20 @@ out of the model's sight entirely:
 |---|---|
 | `mcp__playwright__browser_run_code_unsafe` | runs arbitrary code in the browser's own process; never granted, always hidden |
 | `mcp__playwright__browser_install` | downloads a browser mid-run; never granted, always hidden |
-| `mcp__playwright__browser_evaluate` | runs arbitrary JavaScript inside the page; ungranted **and** hidden unless `--browser-eval`, which both grants it and stops hiding it |
+| `mcp__playwright__browser_evaluate` | runs arbitrary JavaScript inside the page; ungranted **and** hidden unless `--browser-eval`, which grants it and `browser_network_request` and stops hiding either |
+| `mcp__playwright__browser_network_request` | answers ONE request WITH its response body — the app's scripts, styles and server replies, i.e. its source; ungranted **and** hidden unless `--browser-eval` (the request LIST `browser_network_requests` — URLs, methods, statuses, no bodies — stays granted) |
+
+**Black-box testing:** a tester tests behaviour from the outside, so the two tools that
+reach the application's source — `browser_evaluate` and `browser_network_request`'s
+response bodies — are hidden by default, and `--browser-eval` is the explicit opt-in into
+both.
 
 | switch | effect |
 |---|---|
 | `--browser` | refused with `--mcp-config` ("--browser brings its own MCP config"), `--until-done` and `--interactive` (exit 2); allowed with `--probe` and `--write`; the `tester` role implies it |
 | `--headed` | a visible browser instead of headless. Needs `DISPLAY` or `WAYLAND_DISPLAY` set, else exit 2 ("--headed needs a display (DISPLAY is not set)"). The server entry carries an `env` copied from qwen-agent's environment: `DISPLAY` (and `XAUTHORITY` when set), or — with only `WAYLAND_DISPLAY` set — `WAYLAND_DISPLAY` (and `XDG_RUNTIME_DIR` when set) and no `DISPLAY` key at all. Implies `--browser` |
-| `--browser-eval` | grants `mcp__playwright__browser_evaluate` and stops hiding it; implies `--browser` |
+| `--browser-eval` | grants `mcp__playwright__browser_evaluate` and `mcp__playwright__browser_network_request` and stops hiding them; implies `--browser` |
+| `--scenarios FILE` | scripted UI suite: implies `--browser` and `-r tester`, the file is the prompt; refused with another `-r`, `-f`, a prompt argument, `--stdin`, `--until-done`, `--interactive` (exit 2); see "Scripted UI suites" below |
 
 `--browser` can open **any URL, the internet included**, independently of `--web`:
 `--web` gates only the `WebFetch` built-in, and the browser needs no web opt-in to
@@ -215,10 +222,16 @@ has passed and claude is about to start: a run that fails before that, and every
 the would-be config path). It is the server's `--output-dir`: screenshots, page
 snapshots and downloads land there. Its path is printed on stderr (`browser:
 screenshots and page snapshots in PATH`) and the folder is **kept** after the run:
-it is the evidence. Under `--probe` or `--test` the session may be unable to `Read`
-screenshot files from the run folder; the screenshot image itself still reaches the
-model inline (`--image-responses allow`).
-`QWEN_BROWSER_DIR` moves it; `QWEN_PLAYWRIGHT_MCP` replaces the whole
+it is the evidence — and the session can READ it: the folder joins `--add-dir`
+(this own entry never trips `--probe`'s `-D`/`--add-dir` refusal, the run folder
+is not the user's tree) and `Read` joins `--allowed-tools` even under
+`--toolset none` (Read alone; under `none` it joins `--tools` too). That matters
+because Playwright 0.0.83 hands the screenshot image back to the model only when
+`browser_take_screenshot` is called WITHOUT a filename (`--image-responses
+allow`); given one it returns a link and the image only lands in the run folder.
+`QWEN_BROWSER_DIR` moves it (a `qwen-swarm` role with the `browser` fence sets it per unit
+to `RUN/browser/<unit>`, so every unit's evidence lands inside that run —
+[swarm.md](swarm.md)); `QWEN_PLAYWRIGHT_MCP` replaces the whole
 `npx -y --prefer-offline @playwright/mcp@0.0.83` part of the server command (and the
 Git Bash `cmd /c` form of it), split on whitespace with pathname expansion off: the
 first word is the command, the rest its leading args, and a `*` in the value stays
@@ -240,6 +253,196 @@ npx playwright install chromium           # fetches the browser itself
 qwen-agent -r tester "test the sign-up form at http://localhost:3000"
 qwen-agent -r tester --headed "watch the checkout flow at http://localhost:3000"
 ```
+
+### Scripted UI suites (`--scenarios`)
+
+`--scenarios FILE` hands the tester a written suite instead of a sentence: it
+implies `--browser` and `-r tester`, the **prompt IS the suite's task text**
+(built by `lib/scenarios.py` from the file — the same text the answer is later
+scored against), and the answer is scored per scenario. A relative `FILE`
+resolves against the caller's directory (like `-o`), never against `-C`.
+
+The file is Markdown:
+
+- `# Suite: <name>` — required, the first heading;
+- `base: <url>` — optional, before the first scenario; relative "Open" targets
+  in steps resolve against it (it only means something before the first scenario);
+- `## Scenario: <title>` — one or more;
+- `id: <id>` — optional per scenario; the default is `s1`, `s2`, … in file
+  order; ids match `[A-Za-z0-9_-]+` and must be unique;
+- `steps:` then a numbered list — at least one step;
+- `expect:` then a bullet list — at least one expectation.
+
+Anything else inside a scenario (blank lines, notes) is ignored. Every parse
+error names its line ("`line 7: ...`"), and the file is validated **before
+claude could start**: a broken suite is exit 2 and nothing runs. Complete
+example — a cart page, two scenarios, one named id and one default:
+
+```markdown
+# Suite: Cart page
+base: http://localhost:3000/cart
+
+## Scenario: add an item
+id: add-item
+steps:
+1. Open the cart page
+2. Click Add on "Widget"
+expect:
+- The cart shows 1 item
+- The subtotal is 9.00
+
+## Scenario: remove an item
+steps:
+1. Click Remove on the only line
+expect:
+- The cart is empty
+```
+
+```bash
+qwen-agent --scenarios cart-suite.md          # no prompt argument: the suite is one
+```
+
+The tester is told to run the scenarios in order, each from a fresh page load,
+and to end its answer with ONE fenced json block
+`{"results": [{"id": ..., "status": "PASS"|"FAIL"|"BLOCKED", ...}]}` with one
+entry per scenario id (`BLOCKED` means a step could not be performed). The
+**last** such block is the report: an id it omits is BLOCKED ("no result
+reported"), an id it does not know is ignored, a status outside the three is
+BLOCKED with a note saying what it was, and an answer with no parsable block
+leaves every scenario BLOCKED ("no result block").
+
+After the run (and after the review round, when depth adds one) qwen-agent
+writes `<browser run folder>/results.json` (one entry per scenario, file order)
+and `<browser run folder>/summary.md`, prints the table and the results path on
+**stderr** — the answer keeps stdout or `-o` — and exits: the run's own code
+when the run itself failed, else **0 when every scenario PASSed, 9 when any is
+FAIL or BLOCKED**. With `--json` the record carries
+`qwen_agent.scenarios = {"file": FILE, "results": PATH, "pass": n, "fail": n,
+"blocked": n}`.
+
+```
+$ qwen-agent --scenarios cart-suite.md
+qwen-agent: browser: screenshots and page snapshots in ~/.cache/qwen-agent/browser/20261006T093012Z-aB3cD
+qwen-agent: | id | status | notes |
+|---|---|---|
+| add-item | PASS |  |
+| s2 | FAIL | the row stayed in the cart after Remove |
+
+PASS 1 / FAIL 1 / BLOCKED 0
+qwen-agent: results: ~/.cache/qwen-agent/browser/20261006T093012Z-aB3cD/results.json
+The answer (the tester's report) is on stdout.   $ echo $?
+9
+```
+
+`--scenarios` is refused (exit 2, claude never started) with another `-r`,
+`-f`, a prompt argument, `--stdin`, `--until-done` and `--interactive` — the
+suite supplies the prompt, the role and the browser. The scoring lives in
+`skill/local-auditor/lib/scenarios.py`, runnable on its own:
+`scenarios.py check FILE` (`ok: N scenarios` / exit 2 + the error),
+`scenarios.py prompt FILE`, `scenarios.py results FILE ANSWER_FILE OUT_JSON` —
+and the two replay commands, below.
+
+### Record and replay (`--record` / `--replay`)
+
+A scenario suite costs a model run every time it is asked, and its answers vary.
+`--record` turns one scored run into a replay that costs neither:
+
+```bash
+qwen-agent --scenarios cart-suite.md --record ./cart-replay
+```
+
+After the suite is scored (and after the review round, when depth adds one) the
+session is resumed **once** with a fixed prompt that turns each scenario it ran
+into a deterministic Playwright script — `<browser run folder>/replay/<id>.mjs`:
+a self-contained Node ES module importing `{ chromium } from 'playwright'`,
+launching it headless, opening the page fresh, performing the scenario's steps
+with stable selectors (roles, labels, visible text; never coordinates), asserting
+EVERY expectation, and printing exactly one line — `RESULT <id> PASS` or
+`RESULT <id> FAIL: <the expectation that did not hold>` — then exiting 0 (1 only
+on a script error). It reads the base URL from `$QWEN_REPLAY_BASE`, whose own
+default is the suite's base URL. For that one call the session may write inside
+`<browser run folder>/replay/` and nowhere else, and its reply (the list of files
+it wrote) is not the run's answer: the answer stays the tester's scored report.
+
+Then every script is replayed and kept **only when it answers what the run
+answered** — PASS replaying PASS, FAIL replaying FAIL (a scenario that failed and
+reproduces is exactly what a later run must be able to retake). What is rejected,
+with its reason in the manifest:
+
+| rejected | because |
+|---|---|
+| `recorded BLOCKED` | a step could not be performed, so nothing was established about it |
+| `not run (no result recorded)` | the run reported nothing for that id |
+| `no script was written` | the record round left that scenario out |
+| `replay said PASS, the run recorded FAIL: …` | the script does not test what was tested, or the app moved under it |
+
+The kept scripts are copied into `--record`'s directory with a `manifest.json`
+(`suite`, `file` — the suite file absolute, `base`, `recorded` — UTC time,
+`scripts[]` of `id`/`verdict`/`sha256`/`file`, and `rejected[]` of `id`/`reason`),
+and `recorded: N of M scenarios (rejected: ids)` plus the manifest path print on
+**stderr** beside the scored summary. Validation needs `node` and the
+`playwright` package (below), and asks the scripts the question a later replay
+asks them — no base override, so a kept script passes because of what it does and
+not because of what it was told.
+
+Later the same verdicts come back with **no model call at all**: no preflight, no
+claude, no browser MCP server, seconds, the same result every time.
+
+```bash
+qwen-agent --replay ./cart-replay
+qwen-agent --replay ./cart-replay -b http://127.0.0.1:4000/cart   # another deployment
+```
+
+```
+$ qwen-agent --replay ./cart-replay
+qwen-agent: replay: ~/work/cart-replay
+qwen-agent: | id | status | notes |
+|---|---|---|
+| add-item | PASS |  |
+| s2 | FAIL | the row stayed in the cart after Remove |
+
+PASS 1 / FAIL 1 / ERROR 0   $ echo $?
+9
+```
+
+Each script's bytes are checked against the manifest's `sha256` before anything
+runs: a script that changed since recording is `ERROR` ("script changed since
+recording") and is never run — the manifest is what says a PASS was ever observed
+for this file. `node` then runs each one (120 s each) in a fresh temporary
+directory with `NODE_PATH` set to the playwright package's `node_modules`, and
+with `QWEN_REPLAY_BASE` set when a base was given. Its `RESULT` line is the
+verdict — `PASS`, `FAIL` with the expectation that did not hold, or `ERROR` (it
+crashed, printed no `RESULT` line, or ran out its clock) — the table and
+`PASS n / FAIL n / ERROR n` print on **stderr**, and the exit is **0 when every
+scenario PASSED, 9 when any is FAIL or ERROR**: the code `--scenarios` gives,
+because a replay is those verdicts taken again.
+
+A replay asks nothing of a model, so every model-shaped flag is refused with exit
+2 naming the flag — `-r`, `-f`, a prompt argument, `--stdin`, `--scenarios`,
+`--until-done`, `--interactive`, `--deep`, `-m`, `--timeout`, `--browser`,
+`--json`, `-o`, `-w`. `-b/--base URL` (the URL the scripts open, handed to them as
+`QWEN_REPLAY_BASE`, overriding the recorded base) and `-q` are what it accepts.
+`node` must be on PATH — the scripts are Node ES modules — and the `playwright`
+package is resolved in this order: `QWEN_PLAYWRIGHT_NODE_PATH`, a `node_modules`
+**directory** holding it; else a `node_modules/playwright` in the npx cache under
+`$(npm config get cache)/_npx/*/node_modules`. Neither: exit 2 with the fix in the
+message (`npm i -g playwright && npx playwright install chromium`), never scripts
+silently skipped. Nothing reaches the network but the app under test.
+
+The runner is `lib/scenarios.py`, runnable on its own:
+
+```bash
+python3 skill/local-auditor/lib/scenarios.py replay-check SUITE.md RESULTS.json REPLAY_DIR OUT_DIR
+python3 skill/local-auditor/lib/scenarios.py replay OUT_DIR --base http://127.0.0.1:3000 --out replay-results.json
+```
+
+**Re-record when the app moved.** A kept script is frozen bytes — that is what
+makes it deterministic — so after a UI change a scenario whose markup was renamed
+comes back `ERROR`, with no `RESULT` line because its selector no longer resolves.
+That is the signal to record again (`--scenarios FILE --record DIR`), not to edit
+the script by hand: an edited script fails its sha256 and `--replay` will not run
+it. The replay names which scenario to re-check; only a model can say what the new
+right answer is.
 
 ## Model, context and effort
 
@@ -288,6 +491,7 @@ blocks has been seen at both rc=0 and rc=8 (see [`limits.md`](limits.md)).
 | 6 | ran clean but returned no usable text |
 | 7 | a tool call was blocked by the permission system (see `--warn-denials`) |
 | 8 | harness failure (claude or python missing, or unparseable output) |
+| 9 | `--scenarios`: at least one scripted scenario ended FAIL or BLOCKED; `--replay`: at least one recorded script ended FAIL or ERROR |
 | 11-14 | `--until-done` outcomes; see [`coding.md`](coding.md) |
 
 ## Examples

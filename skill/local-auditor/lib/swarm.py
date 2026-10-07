@@ -120,7 +120,7 @@ class Unit:
     def __init__(self, name, role_file, prompt, toolset="none", grants="", web=False,
                  mcp_config=None, parse=extract_json, cache=True, timeout=None, retries=0,
                  effort=None, ignore_deadline=False, cwd=None, key_extra="", setup=None,
-                 teardown=None, deep=()):
+                 teardown=None, deep=(), browser=False, env=None):
         # fullmatch, not match: "a\n" must not pass on the strength of the trailing $.
         if not _SAFE_NAME.fullmatch(name or ""):
             raise ValueError("unit name must match %s (got %r)" % (_SAFE_NAME.pattern, name))
@@ -149,6 +149,12 @@ class Unit:
         # nudge when both are listed); () leaves the unit plain --shallow and its
         # cache key exactly as before
         self.deep = tuple(deep)
+        # qwen-agent --browser: one Playwright MCP server and its tool grants (the fence
+        # that drives a scripted UI suite). The flag joins this unit's cache key.
+        self.browser = browser
+        # extra environment variables for this unit's session ({NAME: VALUE}, both str);
+        # None = the inherited environment alone
+        self.env = env
 
 
 class Swarm:
@@ -193,6 +199,10 @@ class Swarm:
             argv += ["-t", u.grants]
         if u.web:
             argv.append("--web")
+        if u.browser:
+            # qwen-agent writes the Playwright MCP config for this itself and grants its
+            # tools; a repair call resumes the same session, so it keeps its browser.
+            argv.append("--browser")
         if u.mcp_config:
             argv += ["--mcp-config", str(u.mcp_config)]
         if u.deep and not resume:
@@ -209,10 +219,13 @@ class Swarm:
             argv += ["--resume", resume]
         return argv
 
-    def _spawn(self, argv):
+    def _spawn(self, argv, env=None):
+        # env=None -- what every unit that names no extra variables gets -- inherits
+        # os.environ, exactly as before a unit could name any.
         posix = os.name == "posix"
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+                             env=env,
                              **({"start_new_session": True} if posix else {}))
         with self._lock:
             self._live.add(p)
@@ -228,7 +241,7 @@ class Swarm:
                 self._live.discard(p)
         return p.returncode, out or "", err or ""
 
-    def _call(self, argv):
+    def _call(self, argv, env=None):
         # both spawns' usage counts when an exit 3/4 is re-spawned after the backoff:
         # the first spawn spent those tokens, whether or not its answer survived
         rc, out, err, tokens = -1, "", "", 0
@@ -237,7 +250,10 @@ class Swarm:
                 # the same well-formed record shape a real call returns: the caller
                 # reads rec["tokens"]/rec["result"] without guarding for a bare string
                 return -1, {"result": "", "session": "", "tokens": tokens}, "interrupted"
-            rc, out, err = self._spawn(argv)
+            # env is None for every unit that names no extra variables: those keep the
+            # plain one-argument spawn call, the shape a caller that swaps _spawn out
+            # for its own replaces
+            rc, out, err = self._spawn(argv) if env is None else self._spawn(argv, env)
             try:
                 rec = json.loads(out) if out.strip() else {}
             except ValueError:
@@ -298,6 +314,11 @@ class Swarm:
                                                u.web, mcp_text, u.effort or "")
         if u.key_extra:
             blob += "\n" + u.key_extra
+        if u.browser:
+            # an answer earned with a real browser is not the answer a toolless session
+            # of the same prompt gave; no other fence reaches this line, so no other
+            # unit's key moves
+            blob += "\n--browser"
         if u.deep:
             # an answer earned with a review round is not the answer asked for without one
             blob += "\ndeep:" + ",".join(u.deep)
@@ -339,6 +360,9 @@ class Swarm:
         # the last attempt's start and token boundary: the unit's final log line reports
         # that attempt alone, so the token column of run.log sums to self.tokens
         t_start, tokens_before = start, 0
+        # None unless the unit names extra variables: inheriting os.environ is the
+        # documented behaviour, and a rebuilt dict keeps it for every attempt.
+        env = None if not u.env else dict(os.environ, **u.env)
         timeout = min(self.timeout if u.timeout is None else u.timeout, self.max_unit_seconds)
         set_up = False
         try:
@@ -356,7 +380,7 @@ class Swarm:
                     with contextlib.suppress(OSError):
                         os.unlink(self.agents_dir / ("%s%s" % (u.name, suffix)))
                 t_start, tokens_before = time.time(), tokens
-                rc, rec, err = self._call(self._argv(u, prompt_path, timeout))
+                rc, rec, err = self._call(self._argv(u, prompt_path, timeout), env)
                 tokens += rec["tokens"]
                 status = "ok"
                 with self._lock:
@@ -386,7 +410,8 @@ class Swarm:
                             repair.write_bytes(REPAIR.format(why=e).encode("utf-8", "replace"))
                             # the repair keeps this attempt's timeout: it is a
                             # continuation of the attempt, not a new one
-                            rc, rec2, err = self._call(self._argv(u, repair, timeout, resume=rec["session"]))
+                            rc, rec2, err = self._call(
+                                self._argv(u, repair, timeout, resume=rec["session"]), env)
                             tokens += rec2["tokens"]   # on any rc, count the repair record's usage
                             if rc == 0:
                                 (self.agents_dir / ("%s.repair.out" % u.name)).write_bytes(

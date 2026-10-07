@@ -1,6 +1,6 @@
 ---
 name: local-swarm
-description: Run a multi-agent job on the local model with `qwen-swarm` - a built-in workflow (research a question with cited sources, debug a bug in a codebase down to a checked patch) or a workflow you write for the purpose (manifest + workflow.py + role files), often as a long overnight run. Use for "debug this with the swarm", "run an overnight swarm", "find the root cause and a tested fix", "swarm this task", or any job that needs many local agents working in rounds. Plain web research has its own skill, local-deep-research.
+description: Run a multi-agent job on the local model with `qwen-swarm` - a built-in workflow (research a question with cited sources, debug a bug in a codebase down to a checked patch, run a scripted UI suite with one browser agent per scenario) or a workflow you write for the purpose (manifest + workflow.py + role files), often as a long overnight run. Use for "debug this with the swarm", "run an overnight swarm", "find the root cause and a tested fix", "run this scenario file against the app", "swarm this task", or any job that needs many local agents working in rounds. Plain web research has its own skill, local-deep-research.
 ---
 
 # Local swarm
@@ -18,6 +18,7 @@ deadlines, sandboxes, totals and exit codes.
 |---|---|---|
 | `research` | a cited, vote-verified report on a question | a search backend (see `local-deep-research`) |
 | `debug` | the root cause of a bug and a patch that passes the reproduction | `--target REPO`; `--set repro="CMD"` optional |
+| `ui-test` | a scripted UI suite run as a swarm: one browser agent per scenario, scored against the suite | `--set scenarios=SUITE.md`; the app already running at its URLs |
 
 For research, load `local-deep-research` instead: it covers that workflow fully.
 
@@ -33,6 +34,18 @@ patch is checked in a fresh copy (repro, then tests), a patch that edits test fi
 flagged and cannot win, and reviewers vote on root cause vs symptom suppression.
 Patches land in `RUN/patches/<n>.diff`; the user applies one with `git apply`.
 
+For a UI suite the scenario file is the `scenarios` knob (the same `# Suite:` markdown
+`qwen-agent --scenarios` takes; its format is in `reference/qwen-agent.md`), and the goal only
+names the run:
+
+    qwen-swarm ui-test "RUN NAME" --set scenarios=SUITE.md --out RUN_DIR [--set base=URL]
+
+One `browser` agent runs one scenario, its screenshots kept in `RUN/browser/<unit>`, and every
+answer is scored by the same `lib/scenarios.py` that wrote the prompt: `RUN/results.json` and
+the report say PASS/FAIL/BLOCKED per scenario. Exit 0 when all passed; 4 when any did not. The
+app must already be listening at the suite's URLs, and a missing `--set scenarios=` or a suite
+that does not parse is exit 2 naming its line before an agent starts.
+
 ## 2. Otherwise write a workflow
 
 Ask the user where the folder should live, then copy the closest built-in and change it:
@@ -44,8 +57,10 @@ Rules that keep a workflow resumable:
 
 - `run(wf)` must make the same calls in the same order given the same answers: no clock,
   no randomness, no environment, no file reads outside `wf.load`. `wf.rounds()` owns time.
-- Choose tools only through each role's `fence`: `none`, `search`, `web`, `read` (the
-  target, read-only) or `sandbox` (edit + Bash in a throwaway copy of the target).
+- Choose tools only through each role's `fence`: `none`, `browser` (a real browser through
+  qwen-agent `--browser`, for a local UI suite; its screenshots land in
+  `RUN/browser/<unit>`, and it can open any URL it is told to), `search`, `web`, `read`
+  (the target, read-only) or `sandbox` (edit + Bash in a throwaway copy of the target).
 - Commands run only through `wf.steps.run_cmd`: `bash -c CMD` in a fresh sandbox of the
   target, with the result logged in `run.log`. Where a command comes from is the run's
   business — the user's `--set`, the workflow's own code, or an agent's proposal (with no

@@ -39,6 +39,8 @@ USAGE
 BUILT-IN WORKFLOWS
   research   a cited report on a question (qwen-deep-research is this workflow)
   debug      root cause and a checked patch for a bug: --target REPO, --set repro=CMD
+  ui-test    a scripted UI suite run as a swarm: one browser agent per scenario, the
+             scenario file is --set scenarios=PATH (the one qwen-agent --scenarios takes)
 
 FLAGS
   --depth NAME         a preset of the workflow (qwen-swarm --list; default: its own)

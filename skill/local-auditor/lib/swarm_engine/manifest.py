@@ -9,7 +9,7 @@ import math
 import pathlib
 import re
 
-FENCES = ("none", "search", "web", "read", "sandbox")
+FENCES = ("none", "browser", "search", "web", "read", "sandbox")
 KNOB_TYPES = ("int", "float", "str", "bool")
 ENGINE_KNOBS = ("budget", "retries", "rounds", "hours")
 TOP_KEYS = ("name", "description", "goal", "target", "roles", "knobs", "presets",

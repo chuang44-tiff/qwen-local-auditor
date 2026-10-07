@@ -109,8 +109,7 @@ def test_browser_grants_find_and_friends(tmp_path, server, fake):
     argv, _ = calls(tmp_path)[0]
     assert argv.count("--allowed-tools") == 1
     grants = flag(argv, "--allowed-tools").split(",")
-    for t in ["browser_find", "browser_drop", "browser_network_request",
-              "browser_emulate_media"]:
+    for t in ["browser_find", "browser_drop", "browser_emulate_media"]:
         assert "mcp__playwright__%s" % t in grants, t
 
 
@@ -144,6 +143,36 @@ def test_browser_hides_unsafe_tools(tmp_path, server, fake):
     assert "mcp__playwright__browser_evaluate" in grants
 
 
+def test_network_request_body_hidden_by_default(tmp_path, server, fake):
+    # browser_network_request answers ONE request WITH its response body -- the
+    # app's scripts, styles and server replies, i.e. its source, which a black-box
+    # tester must not read (seen in use: a tester quoted app.js fetched with it).
+    # So it is hidden by default; the request LIST (URLs, methods, statuses, no
+    # bodies) stays granted.
+    r = go(tmp_path, ["--browser", "hi"], server, fake, extra=bdir(tmp_path))
+    assert r.returncode == 0, r.stderr
+    argv, _ = calls(tmp_path)[0]
+    hidden = flag(argv, "--disallowedTools").split(",")
+    grants = flag(argv, "--allowed-tools").split(",")
+    assert "mcp__playwright__browser_network_request" in hidden
+    assert "mcp__playwright__browser_network_request" not in grants
+    assert "mcp__playwright__browser_network_requests" in grants
+    assert "mcp__playwright__browser_network_requests" not in hidden
+
+
+def test_browser_eval_opts_into_network_request(tmp_path, server, fake):
+    # --browser-eval already opted into the source-reaching browser_evaluate; it now
+    # opts into browser_network_request too -- both granted, neither hidden.
+    r = go(tmp_path, ["--browser-eval", "hi"], server, fake, extra=bdir(tmp_path))
+    assert r.returncode == 0, r.stderr
+    argv, _ = calls(tmp_path)[0]
+    grants = flag(argv, "--allowed-tools").split(",")
+    hidden = flag(argv, "--disallowedTools").split(",")
+    for t in ["mcp__playwright__browser_network_request", "mcp__playwright__browser_evaluate"]:
+        assert t in grants, t
+        assert t not in hidden, t
+
+
 def test_browser_eval_adds_evaluate(tmp_path, server, fake):
     r = go(tmp_path, ["--browser-eval", "hi"], server, fake, extra=bdir(tmp_path))
     assert r.returncode == 0, r.stderr
@@ -174,6 +203,39 @@ def test_browser_with_test_warns(tmp_path, server, fake):
     assert "--browser with --test" not in r.stderr
     argv, _ = calls(tmp_path)[0]
     assert "--strict-mcp-config" in argv
+
+
+# --------------------------------------------------- the folder is readable
+
+def test_browser_folder_is_readable_with_toolset_none(tmp_path, server, fake):
+    # 0.0.83 answers a screenshot GIVEN a filename with a LINK only: the image is
+    # the file in the run folder. A session with no built-in tool at all must
+    # still be able to open it -- the folder joins --add-dir and Read joins the
+    # grants, Read alone.
+    r = go(tmp_path, ["--browser", "--toolset", "none", "hi"], server, fake, extra=bdir(tmp_path))
+    assert r.returncode == 0, r.stderr
+    argv, _ = calls(tmp_path)[0]
+    _, entry = mcp_entry(argv)
+    adds = [same_path(argv[i + 1]) for i, a in enumerate(argv) if a == "--add-dir"]
+    assert same_path(out_dir(entry)) in adds, adds
+    grants = flag(argv, "--allowed-tools").split(",")
+    assert "Read" in grants
+    for t in ("Glob", "Grep", "Bash", "Write"):
+        assert t not in grants, t                            # Read ONLY, nothing wider
+
+
+def test_browser_add_dir_does_not_trip_probe_refusal(tmp_path, server, fake):
+    # The browser run folder is not the user's tree: --browser's own --add-dir
+    # must not fire --probe's -D/--add-dir refusal.
+    repo = _git_repo(tmp_path / "repo")
+    r = go(tmp_path, ["--browser", "--probe", "-r", "auditor", "-C", posix(repo), "hi"],
+           server, fake, extra=bdir(tmp_path))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "-D/--add-dir" not in r.stderr
+    argv, _ = calls(tmp_path)[0]
+    _, entry = mcp_entry(argv)
+    adds = [same_path(argv[i + 1]) for i, a in enumerate(argv) if a == "--add-dir"]
+    assert same_path(out_dir(entry)) in adds, adds
 
 
 # ------------------------------------------------------------------ --headed
@@ -270,7 +332,7 @@ def test_tester_role_implies_browser_and_has_its_text(tmp_path, server, fake):
     assert "accessibility snapshot" in p
     assert "steps to reproduce, expected, actual" in p
     assert "Only report what you observed in the browser" in p
-    assert "Do not read or change source files unless the task asks you to" in p
+    assert "Test as a user would, from the outside" in p
     assert "--strict-mcp-config" in argv                    # the role implies --browser
     _, entry = mcp_entry(argv)
     assert pathlib.Path(out_dir(entry)).is_dir()
@@ -281,6 +343,21 @@ def test_tester_role_implies_browser_and_has_its_text(tmp_path, server, fake):
            extra=bdir(tmp_path))
     assert r.returncode == 2 and "has no 'deep' variant" in r.stderr
     assert calls(tmp_path) == []
+
+
+def test_tester_text_is_black_box(tmp_path, server, fake):
+    # Seen in use: a tester fetched app.js with browser_network_request and quoted
+    # source lines. A tester tests behaviour from the outside -- the role has to say
+    # so outright, and make clear no verdict may rest on reading code.
+    r = go(tmp_path, ["-r", "tester", "hi"], server, fake, extra=bdir(tmp_path))
+    assert r.returncode == 0, r.stderr
+    argv, _ = calls(tmp_path)[0]
+    p = " ".join(sys_prompt(argv).split())                  # whitespace-insensitive read
+    assert "do not open, fetch or quote the application's source code" in p
+    assert ("Test as a user would, from the outside: do not open, fetch or quote the "
+            "application's source code (scripts, styles, server files) unless the task "
+            "asks you to, and never base a verdict on reading code instead of on what "
+            "the page does.") in p
 
 
 def test_tester_text_asks_for_sequences(tmp_path, server, fake):
@@ -295,6 +372,21 @@ def test_tester_text_asks_for_sequences(tmp_path, server, fake):
             "reset or undo it, then do it again) and check that the state after the sequence "
             "is what a user would expect, not only what the screen shows right after each "
             "click; after each action take a snapshot") in p
+
+
+def test_tester_text_screenshot_without_filename(tmp_path, server, fake):
+    # 0.0.83 returns the image only for a screenshot taken WITHOUT a filename, and
+    # a saved one is worth re-checking at a phone width and in an alternate theme:
+    # the role has to say so.
+    r = go(tmp_path, ["-r", "tester", "hi"], server, fake, extra=bdir(tmp_path))
+    assert r.returncode == 0, r.stderr
+    argv, _ = calls(tmp_path)[0]
+    p = " ".join(sys_prompt(argv).split())                  # whitespace-insensitive read
+    assert "WITHOUT a filename" in p
+    assert "browser_resize to 400x800" in p
+    assert ("call browser_take_screenshot WITHOUT a filename so the image comes back "
+            "to you; a filename only saves the file") in p
+    assert "and repeat a key flow with any dark or alternate theme the app offers" in p
 
 
 def test_unknown_role_lists_tester(tmp_path, server, fake):

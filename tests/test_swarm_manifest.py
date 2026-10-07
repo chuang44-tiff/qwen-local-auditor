@@ -59,6 +59,22 @@ def test_each_rule_names_its_field(tmp_path, changes, needle):
     assert needle in str(e.value)
 
 
+def test_a_browser_role_needs_neither_target_nor_mcp(tmp_path):
+    # The browser fence drives a LOCAL ui suite: like `none` it asks for no --target
+    # (read and sandbox do) and for no mcp.json of ours (search and web do) -- qwen-agent
+    # writes the Playwright server config for the session itself.
+    m = manifest.load(make_workflow(
+        tmp_path, {"roles": {"tester": {"file": "roles/tester.md", "fence": "browser"}}},
+        roles=("tester",)))
+    assert m.target == "none" and m.roles["tester"].fence == "browser"
+
+
+def test_an_unknown_fence_names_the_browser_option(tmp_path):
+    with pytest.raises(manifest.ManifestError) as e:
+        load(tmp_path, roles={"worker": {"file": "roles/worker.md", "fence": "browsers"}})
+    assert "roles.worker.fence" in str(e.value) and "browser" in str(e.value)
+
+
 @pytest.mark.parametrize("preset,needle", [
     ({"budget": 100, "retries": 0, "rounds": 1}, "must set knob 'items'"),
     ({"items": -1, "budget": 100, "retries": 0, "rounds": 1}, "presets.quick.items"),
