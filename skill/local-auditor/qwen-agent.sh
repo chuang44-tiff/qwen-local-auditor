@@ -664,7 +664,30 @@ err_file() {
 }
 # Git Bash: argument conversion is switched off for the child (see CHILD_ENV), so
 # a path that must reach a native program is converted explicitly. No-op elsewhere.
-native_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+# An empty path stays empty (cygpath would complain on stderr). cygpath refuses a
+# path that runs through a regular file (".../file/sub": Not a directory) and then
+# prints nothing -- which once turned an unusable QWEN_PROBE_DIR into an empty one,
+# i.e. the default probe directory. Such a path is converted parent first, so it
+# reaches the native program still pointing where the caller said, and fails there.
+native_path() {
+  local p="$1" n parent
+  if [ -z "$p" ] || ! command -v cygpath >/dev/null 2>&1; then printf '%s' "$p"; return 0; fi
+  if n="$(cygpath -w "$p" 2>/dev/null)" && [ -n "$n" ]; then printf '%s' "$n"; return 0; fi
+  while [ "${p%/}" != "$p" ] && [ "$p" != / ]; do p="${p%/}"; done
+  case "$p" in */*) ;; *) printf '%s' "$p"; return 0 ;; esac
+  parent="${p%/*}"; [ -n "$parent" ] || parent=/
+  [ "$parent" != "$p" ] || { printf '%s' "$p"; return 0; }
+  n="$(native_path "$parent")"
+  case "$n" in *\\*) printf '%s\\%s' "${n%\\}" "${p##*/}" ;; *) printf '%s/%s' "${n%/}" "${p##*/}" ;; esac
+}
+# The drive-letter spelling with forward slashes (C:/x/y) under Git Bash: what a
+# printed path or command must use when it sits beside paths git or Python print,
+# so a pasted line names every file the same way. No-op elsewhere.
+mixed_path() {
+  local n
+  if [ -n "$1" ] && command -v cygpath >/dev/null 2>&1 && n="$(cygpath -m "$1" 2>/dev/null)" \
+     && [ -n "$n" ]; then printf '%s' "$n"; else printf '%s' "$1"; fi
+}
 # Single-quote a path for the shell: what a printed command must carry so it pastes
 # correctly wherever it lands -- wrap in single quotes and write each embedded ' as
 # '\''. Pattern and replacement are variables so nothing has to be parsed as quoting
@@ -2856,7 +2879,9 @@ write_probe_patch() {
   fi
   if [ -s "$target" ]; then
     PROBE_PATCH="$target"
-    die "patch: $target (not applied; to apply: git -C $(sq "$PROBE_SRC") apply $(sq "$target"))"
+    # One spelling for both paths: under Git Bash -o's is the shell's /c/..., the
+    # source git's C:/..., and a pasted line should not mix them.
+    die "patch: $(mixed_path "$target") (not applied; to apply: git -C $(sq "$(mixed_path "$PROBE_SRC")") apply $(sq "$(mixed_path "$target")"))"
   elif [ -n "$OUT" ]; then
     PROBE_PATCH="$target"
     note "--probe: the session changed nothing (empty $target)"

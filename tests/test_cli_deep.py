@@ -445,7 +445,9 @@ def test_probe_with_test_runs_the_sandboxs_tests(tmp_path, server, fake):
     (argv, cwd), = calls(tmp_path)
     env = dict(ln.split("=", 1) for ln in
                (tmp_path / "calls" / "env.1").read_text(encoding="utf-8").splitlines() if "=" in ln)
-    assert same_path(os.path.realpath(env["QWEN_TEST_SOURCE"])) == same_path(cwd)
+    # same_path first: the fake is a Git Bash script, so on Windows it sees the shell's
+    # /c/... spelling, which realpath alone would read as a folder on the current drive.
+    assert same_path(os.path.realpath(same_path(env["QWEN_TEST_SOURCE"]))) == same_path(cwd)
     assert "--add-dir" not in argv
     p = sys_prompt(argv)
     assert "Your only shell command" not in p and "also run with `qwen-test [SELECTOR]`" in p

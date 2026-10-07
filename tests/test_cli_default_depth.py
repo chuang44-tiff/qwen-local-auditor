@@ -371,6 +371,42 @@ def test_deep_write_run_still_fails_when_probe_dir_unusable(tmp_path, server, fa
     assert calls(tmp_path) == []
 
 
+# cygpath as Git Bash's behaves where it matters here: it refuses an empty path and a
+# path that runs through a regular file (printing nothing), else hands the path back.
+STRICT_CYGPATH = r'''#!/usr/bin/env bash
+p="${@: -1}"
+[ -n "$p" ] || { echo "cygpath: can't convert empty path" >&2; exit 1; }
+q="$p"
+while [ "${q%/*}" != "$q" ] && [ -n "${q%/*}" ]; do
+  q="${q%/*}"
+  [ -f "$q" ] && { echo "cygpath: error converting \"$p\" - Not a directory" >&2; exit 1; }
+done
+printf '%s\n' "$p"
+'''
+
+
+@pytest.mark.skipif(os.name == "nt", reason="simulates Git Bash's cygpath; Windows has the real one")
+def test_unusable_probe_dir_is_not_swapped_for_the_default_on_git_bash(tmp_path, server, fake):
+    # cygpath printing nothing for the unusable directory once left QWEN_PROBE_DIR
+    # empty, and probe.py then built the sandbox in the DEFAULT probe directory: the
+    # typed --probe ran instead of failing, somewhere the caller never named.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    cyg = bindir / "cygpath"
+    cyg.write_text(STRICT_CYGPATH, encoding="utf-8", newline="\n")
+    cyg.chmod(0o755)
+    cache = tmp_path / "cache"
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["--probe", "-r", "auditor", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV, QWEN_PROBE_DIR=_unusable_probe_dir(tmp_path),
+                      XDG_CACHE_HOME=posix(cache),
+                      PATH="%s%s%s" % (posix(bindir), os.pathsep, os.environ["PATH"])))
+    assert r.returncode == 8, r.stdout + r.stderr
+    assert calls(tmp_path) == []
+    assert not cache.exists()                           # nothing built in the default
+    assert "can't convert empty path" not in r.stderr   # no empty path reaches cygpath
+
+
 def test_implied_probe_through_a_symlinked_cd(tmp_path, server, fake):
     # -C spelled through a symlink names the same work tree: the implied probe
     # applies, it does not quietly step aside over a spelling.
