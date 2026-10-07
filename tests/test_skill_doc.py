@@ -303,3 +303,31 @@ def test_readme_and_configuration_count_what_install_sh_installs():
             assert not stale, "%s still says '%s %s'" % (doc.name, stale[0], thing)
         for name in skills + commands:
             assert name in t, "%s never names %s" % (doc.name, name)
+
+
+DEPTH_SWITCHES = ("--role-variant", "--subagents-nudge", "--review-round", "--probe",
+                  "--keep-sandbox", "--probe-here", "--deep")
+
+
+def test_qwen_agent_help_and_reference_name_every_depth_switch():
+    import os
+    import shutil
+    import subprocess
+    agent = ROOT / "skill" / "local-auditor" / "qwen-agent.sh"
+    bash = os.environ.get("TEST_BASH") or shutil.which("bash")
+    help_text = subprocess.run([bash, str(agent).replace("\\", "/"), "--help"],
+                               capture_output=True, encoding="utf-8").stdout
+    ref = (REF / "qwen-agent.md").read_text(encoding="utf-8")
+    for s in DEPTH_SWITCHES:
+        assert re.search(r"^\s+%s\b" % re.escape(s), help_text, re.M), s
+        assert "`%s" % s in ref, s
+    assert '"qwen_agent": {' in ref and "QWEN_PROBE_DIR" in ref
+
+
+def test_coding_and_swarm_references_cover_the_depth_switches():
+    coding = (REF / "coding.md").read_text(encoding="utf-8")
+    for needle in ("--review-round", "--probe", "RUN/probe.patch", "patch: PATH", "switches:"):
+        assert needle in coding, needle
+    t = SW_REF.read_text(encoding="utf-8")
+    for needle in ("`roles.R.deep`", '"review_round"', '"subagents"', "--deep ROLE[,ROLE...]|all"):
+        assert needle in t, needle

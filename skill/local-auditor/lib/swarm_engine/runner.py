@@ -39,7 +39,7 @@ LEGACY = {"research": {"goal_key": "question", "goal_file": "question.md",
 DEFAULT_PROFILE = {"goal_key": "goal", "goal_file": "goal.md", "out_root": None,
                    "env": ("QWEN_SWARM_",)}
 RESUMABLE = "--seats, --web-seats, --timeout, --retries, --rounds, --hours, --effort, " \
-            "--role-effort and --keep-sandboxes"
+            "--role-effort, --deep and --keep-sandboxes"
 # the --resume error keeps each command's own wording: deep-research's text is the one
 # it released with, which predates the engine-only --rounds and --keep-sandboxes
 RESUME_MSG = {
@@ -52,8 +52,8 @@ USAGE = {
     None: "usage: qwen-swarm WORKFLOW GOAL [--depth NAME] [--set KNOB=VALUE] [--target DIR] "
           "[--max-agents N] [--max-items N] [--seats N] [--web-seats N] [--timeout N] "
           "[--retries N] [--rounds N|until] [--hours H] [--effort LEVEL] "
-          "[--role-effort ROLE=LEVEL[,ROLE=LEVEL...]] [--out DIR] [--keep-sandboxes] "
-          "| WORKFLOW --stdin | --resume RUN_DIR | --check WORKFLOW | --preflight [WORKFLOW] "
+          "[--role-effort ROLE=LEVEL[,ROLE=LEVEL...]] [--deep ROLE[,ROLE...]|all] [--out DIR] "
+          "[--keep-sandboxes] | WORKFLOW --stdin | --resume RUN_DIR | --check WORKFLOW | --preflight [WORKFLOW] "
           "| --list",
     "deep-research": "usage: qwen-deep-research QUESTION "
                      "[--depth quick|standard|deep|overnight] [--max-agents N] [--max-items N] "
@@ -202,6 +202,17 @@ def role_efforts(text, roles):
     return out
 
 
+def deep_roles(text, roles):
+    """--deep ROLE[,ROLE...] or all: the sorted role names that get every depth switch."""
+    names = [r.strip() for r in text.split(",") if r.strip()]
+    if names == ["all"]:
+        return sorted(roles)
+    if not names or any(n not in roles for n in names):
+        raise Usage("--deep: %r is not ROLE[,ROLE...] or all, with ROLE one of %s"
+                    % (text, ", ".join(roles)))
+    return sorted(set(names))
+
+
 def load_json(path):
     """Bytes I/O with utf-8/surrogateescape: argv bytes (a goal, a --set value) that are
     not valid UTF-8 survive a run-folder round trip byte-exact; valid UTF-8 is identical."""
@@ -270,6 +281,10 @@ def parse_args(argv, compat=None):
     ap.add_argument("--hours", type=float)
     ap.add_argument("--effort")
     ap.add_argument("--role-effort", dest="role_effort")
+    if compat is None:
+        # deeper agents (qwen-agent --review-round --subagents-nudge) per role; the released
+        # qwen-deep-research does not take it
+        ap.add_argument("--deep")
     ap.add_argument("--out")
     ap.add_argument("--target")
     ap.add_argument("--keep-sandboxes", action="store_true")
@@ -369,6 +384,7 @@ def _main(o, compat):
     env = prof["env"]
     max_unit = env_min_int(env, "MAX_UNIT_SECONDS", 1, swarm.MAX_UNIT_SECONDS)
     efforts = role_efforts(o.role_effort, tuple(m.roles)) if o.role_effort is not None else {}
+    deep = deep_roles(o.deep, tuple(m.roles)) if getattr(o, "deep", None) is not None else None
     seats, web_seats = _seats(o, env)
     if o.preflight:
         ok = preflight(o.agent)
@@ -428,6 +444,8 @@ def _main(o, compat):
                 "workflow": m.name, "rounds": rounds,
                 "target": None if target is None else str(target),
                 "workflow_dir": None if folder.parent == BUILTIN else str(folder)})
+    if deep is not None:
+        cfg["deep"] = deep              # only when given: a run without it keeps its config
     try:
         mod = load_module(folder)
     except Exception as e:
@@ -553,6 +571,10 @@ def _resume(o, compat, wf_spec, words):
         stored = dict(stored) if isinstance(stored, dict) else {}
         stored.update(efforts)
         cfg["role_effort"] = stored
+    if getattr(o, "deep", None) is not None:
+        stored = cfg.get("deep")
+        stored = set(stored) if isinstance(stored, list) else set()
+        cfg["deep"] = sorted(stored | set(deep_roles(o.deep, tuple(m.roles))))
     if o.hours is not None:
         cfg["hours"] = o.hours
         cfg["deadline"] = utc_iso(time.time() + o.hours * 3600)

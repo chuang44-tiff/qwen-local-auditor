@@ -140,10 +140,20 @@ def fingerprint(target):
 
 
 def is_dirty(target):
-    """A git target with uncommitted changes (they are NOT in any sandbox)."""
+    """A git target with uncommitted changes (they are NOT in any sandbox). Nothing here
+    may write the target's .git/index: like diff(), `git status` refreshes the index when
+    a file's mtime changed but its content did not and WRITES it back. GIT_OPTIONAL_LOCKS=0
+    does stop that opportunistic refresh -- and nothing may rely on it: the user's index
+    is not ours to touch, so the guard is that these reads never ask git to refresh it.
+    `diff-index --quiet HEAD` (exit 1 = dirty) and `ls-files --others`
+    (any output = dirty) answer the same question without the write; diff-index may call a
+    touched-but-unchanged file dirty, which only means an unneeded warning."""
     if not is_git_root(pathlib.Path(target)):
         return False
-    return bool(_text(_git(["status", "--porcelain"], target).stdout).strip())
+    if _git(["diff-index", "--quiet", "HEAD"], target, check=False).returncode == 1:
+        return True
+    return bool(_git(["ls-files", "-z", "--others", "--exclude-standard"],
+                     target).stdout)
 
 
 def _base_file(path):
@@ -180,12 +190,75 @@ def _pin_eol(path):
     _git(["config", "core.eol", "lf"], path)
 
 
-def create(target, path):
+def _dirty_paths(target):
+    """The target's uncommitted paths, read-only: every path `git diff-index HEAD` names
+    (modified, staged, deleted) plus every untracked file that is not ignored. diff-index,
+    not diff: `git diff` refreshes the index when a stat changed and WRITES it back, and
+    the target must never be written; diff-index never does (it may report a touched-but-
+    unchanged file as changed, which only makes _copy_dirty copy identical bytes).
+    NUL-split and fs-decoded, so names with spaces or non-UTF-8 bytes survive."""
+    out = []
+    for args in (["diff-index", "HEAD", "--name-only", "-z", "--no-renames"],
+                 ["ls-files", "-z", "--others", "--exclude-standard"]):
+        out += [os.fsdecode(x) for x in _git(args, target).stdout.split(b"\0") if x]
+    return sorted(set(out))
+
+
+def _kind(p):
+    """What p is on disk without following links: "dir", "link", "file", or None when
+    nothing is there (a path through a file counts as nothing, not as an error)."""
+    if p.is_symlink():
+        return "link"
+    if p.is_dir():
+        return "dir"
+    return "file" if p.exists() else None
+
+
+def _copy_dirty(target, path):
+    """Make the sandbox's working tree match the target's uncommitted state, byte for byte:
+    each dirty path is copied from the target (a symlink as a symlink) or, when the target
+    no longer has it, deleted. Copying, not `git apply` of a diff, so the bytes never pass
+    through the user's line-ending or filter settings. A destination whose parent resolves
+    outside the sandbox (a symlinked directory) is refused. A destination whose KIND differs
+    from the source's -- the checkout made a HEAD directory the working tree replaced with
+    a file or symlink (or the other way round) -- is removed first: rmtree for a real
+    directory, unlink otherwise, never following a link."""
+    root = pathlib.Path(path).resolve()
+    for rel in _dirty_paths(target):
+        src = pathlib.Path(target) / rel
+        dst = pathlib.Path(path) / rel
+        try:                                           # checked before anything is touched
+            dst.parent.resolve().relative_to(root)
+        except ValueError:
+            raise RuntimeError("refusing to copy %s: its directory leaves the sandbox" % rel)
+        src_kind, dst_kind = _kind(src), _kind(dst)
+        if dst_kind == "link" or dst_kind == "file":
+            dst.unlink()
+        elif dst_kind == "dir" and src_kind != "dir":  # HEAD's directory vs a file/symlink
+            _rmtree(str(dst))                          # in the working tree (or its deletion)
+        if src_kind is None:
+            continue                                   # deleted in the target
+        if src_kind == "dir":
+            continue                                   # a submodule or a directory entry
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src_kind == "link":
+            os.symlink(os.readlink(str(src)), str(dst))
+        else:
+            shutil.copy2(str(src), str(dst))
+
+
+def create(target, path, include_dirty=False):
     """A fresh sandbox of target at path (any old one there is removed first). Both paths
     become absolute: the clone runs with the sandbox's parent as its cwd, so a relative
     target or path would otherwise be read relative to the wrong directory. A parent that
     is itself a symlink is refused outright -- the sandbox would be built THROUGH it, in
-    a directory this run does not own."""
+    a directory this run does not own.
+
+    include_dirty=True (git targets; a copied target already has its current state): the
+    target's uncommitted changes and untracked, non-ignored files are copied in after the
+    checkout and committed as the sandbox base, so diff() reports only what changed after
+    create(). The target is only read (git diff-index / ls-files and file reads); its
+    index is never rewritten."""
     target = pathlib.Path(target).resolve()
     path = pathlib.Path(path)
     if path.parent.is_symlink():
@@ -210,6 +283,13 @@ def create(target, path):
         _pin_eol(path)                                       # before the checkout writes the
         _git(["checkout", "-q", "--detach", sha], path)       # tree: byte-exact whatever the
                                                                # user's global EOL settings
+        if include_dirty:
+            _copy_dirty(target, path)
+            if _git(["status", "--porcelain"], path).stdout.strip():
+                _git(GIT_ID + ["add", "-A"], path)
+                _git(GIT_ID + ["commit", "-q", "--no-verify", "-m",
+                               "sandbox base: uncommitted changes"], path)
+                sha = _text(_git(["rev-parse", "HEAD"], path).stdout).strip()
         _exclude_build_artifacts(path)                       # after the checkout: only NEW
         _base_file(path).write_text(sha + "\n", encoding="utf-8")
         return path

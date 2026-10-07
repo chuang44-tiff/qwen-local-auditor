@@ -41,6 +41,11 @@ Supervisor options: `--max-rounds N` (default 8), `--budget-tokens N`,
 `--budget-seconds N`, `--allow-dirty`, `--no-deviation-audit`.
 It refuses a prompt and the per-run flags (`-f`/`--prompt-file`, `--stdin`,
 `--resume`, `-w`, `-o`, `--dry-run`, `--json`) with exit 2.
+Opt-in and still being measured: `--probe` — and `--deep`, which implies it — runs
+the loop in a sandbox and returns a `patch:` instead of editing your tree; the
+other depth switches (`--review-round`, `--role-variant deep`, `--subagents-nudge`)
+deepen the rounds but edit the tree as a normal run does (`reference/coding.md`,
+"Deeper rounds").
 
 ## 3. Read the result
 

@@ -14,12 +14,15 @@ KNOB_TYPES = ("int", "float", "str", "bool")
 ENGINE_KNOBS = ("budget", "retries", "rounds", "hours")
 TOP_KEYS = ("name", "description", "goal", "target", "roles", "knobs", "presets",
             "default_depth")
-ROLE_KEYS = ("file", "fence", "budget_weight", "effort")
+ROLE_KEYS = ("file", "fence", "budget_weight", "effort", "deep")
+# qwen-agent depth switches a role may ask for ("deep": true = all of them), in the order
+# qwen-agent is given them: --review-round, --subagents-nudge.
+DEEP_SWITCHES = ("review_round", "subagents")
 # config.json keys a knob would shadow
 RESERVED = ENGINE_KNOBS + ("workflow", "workflow_dir", "goal", "question", "depth",
                            "max_agents", "max_items", "timeout_per_item", "effort",
                            "role_effort", "deadline", "target", "summary", "seats",
-                           "web_seats", "timeout")
+                           "web_seats", "timeout", "deep")
 _NAME = re.compile(r"[a-z][a-z0-9-]*")
 _IDENT = re.compile(r"[a-z][a-z0-9_]*")
 _EFFORT = re.compile(r"[A-Za-z0-9_-]+")
@@ -31,9 +34,10 @@ class ManifestError(ValueError):
 
 
 class Role:
-    def __init__(self, name, file, fence, budget_weight, effort):
+    def __init__(self, name, file, fence, budget_weight, effort, deep=()):
         self.name, self.file, self.fence = name, file, fence
         self.budget_weight, self.effort = budget_weight, effort
+        self.deep = tuple(deep)         # a subset of DEEP_SWITCHES, in that order
 
 
 class Manifest:
@@ -78,6 +82,31 @@ def _check_engine(depth, preset):
         raise ManifestError("%s.hours must be a number above 0" % where)
     if rounds == "until" and "hours" not in preset:
         raise ManifestError("%s.hours is required when rounds is \"until\"" % where)
+
+
+def _deep(where, value):
+    """A role's "deep" field as a tuple of DEEP_SWITCHES: true = all, false = none, or a list."""
+    if value is True:
+        return DEEP_SWITCHES
+    if value is False:
+        return ()
+    if isinstance(value, list):
+        if not all(isinstance(v, str) for v in value):
+            # A list it already is: the complaint is its items, and the message must
+            # say that -- "must be true, false or a list" reads as nonsense for [1].
+            raise ManifestError("%s.deep: a list must hold switch names as strings (got %r)"
+                                % (where, value))
+    else:
+        raise ManifestError("%s.deep must be true, false or a list of %s (got %r)"
+                            % (where, ", ".join(DEEP_SWITCHES), value))
+    if "probe" in value:
+        raise ManifestError("%s.deep: \"probe\" is not a manifest option: a sandbox role already "
+                            "has a shell, and the other fences have no tree to probe" % where)
+    for v in value:
+        if v not in DEEP_SWITCHES:
+            raise ManifestError("%s.deep: unknown switch %r (allowed: %s)"
+                                % (where, v, ", ".join(DEEP_SWITCHES)))
+    return tuple(d for d in DEEP_SWITCHES if d in value)
 
 
 def validate(data, folder):
@@ -138,7 +167,7 @@ def validate(data, folder):
         effort = spec.get("effort")
         if effort is not None and not (isinstance(effort, str) and _EFFORT.fullmatch(effort)):
             raise ManifestError("%s.effort must be a level name such as low or high" % where)
-        roles[rname] = Role(rname, path, fence, weight, effort)
+        roles[rname] = Role(rname, path, fence, weight, effort, _deep(where, spec.get("deep", False)))
     knobs = data["knobs"]
     if not isinstance(knobs, dict):
         raise ManifestError("knobs must be an object of name: type")

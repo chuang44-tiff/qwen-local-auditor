@@ -120,7 +120,7 @@ class Unit:
     def __init__(self, name, role_file, prompt, toolset="none", grants="", web=False,
                  mcp_config=None, parse=extract_json, cache=True, timeout=None, retries=0,
                  effort=None, ignore_deadline=False, cwd=None, key_extra="", setup=None,
-                 teardown=None):
+                 teardown=None, deep=()):
         # fullmatch, not match: "a\n" must not pass on the strength of the trailing $.
         if not _SAFE_NAME.fullmatch(name or ""):
             raise ValueError("unit name must match %s (got %r)" % (_SAFE_NAME.pattern, name))
@@ -144,6 +144,9 @@ class Unit:
         # called once when the unit really starts (never for a cache hit or a unit the
         # deadline stopped), and teardown once when it ends, whatever the outcome
         self.setup, self.teardown = setup, teardown
+        # qwen-agent depth switches: "review_round" (--review-round), "subagents"
+        # (--subagents-nudge); () keeps the unit's argv and cache key exactly as before
+        self.deep = tuple(deep)
 
 
 class Swarm:
@@ -167,6 +170,11 @@ class Swarm:
     # ------------------------------------------------------------ one process
     def _argv(self, u, prompt_path, timeout, resume=None):
         # the caller owns the budget: a unit carries its own timeout, and a retry doubles it
+        if u.deep and not resume and "review_round" in u.deep:
+            # --review-round is TWO qwen-agent calls and qwen-agent gives each the full
+            # --timeout it is handed: halve the unit's budget (down, never below 1s)
+            # so a deep unit still fits the one unit's time MAX_UNIT_SECONDS promises.
+            timeout = max(1, timeout // 2)
         argv = self.agent_cmd + ["--json", "-q", "--warn-denials",
                                  "--role-file", str(u.role_file),
                                  "--toolset", u.toolset or "none",
@@ -181,6 +189,12 @@ class Swarm:
             argv.append("--web")
         if u.mcp_config:
             argv += ["--mcp-config", str(u.mcp_config)]
+        if u.deep and not resume:
+            # a repair round only re-asks for the answer's format: no second review there
+            if "review_round" in u.deep:
+                argv.append("--review-round")
+            if "subagents" in u.deep:
+                argv.append("--subagents-nudge")
         if resume:
             argv += ["--resume", resume]
         return argv
@@ -274,6 +288,9 @@ class Swarm:
                                                u.web, mcp_text, u.effort or "")
         if u.key_extra:
             blob += "\n" + u.key_extra
+        if u.deep:
+            # an answer earned with a review round is not the answer asked for without one
+            blob += "\ndeep:" + ",".join(u.deep)
         # surrogateescape: a prompt may embed a patch whose bytes are not valid UTF-8;
         # valid text encodes byte-for-byte as before, so no existing cache key changes.
         return hashlib.sha256(blob.encode("utf-8", "surrogateescape")).hexdigest()

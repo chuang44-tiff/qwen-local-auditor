@@ -428,3 +428,56 @@ def test_user_workflow_named_research_gets_default_profile(tmp_path, fake, monke
     assert not (out / "question.md").exists()
     cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
     assert "question" not in cfg and cfg["timeout_per_item"] == 100
+
+
+# ---------------------------------------------------------------- --deep
+
+def calls_of(fake):
+    return [json.loads(x) for x in (fake / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+            if "--preflight-only" not in x]
+
+
+def test_deep_flag_gives_a_role_the_depth_switches(tmp_path, fake):
+    out = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(out), "--deep", "worker") == 0
+    cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
+    assert cfg["deep"] == ["worker"]
+    assert all("--review-round" in a and "--subagents-nudge" in a for a in calls_of(fake))
+
+
+def test_no_deep_flag_leaves_config_and_argv_alone(tmp_path, fake):
+    out = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(out)) == 0
+    assert "deep" not in json.loads((out / "config.json").read_text(encoding="utf-8"))
+    assert not any("--review-round" in a for a in calls_of(fake))
+
+
+def test_manifest_deep_reaches_the_agents(tmp_path, fake):
+    wf = echo(tmp_path, manifest={"roles": {"worker": {"file": "roles/worker.md", "fence": "none",
+                                                        "deep": ["subagents"]}}})
+    assert swarm_main(wf, "g", "--out", str(tmp_path / "run")) == 0
+    argv = calls_of(fake)[0]
+    assert "--subagents-nudge" in argv and "--review-round" not in argv
+
+
+@pytest.mark.parametrize("value", ["bogus", "worker,bogus", "all,worker", ""])
+def test_deep_flag_names_roles_or_all(tmp_path, fake, capsys, value):
+    assert swarm_main(echo(tmp_path), "g", "--out", str(tmp_path / "run"), "--deep", value) == 2
+    assert "--deep" in capsys.readouterr().err
+
+
+def test_deep_on_resume_is_merged_and_reruns_the_units(tmp_path, fake):
+    out = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(out)) == 0
+    first = len(calls_of(fake))
+    assert swarm_main("--resume", str(out), "--deep", "all") == 0
+    assert json.loads((out / "config.json").read_text(encoding="utf-8"))["deep"] == ["worker"]
+    later = calls_of(fake)[first:]
+    assert len(later) == first and all("--review-round" in a for a in later)   # new cache keys
+    assert swarm_main("--resume", str(out)) == 0
+    assert len(calls_of(fake)) == 2 * first                    # and those stay cached
+
+
+def test_deep_research_compat_does_not_take_deep(tmp_path, fake):
+    with pytest.raises(SystemExit):
+        runner.parse_args(agent_args() + ["q", "--deep", "all"], compat="deep-research")

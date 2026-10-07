@@ -57,14 +57,17 @@ FLAGS
   --hours H            hard deadline for the whole run (env QWEN_SWARM_HOURS)
   --effort LEVEL       reasoning effort for every role
   --role-effort ROLE=LEVEL[,ROLE=LEVEL...]   effort for single roles
+  --deep ROLE[,ROLE...]|all   deeper agents for these roles: each gets a review round
+                       and a delegation nudge (qwen-agent --review-round
+                       --subagents-nudge); cached apart from the plain answers
   --out DIR            the run folder (default swarm/<workflow>/<UTC stamp>-<slug>)
   --keep-sandboxes     leave the agents' sandbox copies in RUN/sandboxes for inspection
   -h, --help           this text
   --version            print the version
 
   On --resume only --seats, --web-seats, --timeout, --retries, --rounds, --hours,
-  --effort, --role-effort and --keep-sandboxes may be given. The research workflow also
-  reads the QWEN_DR_* names of these variables (QWEN_SWARM_* wins).
+  --effort, --role-effort, --deep and --keep-sandboxes may be given. The research
+  workflow also reads the QWEN_DR_* names of these variables (QWEN_SWARM_* wins).
 
 EXIT CODES
   0    report written; the last line of stdout is the report's path

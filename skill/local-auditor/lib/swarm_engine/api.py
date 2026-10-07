@@ -15,7 +15,7 @@ import re
 import time
 
 from lib import swarm
-from lib.swarm_engine import fences, steps
+from lib.swarm_engine import fences, manifest, steps
 
 MIN_UNIT_TIMEOUT = 300
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -134,6 +134,12 @@ class Workflow:
         per_role = self.cfg.get("role_effort") or {}
         return per_role.get(role) or self.cfg.get("effort") or self._role(role).effort or None
 
+    def _deep(self, role):
+        """--deep ROLE (all switches) beats the manifest's role "deep"; a tuple of names."""
+        if role in (self.cfg.get("deep") or ()):
+            return manifest.DEEP_SWITCHES
+        return self._role(role).deep
+
     def _timeout(self, role, items):
         per_item = self.cfg["timeout_per_item"]
         return max(MIN_UNIT_TIMEOUT, int(math.ceil(self._role(role).budget_weight * items * per_item)))
@@ -169,7 +175,7 @@ class Workflow:
         f = fences.unit_fields(r.fence, self.mcp)
         u = swarm.Unit(name=name, role_file=r.file, prompt=prompt, parse=None, timeout=timeout,
                        retries=self.cfg.get("retries") or 0, effort=self._effort(role),
-                       ignore_deadline=always, **f)
+                       ignore_deadline=always, deep=self._deep(role), **f)
         u.cache = cache
         if r.fence == "read":
             u.cwd = self.target

@@ -469,3 +469,163 @@ def test_sandboxes_ignore_the_users_global_line_endings(tmp_path, monkeypatch, k
     res = sandbox.run_cmd(target, tmp_path / "run" / "sandboxes" / "check", "cat main.py", patch=patch)
     assert res["applied"] and res["rc"] == 0 and "print(2)" in res["output_tail"]
     sandbox.remove(target, sb)
+
+
+# ---------------------------------------------------------------- include_dirty (probe sandboxes)
+
+def dirty_target(tmp_path):
+    """A git target with a modified, a deleted, a staged-new, an untracked and an ignored
+    file, plus CRLF and non-UTF-8 bytes in the uncommitted state."""
+    target = git_repo(tmp_path / "tgt", {"a.txt": "one\n", "gone.txt": "bye\n",
+                                         ".gitignore": "*.log\nbuild/\n",
+                                         "sub dir/c.txt": "c\n"})
+    (target / "a.txt").write_bytes(b"ONE\r\ncaf\xe9\r\n")              # modified: CRLF + latin-1
+    (target / "gone.txt").unlink()                                      # deleted
+    (target / "staged.txt").write_text("staged\n", encoding="utf-8", newline="\n")
+    subprocess.run(["git", "add", "staged.txt"], cwd=str(target), check=True)
+    (target / "sub dir" / "new file.txt").write_bytes(b"\xff\xfe raw\n")  # untracked, odd bytes
+    (target / "debug.log").write_text("ignored\n", encoding="utf-8")     # ignored
+    (target / "build").mkdir()
+    (target / "build" / "out.o").write_bytes(b"\x00")                   # ignored directory
+    return target
+
+
+def test_include_dirty_copies_the_uncommitted_state_byte_for_byte(tmp_path):
+    target = dirty_target(tmp_path)
+    before = status(target)
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "tree", include_dirty=True)
+    assert (sb / "a.txt").read_bytes() == b"ONE\r\ncaf\xe9\r\n"
+    assert not (sb / "gone.txt").exists()
+    assert (sb / "staged.txt").read_text(encoding="utf-8") == "staged\n"
+    assert (sb / "sub dir" / "new file.txt").read_bytes() == b"\xff\xfe raw\n"
+    assert not (sb / "debug.log").exists() and not (sb / "build").exists()   # ignored: left out
+    assert status(sb) == ""                          # the dirty state IS the sandbox base
+    assert sandbox.diff(sb) == ""                    # so an untouched sandbox has no patch
+    assert status(target) == before                  # the target was only read
+    sandbox.remove(target, sb)
+
+
+def test_include_dirty_patch_holds_only_the_sessions_changes(tmp_path):
+    target = dirty_target(tmp_path)
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "tree", include_dirty=True)
+    (sb / "staged.txt").write_text("edited by the session\n", encoding="utf-8", newline="\n")
+    patch = sandbox.diff(sb)
+    assert "+edited by the session" in patch and "-staged" in patch
+    assert "a.txt" not in patch and "gone.txt" not in patch and "new file.txt" not in patch
+    # the patch applies to the user's dirty tree as it stands
+    chk = subprocess.run(["git", "apply", "--check", "-"], cwd=str(target),
+                         input=patch.encode("utf-8", "surrogateescape"), capture_output=True)
+    assert chk.returncode == 0, chk.stderr
+    sandbox.remove(target, sb)
+
+
+def test_include_dirty_on_a_clean_target_keeps_head_as_the_base(tmp_path):
+    target = git_repo(tmp_path / "tgt", {"a.txt": "1\n"})
+    head = git_at(target, "rev-parse", "HEAD").strip()
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "tree", include_dirty=True)
+    assert git_at(sb, "rev-parse", "HEAD").strip() == head
+    assert (sb.parent / "tree.base").read_text(encoding="utf-8").strip() == head
+    sandbox.remove(target, sb)
+
+
+def test_include_dirty_on_a_plain_folder_is_its_current_state(tmp_path):
+    target = tmp_path / "plain"
+    target.mkdir()
+    (target / "x.txt").write_bytes(b"x\r\n")
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "tree", include_dirty=True)
+    assert (sb / "x.txt").read_bytes() == b"x\r\n"
+    assert sandbox.diff(sb) == ""
+    sandbox.remove(target, sb)
+
+
+def test_include_dirty_ignores_the_users_global_line_endings(tmp_path, monkeypatch):
+    target = git_repo(tmp_path / "tgt", {"main.py": "print(1)\n"})
+    (target / "main.py").write_bytes(b"print(2)\r\n")
+    cfg = tmp_path / "windows-like.gitconfig"
+    cfg.write_text("[core]\n\tautocrlf = true\n\teol = crlf\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg))
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "tree", include_dirty=True)
+    assert (sb / "main.py").read_bytes() == b"print(2)\r\n"
+    assert sandbox.diff(sb) == ""
+    sandbox.remove(target, sb)
+
+
+def test_without_include_dirty_nothing_changes(tmp_path):
+    target = dirty_target(tmp_path)
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "tree")
+    assert (sb / "a.txt").read_bytes() == b"one\n"           # HEAD, as before
+    assert (sb / "gone.txt").exists() and not (sb / "staged.txt").exists()
+    sandbox.remove(target, sb)
+
+
+def test_include_dirty_file_turned_directory_and_odd_names(tmp_path):
+    # Review focus: a tracked file the user replaced by a directory, and (POSIX) an
+    # untracked name that is not valid UTF-8.
+    target = git_repo(tmp_path / "tgt", {"thing": "was a file\n", "keep.txt": "k\n"})
+    (target / "thing").unlink()
+    (target / "thing").mkdir()
+    (target / "thing" / "inner.txt").write_text("now a dir\n", encoding="utf-8")
+    odd = None
+    if os.name == "posix":
+        odd = os.fsdecode(b"caf\xe9.txt")
+        try:
+            (target / odd).write_bytes(b"latin\n")
+        except OSError:
+            odd = None
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "tree", include_dirty=True)
+    assert (sb / "thing" / "inner.txt").read_text(encoding="utf-8") == "now a dir\n"
+    if odd:
+        assert (sb / odd).read_bytes() == b"latin\n"
+    assert sandbox.diff(sb) == ""
+    sandbox.remove(target, sb)
+
+
+def test_include_dirty_never_writes_the_target_index(tmp_path):
+    # `git diff`/`git status` refresh the index when a file's mtime changed and WRITE it
+    # back. GIT_OPTIONAL_LOCKS=0 does stop that write -- but this guard must not depend
+    # on it (nor on who set it): the dirty-state reads never run a refreshing command.
+    target = git_repo(tmp_path / "tgt", {"a.txt": "one\n", "b.txt": "two\n"})
+    os.utime(str(target / "a.txt"), ns=(1234567890, 1234567890))    # touched, unchanged
+    (target / "b.txt").write_text("TWO\n", encoding="utf-8", newline="\n")   # really edited
+    index = (target / ".git" / "index").read_bytes()
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "tree", include_dirty=True)
+    assert sandbox.is_dirty(target)
+    assert (target / ".git" / "index").read_bytes() == index
+    assert (sb / "b.txt").read_text(encoding="utf-8") == "TWO\n"    # the edit still arrives
+    sandbox.remove(target, sb)
+
+
+def test_include_dirty_directory_replaced_by_a_file(tmp_path):
+    # HEAD has the directory thing/; the working tree replaced it with a file. The sandbox
+    # must hold the working tree's shape, not HEAD's: the checked-out directory goes.
+    target = git_repo(tmp_path / "tgt", {"thing/a.txt": "was a dir\n", "keep.txt": "k\n"})
+    shutil.rmtree(str(target / "thing"))
+    (target / "thing").write_bytes(b"x")
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "tree", include_dirty=True)
+    assert (sb / "thing").is_file() and (sb / "thing").read_bytes() == b"x"
+    # A path under a file cannot exist, so walking into thing/ proves nothing: the real
+    # check is the sandbox's own top level -- no checked-out thing/ directory survived,
+    # and nothing else arrived.
+    assert sorted(p.name for p in sb.iterdir()) == [".git", "keep.txt", "thing"]
+    (sb / "thing").write_bytes(b"xy")
+    patch = sandbox.diff(sb)
+    assert "+xy" in patch, patch                       # the edit shows up ...
+    assert "a.txt" not in patch and "keep.txt" not in patch, patch   # ... nothing else does
+    sandbox.remove(target, sb)
+
+
+def test_include_dirty_file_replaced_by_a_directory(tmp_path):
+    # The mirror case: HEAD has the file thing; the working tree replaced it with a
+    # directory. The checked-out file must not survive inside/next to the new directory.
+    target = git_repo(tmp_path / "tgt", {"thing": "was a file\n", "keep.txt": "k\n"})
+    (target / "thing").unlink()
+    (target / "thing").mkdir()
+    (target / "thing" / "a.txt").write_text("now a dir\n", encoding="utf-8", newline="\n")
+    sb = sandbox.create(target, tmp_path / "run" / "sandboxes" / "tree", include_dirty=True)
+    assert (sb / "thing").is_dir() and not (sb / "thing").is_symlink()
+    assert (sb / "thing" / "a.txt").read_text(encoding="utf-8") == "now a dir\n"
+    (sb / "thing" / "b.txt").write_text("added\n", encoding="utf-8", newline="\n")
+    patch = sandbox.diff(sb)
+    assert "+added" in patch, patch
+    assert "was a file" not in patch and "keep.txt" not in patch, patch
+    sandbox.remove(target, sb)

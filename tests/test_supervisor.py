@@ -881,3 +881,339 @@ def test_timed_out_round_does_not_double_count_tools(env, monkeypatch):
     assert sup(repo, task) == 0
     run_dir = next((tmp / "state").rglob("round-3.json")).parent
     assert "| Read | 3 |" in (run_dir / "report.md").read_text()
+
+
+# ---------------------------------------------------------------- --review-round
+
+def _prompt_of(call):
+    return open(call[call.index("-f") + 1], encoding="utf-8").read()
+
+
+def _report_text(tmp):
+    return next((tmp / "state").rglob("report.md")).read_text(encoding="utf-8")
+
+
+def test_review_round_runs_once_after_the_checks_pass(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}, {"result": "reviewed"}])
+    assert sup(repo, task, "--review-round") == 0
+    c = calls(tmp)
+    assert len(c) == 2
+    assert c[1][c[1].index("--resume") + 1] == "s1"
+    assert _prompt_of(c[1]).startswith("Review round: every check passes.")
+    text = _report_text(tmp)
+    assert "rounds: 2" in text and "review round: round 2" in text
+    assert "switches: review_round" in text
+
+
+def test_a_review_round_that_breaks_a_check_keeps_the_loop_going(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}},
+                 {"result": "broke it", "write": {"value.txt": "bad\n"}},
+                 {"result": "fixed again", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--review-round") == 0
+    c = calls(tmp)
+    assert len(c) == 3                                   # no second review round
+    assert _prompt_of(c[2]).startswith("Not done")
+
+
+def test_review_round_counts_toward_max_rounds(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--review-round", "--max-rounds", "1") == 0
+    assert len(calls(tmp)) == 1
+    assert "review round skipped" in _report_text(tmp)
+
+
+def test_review_round_that_breaks_the_last_round_is_partial(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}},
+                 {"result": "broke it", "write": {"value.txt": "bad\n"}}])
+    assert sup(repo, task, "--review-round", "--max-rounds", "2") == 11
+
+
+def test_no_review_round_without_the_switch(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task) == 0
+    assert len(calls(tmp)) == 1
+    assert "switches:" not in _report_text(tmp)
+
+
+def test_report_lists_the_round_switches_from_the_passthrough(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--", "--role-variant", "deep", "--subagents-nudge") == 0
+    assert "switches: role_variant=deep, subagents_nudge" in _report_text(tmp)
+
+
+def test_review_round_skipped_without_session_is_noted(env):
+    repo, task, tmp = env
+    # A round that returns no session id cannot be resumed for the review round:
+    # the skip must be said in the report, not silently taken for the review.
+    script(tmp, [{"result": "fixed", "session_id": "", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--review-round") == 0
+    text = _report_text(tmp)
+    assert "review round skipped: no session id" in text
+
+
+def test_review_round_keeps_earlier_notes_when_audit_unusable(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}},     # coder: checks pass
+                 {"result": "NO CONTRADICTIONS"},                            # the audit, clean
+                 {"result": "reviewed"},                                     # the review round
+                 {"result": "looks fine"},                                   # the audit again,
+                 {"result": "still not an audit"}])                          # unusable... twice
+    rc = supervisor.main(["--task", str(task), "--repo", str(repo), "--agent", PY,
+                          "--agent", FAKE, "--review-round"])
+    assert rc == 11
+    text = _report_text(tmp)
+    assert "review round: round 2" in text          # the unusable audit must not drop it
+    assert "audit reply (unusable)" in text
+
+
+# ---------------------------------------------------------------- --probe
+
+def _status(repo):
+    return git(repo, "status", "--porcelain")
+
+
+def _run_dir(tmp):
+    return next((tmp / "state").rglob("report.md")).parent
+
+
+def test_probe_loop_works_in_one_sandbox_and_hands_back_a_patch(env, capsys):
+    repo, task, tmp = env
+    (repo / "notes.txt").write_text("the user's own untracked file\n")    # dirty: no --allow-dirty
+    before = _status(repo)
+    script(tmp, [{"result": "tried"}, {"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--probe") == 0
+    c = calls(tmp)
+    assert len(c) == 2 and all("--probe-here" in argv for argv in c)
+    work = c[0][c[0].index("-C") + 1]
+    assert os.path.realpath(work) != os.path.realpath(str(repo))
+    assert c[1][c[1].index("-C") + 1] == work                 # every round, the same sandbox
+    assert (repo / "value.txt").read_text() == "bad\n" and _status(repo) == before
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-2].startswith("patch: ") and lines[-1].startswith("report: ")
+    patch = lines[-2][len("patch: "):]
+    text = open(patch, encoding="utf-8").read()
+    assert "+good" in text and "notes.txt" not in text
+    chk = subprocess.run(["git", "-C", str(repo), "apply", "--check", patch], capture_output=True)
+    assert chk.returncode == 0, chk.stderr
+    run_dir = _run_dir(tmp)
+    assert not (run_dir / "sandboxes").exists()               # removed at the end
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "switches: probe" in report and "probe patch: %s" % patch in report
+
+
+def test_probe_keep_sandbox(env, capsys):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--probe", "--keep-sandbox") == 0
+    sb = _run_dir(tmp) / "sandboxes" / "tree"
+    assert (sb / "value.txt").read_text() == "good\n"
+    assert "sandbox kept: %s" % sb in (_run_dir(tmp) / "report.md").read_text(encoding="utf-8")
+
+
+def test_the_deviation_audit_reads_the_sandbox_without_a_shell(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}, {"result": "NO CONTRADICTIONS"}])
+    assert supervisor.main(["--task", str(task), "--repo", str(repo), "--agent", PY,
+                            "--agent", FAKE, "--probe"]) == 0
+    coder, audit = calls(tmp)
+    assert audit[audit.index("-C") + 1] == coder[coder.index("-C") + 1]
+    assert "--probe-here" not in audit and "--test" not in audit
+
+
+def test_an_interrupted_probe_run_still_writes_its_patch(env, monkeypatch):
+    repo, task, tmp = env
+    script(tmp, [{"result": "tried", "write": {"value.txt": "half\n"}}])
+    real = supervisor.call_agent
+    n = {"calls": 0}
+
+    def flaky(*a, **k):
+        n["calls"] += 1
+        if n["calls"] == 2:
+            raise KeyboardInterrupt
+        return real(*a, **k)
+    monkeypatch.setattr(supervisor, "call_agent", flaky)
+    assert sup(repo, task, "--probe") == 130
+    run_dir = _run_dir(tmp)
+    assert "+half" in (run_dir / "probe.patch").read_text(encoding="utf-8")
+    assert not (run_dir / "sandboxes").exists()
+    assert (repo / "value.txt").read_text() == "bad\n"
+
+
+def test_interrupted_probe_run_reports_its_patch(env, monkeypatch, capsys):
+    # The patch above exists is not enough: an interrupted run must SAY where
+    # the work is -- stdout names the patch before the report, and report.md
+    # carries the "probe patch:" note like an uninterrupted run does.
+    repo, task, tmp = env
+    script(tmp, [{"result": "tried", "write": {"value.txt": "half\n"}}])
+    real = supervisor.call_agent
+    n = {"calls": 0}
+
+    def flaky(*a, **k):
+        n["calls"] += 1
+        if n["calls"] == 2:
+            raise KeyboardInterrupt
+        return real(*a, **k)
+    monkeypatch.setattr(supervisor, "call_agent", flaky)
+    assert sup(repo, task, "--probe") == 130
+    out = capsys.readouterr().out.splitlines()
+    patch_at = [i for i, l in enumerate(out) if l.startswith("patch: ")]
+    report_at = [i for i, l in enumerate(out) if l.startswith("report: ")]
+    assert patch_at and report_at and patch_at[0] < report_at[0]
+    run_dir = _run_dir(tmp)
+    assert out[patch_at[0]] == "patch: " + os.path.join(str(run_dir), "probe.patch")
+    assert "+half" in (run_dir / "probe.patch").read_text(encoding="utf-8")
+    assert "probe patch:" in (run_dir / "report.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="sends SIGINT")
+def test_main_interrupt_removes_the_sandbox(env):
+    # __main__ os._exits past the finally, so the interrupt path must have done the
+    # sweep itself: the sandbox is gone and the (here empty) probe.patch is what
+    # remains of the run. Only a real subprocess pins that -- in-process the
+    # finally below the return would still run.
+    import signal
+    import time
+    repo, task, tmp = env
+    script(tmp, [{"result": "tried", "sleep": 60}])          # round 1 stays open
+    envv = dict(os.environ, PYTHONPATH=os.path.dirname(os.path.dirname(supervisor.__file__)))
+    rec = tmp / "record.jsonl"
+    p = subprocess.Popen([PY, supervisor.__file__, "--task", str(task), "--repo", str(repo),
+                          "--agent", PY, "--agent", FAKE, "--no-deviation-audit", "--probe"],
+                         env=envv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.time() + 30
+    while not rec.exists():                           # the fake agent has started its round
+        assert time.time() < deadline and p.poll() is None, p.communicate()
+        time.sleep(0.05)
+    p.send_signal(signal.SIGINT)                      # Ctrl-C reaches the supervisor
+    out, err = p.communicate(timeout=90)
+    assert p.returncode == 130, out + err
+    run_dir = _run_dir(tmp)
+    assert (run_dir / "probe.patch").is_file(), "the interrupted run handed back no patch"
+    assert "patch: " in out                           # and said where it is
+    assert not (run_dir / "sandboxes").exists(), "os._exit skipped the sweep: sandbox leaked"
+
+
+def test_planted_probe_patch_is_replaced(env):
+    # The session has a shell, and RUN/sandboxes/tree/../../probe.patch IS the run's
+    # patch path: what the agent plants there must never be handed back as its work.
+    # The patch is built in a fresh file and moved into place over the planted one.
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed",
+                  "write": {"value.txt": "good\n", "../../probe.patch": "planted junk\n"}}])
+    assert sup(repo, task, "--probe") == 0
+    text = (_run_dir(tmp) / "probe.patch").read_text(encoding="utf-8")
+    assert "+good" in text and "planted junk" not in text
+
+
+def test_probe_ignores_inherited_git_index_file(env):
+    # An inherited GIT_* aims every git call this process and every child makes --
+    # probe.make's clone and the dirty-state copy included -- at another index:
+    # with GIT_INDEX_FILE=<the user's index> (as a pre-commit hook leaves it) the
+    # sandbox's writes rewrote the user's .git/index while the run reported done.
+    # The run must pop the steering variables before its first git call, and the
+    # user's index must survive byte-identical and usable.
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    index = repo / ".git" / "index"
+    before = index.read_bytes()
+    os.environ["GIT_INDEX_FILE"] = str(index)
+    try:
+        assert sup(repo, task, "--probe") == 0
+    finally:
+        os.environ.pop("GIT_INDEX_FILE", None)
+    assert index.read_bytes() == before
+    # check=True: a corrupted index makes this git call fail the test. A clean
+    # tree after the run also pins that no sandbox entry leaked into the index.
+    assert git(repo, "status", "--porcelain") == ""
+
+
+def test_run_restores_the_environment(env, monkeypatch):
+    # The popping and setting above happens in the CALLER's os.environ: a supervisor
+    # used in-process (the test suite, or any embedding tool) must hand back exactly
+    # the environment it was given -- the steering variables set again when they were
+    # there, GIT_OPTIONAL_LOCKS gone when it was not. A leftover GIT_INDEX_FILE
+    # breaks every later git of the process; a leftover GIT_OPTIONAL_LOCKS=0 masks
+    # exactly the lock-behavior regression the tests here exist to catch.
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    monkeypatch.setenv("GIT_INDEX_FILE", "somebody-elses-index")
+    assert "GIT_OPTIONAL_LOCKS" not in os.environ
+    assert sup(repo, task, "--probe") == 0
+    assert os.environ.get("GIT_INDEX_FILE") == "somebody-elses-index"
+    assert "GIT_OPTIONAL_LOCKS" not in os.environ
+
+
+def test_probe_never_touches_the_users_index(env):
+    # Even with a clean environment: a --probe run must not WRITE .git/index at
+    # all. `git status` refreshes stat data and writes the index back -- which is
+    # why sandbox.py only ever reads the target with diff-index/ls-files. The
+    # dirty tree here baits exactly that: value.txt keeps its committed bytes but
+    # a newer mtime, so any status call rewrites the index just to store it.
+    repo, task, tmp = env
+    (repo / "u.txt").write_text("untracked\n")
+    os.utime(repo / "value.txt")
+    index = repo / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--probe") == 0
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+def test_probe_error_keeps_the_patch(env, monkeypatch):
+    # The sandbox is the run's only copy of the work, so a harness failure may
+    # not take it: the loop must still write probe.patch from what the agent
+    # did, report the error and only THEN drop the sandbox it patched out of.
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+
+    def boom(*a, **k):
+        raise ValueError("boom")
+    monkeypatch.setattr(supervisor.checks, "run_checks", boom)
+    assert sup(repo, task, "--probe") == 8
+    run_dir = _run_dir(tmp)
+    assert "+good" in (run_dir / "probe.patch").read_text(encoding="utf-8")
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "error: ValueError: boom" in report
+    assert not os.path.exists(os.path.join(supervisor.repo_state_dir(str(repo)), "lock"))
+
+
+def test_probe_patch_failure_keeps_the_sandbox(env, monkeypatch, capsys):
+    # And when not even the patch can be written -- write_patch refuses, as it
+    # does once the agent (it has a shell) has destroyed the diff base -- the
+    # sandbox is the only copy left: keep it, and say so on stderr.
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+
+    def refuse(*a, **k):
+        raise supervisor.probe.Refused("no .base beside the sandbox")
+    monkeypatch.setattr(supervisor.probe, "write_patch", refuse)
+    assert sup(repo, task, "--probe") == 8
+    assert "sandbox kept: " in capsys.readouterr().err
+    run_dir = _run_dir(tmp)
+    assert (run_dir / "sandboxes" / "tree").is_dir()          # NOT removed with the work in it
+    assert (run_dir / "report.md").is_file()
+    assert not os.path.exists(os.path.join(supervisor.repo_state_dir(str(repo)), "lock"))
+
+
+def test_probe_make_failure_cleans_up(env, monkeypatch):
+    # A half-made clone is not work -- probe.make refusing leaves no sandbox, so
+    # there is nothing to keep; the run folder must come back as it was found,
+    # except for the report.md that names the failure.
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+
+    def refuse(*a, **k):
+        raise supervisor.probe.Refused("refusing to clone")
+    monkeypatch.setattr(supervisor.probe, "make", refuse)
+    assert sup(repo, task, "--probe") == 8
+    run_dir = _run_dir(tmp)
+    assert not (run_dir / "sandboxes").exists()
+    assert not (run_dir / supervisor.probe.RUN_MARKER).exists()
+    assert (run_dir / "report.md").is_file()
+    assert "error:" in (run_dir / "report.md").read_text(encoding="utf-8")

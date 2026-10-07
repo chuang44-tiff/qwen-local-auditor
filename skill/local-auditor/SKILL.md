@@ -56,6 +56,8 @@ qwen-agent -r auditor -C <dir> -f brief.md -o out.md
 - A bare run is read-only with MCP dropped. Writing requires `--write` or an explicit
   `--toolset` naming Edit/Write/Bash.
 - `-o` is relative to your current directory, never to `-C`.
+- Deeper, opt-in and still being measured: `-r auditor --deep` audits in a throwaway
+  sandbox with a shell and a review round (`reference/qwen-agent.md`, "Depth switches").
 
 ## Running tests and reproduction tests
 

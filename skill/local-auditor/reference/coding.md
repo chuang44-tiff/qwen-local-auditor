@@ -131,6 +131,33 @@ disk).
 | `--allow-dirty` | start even with uncommitted changes |
 | `--no-deviation-audit` | skip the spec-vs-diff audit after the checks pass |
 
+### Deeper rounds (opt-in)
+
+The depth switches of [`qwen-agent.md`](qwen-agent.md#depth-switches-opt-in) work with
+`--until-done` too:
+
+- `--role-variant deep` and `--subagents-nudge` go to every round (coder-deep adds the
+  edge-case pass); the deviation audit stays the plain auditor.
+- `--review-round`: when the checks first pass, one more round resumes the session with a
+  "try to break your change" prompt, then every check (and the deviation audit) runs
+  again. It counts toward `--max-rounds`; with no round or budget left it is skipped and
+  the report says so.
+- `--probe`: the whole loop runs in one sandbox under the run folder, with your
+  uncommitted and untracked files in it (no `--allow-dirty` needed); each round gets a
+  shell there (`--probe-here`), the checks run there, and nothing in your work tree,
+  index or refs is written (the sandbox shares your repository's object files, so git
+  may refresh their mtimes; no content changes). On a dirty tree the report's
+  `start commit:` and the
+  commits in the decision log are sandbox commits: they record your uncommitted state
+  and do not exist in your repo. The work comes back as `RUN/probe.patch`, printed as
+  `patch: PATH` just before the `report:` line, also when the run is interrupted or
+  ends in an error (exit 8); if the patch cannot be written the sandbox is kept instead
+  and its path is printed as `sandbox kept: PATH`. Every printed apply command is
+  shell-quoted and pastes into a shell as it stands. `--keep-sandbox` keeps
+  `RUN/sandboxes/tree`.
+- `--deep` is all four (it takes no value; combining it with another `--role-variant`
+  is a usage error). `report.md` lists the switches on a `switches:` line.
+
 ### The report
 
 The last stdout line is `report: <path>`. `report.md` holds the final checklist with

@@ -119,6 +119,32 @@ def test_unit_timeout_overrides_swarm_timeout(tmp_path, fake):
     assert got == {"a": "77", "b": "60"}        # timeout=None falls back to the Swarm's timeout
 
 
+def test_deep_review_unit_halves_its_timeout(tmp_path):
+    # --review-round is TWO qwen-agent calls and qwen-agent gives each the full
+    # --timeout it is handed, so a deep unit would get twice a unit's budget.
+    # _argv halves it: rounded down, never below 1s; only the first call -- a
+    # repair resume carries no second review, and a non-deep unit keeps 600.
+    s = swarm(tmp_path)
+    d = unit(tmp_path, "a")
+    d.deep = ("review_round", "subagents")
+    argv = s._argv(d, tmp_path / "p.md", 600)
+    assert argv[argv.index("--timeout") + 1] == "300"
+    assert "--review-round" in argv and "--subagents-nudge" in argv
+    plain = s._argv(unit(tmp_path, "b"), tmp_path / "p.md", 600)
+    assert plain[plain.index("--timeout") + 1] == "600"     # without deep, untouched
+    assert "--review-round" not in plain
+    odd = s._argv(d, tmp_path / "p.md", 301)
+    assert odd[odd.index("--timeout") + 1] == "150"          # down, not up
+    one = s._argv(d, tmp_path / "p.md", 1)
+    assert one[one.index("--timeout") + 1] == "1"            # never below 1s
+    repair = s._argv(d, tmp_path / "p.md", 600, resume="s1")
+    assert repair[repair.index("--timeout") + 1] == "600"    # no review in a repair round
+    only_nudge = unit(tmp_path, "c")
+    only_nudge.deep = ("subagents",)
+    nudged = s._argv(only_nudge, tmp_path / "p.md", 600)
+    assert nudged[nudged.index("--timeout") + 1] == "600"    # halving is review_round's
+
+
 def test_swarm_repairs_bad_json_once_via_resume(tmp_path, fake):
     (fake / "worker.py").write_text(
         "def answer(p, resumed):\n"
@@ -779,3 +805,29 @@ def test_setup_is_skipped_past_the_deadline_and_teardown_errors_are_swallowed(tm
     v = unit(tmp_path, "b")
     v.setup, v.teardown = (lambda: None), boom
     assert swarm(tmp_path).run_phase([v])[0]["ok"]   # a failing cleanup never fails the unit
+
+
+# ---------------------------------------------------------------- depth switches
+
+def test_deep_switches_reach_the_first_call_only(tmp_path, fake):
+    s = swarm(tmp_path)
+    u = unit(tmp_path, "a")
+    u.deep = ("review_round", "subagents")
+    argv = s._argv(u, "p.md", 60)
+    assert argv[-2:] == ["--review-round", "--subagents-nudge"]
+    repair = s._argv(u, "p.md", 60, resume="sess-1")
+    assert "--review-round" not in repair and "--subagents-nudge" not in repair
+    u.deep = ("subagents",)
+    assert "--review-round" not in s._argv(u, "p.md", 60)
+    plain = unit(tmp_path, "b")
+    assert "--review-round" not in s._argv(plain, "p.md", 60)
+
+
+def test_deep_switches_change_the_cache_key_only_when_set(tmp_path, fake):
+    s = swarm(tmp_path)
+    plain, deep = unit(tmp_path, "a"), unit(tmp_path, "a")
+    deep.deep = ("review_round", "subagents")
+    blob = "%s\n%s\n%s\n%s\n%s\n%s\n%s" % ("role worker", "do a", "none", "", False, "", "")
+    assert s._key(plain) == hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    assert s._key(deep) == hashlib.sha256(
+        (blob + "\ndeep:review_round,subagents").encode("utf-8")).hexdigest()

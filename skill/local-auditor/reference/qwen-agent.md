@@ -66,6 +66,49 @@ read-only `--test` run) prints a warning on stderr, and so does `--web` combined
 
 What the fence does and does not guarantee, measured, is in [`limits.md`](limits.md).
 
+## Depth switches (opt-in)
+
+Four switches make a session go deeper. Each is off by default and is being measured
+(seeded-defect recall and precision for audits, hidden-test pass rate for coding) before
+any of them becomes a default. They compose with the other flags.
+
+| switch | effect |
+|---|---|
+| `--role-variant deep` | the deep variant of `-r auditor` or `-r coder`. auditor-deep maps what the code must guarantee, tries to trigger each failure mode (with `--probe`: by running probes or tests), records evidence for every verdict, defaults to FAIL when evidence is missing, and lists unverified suspicions separately. coder-deep is the coder text plus an edge-case pass after the checks, ending with an `EDGE CASES` section. Other roles, `--role-file` and other variant names: exit 2. `-r` and `--list-roles` are unchanged |
+| `--subagents-nudge` | `--subagents` plus a section on when to delegate (independent probes, big or many files, long logs), what to hand a subagent (a self-contained question and the paths) and to verify what it reports |
+| `--review-round` | after a clean end, the session is resumed once (`--resume <session id>`) with a fixed prompt: try to break what you just did or reported, check each claim, revise, and give the complete answer again in the same format. The revised answer is the result. A failed review call leaves the first answer and exit code in place, with a `WARNING` on stderr. Each of the two calls gets the full `--timeout` |
+| `--probe` | the session runs in a throwaway sandbox of the project: the git work tree holding `-C` (or `--test-repo DIR`), with your uncommitted and untracked files, never ignored ones. It gets Bash, Edit and Write, `--permission-mode dontAsk` and `claude --restricted`; denials are reported as usual. Nothing in your work tree, index or refs is ever written; because the sandbox shares your repository's object files, git may refresh their mtimes (no object's content changes). A write run (`--write`, `-r coder`, `-r mechanic`) reports its edits as a patch and applies nothing: `FILE.patch` next to `-o FILE` (always written, empty when nothing changed), else a new `qwen-agent-XXXXXXXX.patch` — in `QWEN_OUTDIR` when you set it, otherwise in the probe directory, never in the tree being probed (and only when something changed); the path and the shell-quoted, paste-ready `git -C <tree> apply` line are printed on stderr. The sandbox is removed at exit, also on a timeout or a signal |
+| `--keep-sandbox` | with `--probe`: keep the sandbox and print its path (`sandbox kept: PATH`) |
+| `--probe-here` | the `-C` directory is checked to be inside a sandbox kept by `--probe --keep-sandbox` (a plain checkout — yours above all — is refused with exit 2). There: the probe fence, nothing created or removed, no patch; `--test-repo` is refused, and `--test` runs the sandbox's own tests. This is how a probe session is resumed: `qwen-agent --probe-here -C <kept path> --resume ID "..."` (a fresh `--probe` refuses `--resume`, because Claude Code finds a session by its directory) |
+| `--deep` | all four: `--probe --role-variant deep --review-round --subagents-nudge`; it takes no value, and combining it with another `--role-variant` is a usage error; needs `-r auditor` or `-r coder` (or `--until-done`); with `--probe-here` it resumes in the kept sandbox instead of making a new one |
+
+`--probe` and `--probe-here` refuse `--interactive`, `-w`, `--all-tools`, `--toolset`,
+`--read-only`, `-t/--tools`, `--permission-mode` and `-D/--add-dir` (exit 2); `--interactive`
+refuses every switch above. Sandboxes — and the default patch of a `--probe --write` run
+that gave no `-o` — live under `QWEN_PROBE_DIR` (default
+`$XDG_CACHE_HOME/qwen-agent/probes`, else `~/.cache/qwen-agent/probes`), which may not be
+inside the tree being copied. These runs clear `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+`GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` from the
+environment, so an inherited git setting cannot point the session's git calls at your
+tree. A sandbox protects your tree from accidents, not from a hostile model: a shell can
+still `cd` out of it.
+
+With `--json`, a run that used any switch carries a `qwen_agent` key next to Claude Code's
+own fields (a run without one emits Claude Code's record unchanged):
+
+```json
+"qwen_agent": {
+  "switches": {"probe": true, "role_variant": "deep", "review_round": true, "subagents_nudge": true},
+  "review_round": {"status": "ok", "first_session": "<id>", "warning": null},
+  "patch": "/path/out.json.patch",
+  "sandbox": null
+}
+```
+
+`review_round` (`status` `ok`, `failed` or `skipped`) is present with `--review-round`,
+`patch` and `sandbox` (the kept path, else `null`) with `--probe`/`--probe-here`. With
+`--until-done` the switches behave as described in [`coding.md`](coding.md).
+
 ## Model, context and effort
 
 | flag | env | meaning |

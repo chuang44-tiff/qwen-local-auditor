@@ -52,6 +52,7 @@ my-workflow/
 | `roles.R.fence` | `none`, `search`, `web`, `read` or `sandbox` (below); `read` and `sandbox` need `"target": "required"` |
 | `roles.R.budget_weight` | number >= 1 (default 1): the per-item budget multiplier |
 | `roles.R.effort` | optional default effort; `--effort` and `--role-effort` beat it |
+| `roles.R.deep` | optional: `true`, `false` or a list of `"review_round"` (qwen-agent `--review-round`) and `"subagents"` (`--subagents-nudge`); `true` is both. `"probe"` is refused: a `sandbox` role already has a shell. `--deep ROLE` gives a role both. The switches are part of each unit's cache key, and a repair round never carries them |
 | `knobs` | name -> `int` (>= 0), `float`, `str` or `bool`; a name may not shadow a config key (`depth`, `goal`, `budget`, ...); `--set` also takes the engine knobs `budget`, `retries`, `rounds` and `hours` without their being declared |
 | `presets.D` | may name only declared knobs and the engine knobs, and must set every declared knob plus `budget` (int >= 1, seconds per item), `retries` (int >= 0) and `rounds` (int >= 1 or `"until"`); `hours` is optional (> 0; required with `"until"`) |
 | `default_depth` | names a preset |
@@ -135,8 +136,8 @@ Determinism: resume re-runs `run(wf)` from the start and every finished unit ret
 cached answer, so the script must make the same calls in the same order given the same
 answers. Never read the clock, randomness, the environment or files outside `wf.load`.
 An exception in `workflow.py` is exit 8 with the traceback in `RUN/error.log`; fix the
-script and `--resume`: the cache key holds the role text, prompt, fence flags and effort,
-not the script.
+script and `--resume`: the cache key holds the role text, prompt, fence flags, effort and
+depth switches, not the script.
 
 A module-level `validate(cfg)` returning an error string refuses the run before it
 starts (exit 2), e.g. when a knob needs more agents than `--max-agents`.
@@ -157,18 +158,21 @@ phase; without it each unit gets the first of `[]` and `{}` its parse accepts.
 qwen-swarm WORKFLOW "GOAL" [--depth NAME] [--set KNOB=VALUE]... [--target DIR]
            [--max-agents N] [--max-items N] [--seats N] [--web-seats N] [--timeout S]
            [--retries N] [--rounds N|until] [--hours H] [--effort LEVEL]
-           [--role-effort ROLE=LEVEL[,ROLE=LEVEL...]] [--out DIR] [--keep-sandboxes]
+           [--role-effort ROLE=LEVEL[,ROLE=LEVEL...]] [--deep ROLE[,ROLE...]|all]
+           [--out DIR] [--keep-sandboxes]
 qwen-swarm WORKFLOW --stdin [...]
 qwen-swarm --resume RUN_DIR [--seats N] [--web-seats N] [--timeout S] [--retries N]
-           [--rounds N|until] [--hours H] [--effort LEVEL] [--role-effort ...] [--keep-sandboxes]
+           [--rounds N|until] [--hours H] [--effort LEVEL] [--role-effort ...] [--deep ...]
+           [--keep-sandboxes]
 qwen-swarm --check WORKFLOW | --preflight [WORKFLOW] | --list
 ```
 
 A resume takes its goal and settings from the run folder and accepts the flags of the line
-above; `qwen-deep-research --resume` accepts the same, but its own resume message and the
-synopsis on its page list only the seven the released `qwen-deep-research` had (without
-`--rounds` and `--keep-sandboxes`, which came in with the engine), and `--keep-sandboxes`
-keeps nothing in a research run — no research role has a `sandbox` fence
+above; `qwen-deep-research --resume` accepts the same except `--deep` — which
+`qwen-deep-research` does not take at all — but its own resume message and the synopsis on
+its page list only the seven the released `qwen-deep-research` had (without `--rounds` and
+`--keep-sandboxes`, which came in with the engine), and `--keep-sandboxes` keeps nothing in
+a research run — no research role has a `sandbox` fence
 ([deep-research.md](deep-research.md)).
 
 A `WORKFLOW` argument that contains a `/` (a `\` on Windows) or starts with `.` is read as a
@@ -183,7 +187,12 @@ Precedence: a flag, then `--set`, then the environment (`QWEN_SWARM_MAX_AGENTS`,
 max(300, weight x k x budget) seconds, one `wf.agent` counts as 2 items. `--hours` is a
 hard deadline stored in `config.json`: no new unit starts after it, items not run are
 logged as `deadline`, synthesis-style `always=True` agents still run, and no new round
-starts. `--rounds until` needs a deadline.
+starts. `--rounds until` needs a deadline. `--deep ROLE[,ROLE...]|all` gives those roles a
+review round and the delegation nudge (stored in `config.json` as `deep`; a resume adds to
+the stored list, and the units it touches run again under their new cache keys); a review
+round is two qwen-agent calls and qwen-agent gives each call the full `--timeout` it is
+handed, so a deep unit is passed half its unit timeout (rounded down, never below 1s) to
+keep one unit's timeout one unit's budget; `qwen-deep-research` does not take it.
 
 ## The run folder
 

@@ -12,16 +12,18 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import checks, decisions, taskfile, testrun  # noqa: E402
+from lib import checks, decisions, probe, taskfile, testrun  # noqa: E402
 from lib.builders import history  # noqa: E402
 
 EXIT_OK, EXIT_USAGE, EXIT_APIERR, EXIT_HARNESS = 0, 2, 4, 8
@@ -52,6 +54,15 @@ NOT_DONE = """Not done. The harness ran every check after your last reply:
 {fails}
 {unlogged}
 Fix these, or record a DEVIATION block for anything you changed on purpose. Continue."""
+
+# --review-round: one extra round, resumed in the same session, after the checks first pass.
+REVIEW_ROUND = """Review round: every check passes. Before the task is final, try to break your change.
+Go back over each thing you changed and each checklist item. For each one, look for the
+input, state or code path that would make it wrong -- empty, huge or odd inputs, paths with
+spaces, non-UTF-8 bytes, platform differences, an interrupted or resumed run -- and check it
+with a test (`qwen-test [SELECTOR]`) or by reading the code again. Fix what fails. The
+harness runs every check again after this round. Reply as before: a DEVIATION block for
+each deliberate departure, then the files you changed."""
 
 
 def state_root():
@@ -99,10 +110,13 @@ def _backoff():
     return vals
 
 
-def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", test=True):
+def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", test=True,
+               probe_here=False):
     argv = list(agent) + ["--json", "--warn-denials", "-q", "-r", role]
     if test:
         argv.append("--test")
+    if probe_here:
+        argv.append("--probe-here")     # repo is the run's probe sandbox: a whole shell there
     argv += ["-C", repo, "-f", prompt_path]
     if session:
         argv += ["--resume", session]
@@ -231,7 +245,10 @@ def parse_audit(text, n_logged):
 
 # Options that would let the read-only audit change files or widen its tools.
 _MUTATING_FLAGS = {"--write": 0, "--all-tools": 0, "--unrestricted": 0,
-                   "-t": 1, "--tools": 1, "--toolset": 1, "--permission-mode": 1}
+                   "-t": 1, "--tools": 1, "--toolset": 1, "--permission-mode": 1,
+                   # The depth switches shape the coder's rounds; the audit stays the plain
+                   # extraction its CONTRADICTION parser expects.
+                   "--role-variant": 1, "--subagents-nudge": 0}
 
 
 def _read_only_passthrough(passthrough):
@@ -342,7 +359,7 @@ def _tool_totals(repo, session):
 
 
 def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, start, repo, denied=(),
-            agent_err="", notes=(), tools=None, transcript_found=False):
+            agent_err="", notes=(), tools=None, transcript_found=False, switches=()):
     diff = _git(repo, "diff", start)
     new = _new_files(repo)
     for rel in new:
@@ -366,7 +383,8 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
         "session: %s" % (session or "(none)"),
         "tokens: %d" % tokens,
         "denied tool calls: %d%s" % (len(denied), " (%s)" % ", ".join(sorted(set(denied))) if denied else ""),
-        "start commit: %s" % start, "",
+        "start commit: %s" % start,
+        *(["switches: %s" % ", ".join(switches)] if switches else []), "",
         "## Checklist", "", "| # | item | status | evidence |", "|---|---|---|---|", *rows, "",
         "## Tool use", "", *tool_lines, "",
         "## Decision log", "", decisions.render(log), "",
@@ -381,7 +399,80 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
     return path
 
 
+def _add_note(path, note):
+    """Append one line to report.md's `## Notes` section, opening that section when the
+    report was written without notes. A cleanup that fails after the report exists is
+    still worth reporting, and report.md is what the caller reads; the note goes before
+    the final `full diff:` line, exactly where _report writes the others."""
+    if not path:
+        return
+    with contextlib.suppress(OSError):
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        at = next((i for i, ln in enumerate(lines)
+                   if ln.startswith("full diff: ")), len(lines))
+        lines[at:at] = [note] if "## Notes" in lines else ["", "## Notes", note]
+        _write(path, "\n".join(lines) + "\n")
+
+
+def _switches(o):
+    """The depth switches of this run, as report.md lists them (none: no line)."""
+    out = []
+    if getattr(o, "probe", False):
+        out.append("probe")
+    if getattr(o, "review_round", False):
+        out.append("review_round")
+    pt = list(o.passthrough)
+    for i, a in enumerate(pt):
+        if a == "--role-variant" and i + 1 < len(pt):
+            out.append("role_variant=%s" % pt[i + 1])
+        elif a.startswith("--role-variant="):
+            out.append("role_variant=%s" % a.split("=", 1)[1])
+        elif a == "--subagents-nudge":
+            out.append("subagents_nudge")
+    return out
+
+
 def run(o):
+    """The until-done loop with the environment hygiene around it.
+
+    _run pops the GIT_* steering variables and sets GIT_OPTIONAL_LOCKS under
+    --probe; os.environ must come back exactly as it was found -- set the ones
+    that were there, delete the ones that were not. A supervisor used
+    in-process (the test suite) that left the optional locks off would blind
+    every later git call in the process, and that masking silenced the
+    regression guard of the index-write fix. The __main__ interrupt path
+    os._exits past this finally; a hard exit leaves whatever the run set, but
+    that process' environment dies with it.
+    """
+    names = probe.GIT_ENV_VARS + ("GIT_OPTIONAL_LOCKS",)
+    saved = {n: os.environ[n] for n in names if n in os.environ}
+    try:
+        return _run(o)
+    finally:
+        for _steer in names:
+            if _steer in saved:
+                os.environ[_steer] = saved[_steer]
+            else:
+                os.environ.pop(_steer, None)
+
+
+def _run(o):
+    if o.probe:
+        # An inherited GIT_* aims every git call this process and every child makes --
+        # probe.make's clone, the sandbox rounds, the checks alike -- at a repository
+        # other than the one the arguments name: with GIT_INDEX_FILE=<the user's
+        # .git/index> (a pre-commit hook keeps it in the environment), the sandbox's
+        # writes rewrote the user's index. qwen-agent.sh unsets the same six before
+        # exec'ing this; this is the belt for that braces -- a supervisor started
+        # directly gets the same hygiene, before the first git call.
+        for _steer in probe.GIT_ENV_VARS:
+            os.environ.pop(_steer, None)
+        # What git calls may still name the USER's repo under --probe are the read-only
+        # ones the sandbox build needs: this process's `rev-parse --show-toplevel` and
+        # probe.make's diff-index/ls-files. They take no index lock even so: with the
+        # optional locks off, git can never touch index.lock beside the user's tree.
+        os.environ["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         repo = testrun.toplevel(o.repo)
     except RuntimeError as exc:
@@ -426,12 +517,67 @@ def run(o):
     # holder's lock on its way out.
     mine = False
     run_dir = session = None
+    report_path = None                # the report.md of this run, once written (what a
+                                      # late cleanup failure adds its note to)
     rounds = tokens = 0
     denied = []
     agent_err = ""
     notes = []
+    patch_written = False               # probe.patch is out: the work no longer needs the sandbox
     prev_tools, tool_totals, transcript_found, tools_session = {}, {}, False, None
     results, log, start = [], [], ""
+    user_repo, sb = repo, None          # --probe: every round works in sb, never in user_repo
+
+    def finish_probe():
+        """Write RUN/probe.patch from the sandbox once; returns its path (None: no sandbox).
+        Whatever probe.write_patch raises propagates -- a refused diff leaves patch_written
+        False, and that is what keeps the sandbox from being removed."""
+        nonlocal patch_written
+        if sb is None:
+            return None
+        path = os.path.join(run_dir, "probe.patch")
+        if not patch_written:
+            # Written to a fresh temp file and moved into place, never skipped
+            # because a file already sits at the target: the session has a shell
+            # in the sandbox, and `../../probe.patch` from it IS this path -- a
+            # planted file must never be handed back as the run's patch.
+            fd, tmp = tempfile.mkstemp(dir=run_dir, prefix="probe.patch.")
+            os.close(fd)
+            try:
+                probe.write_patch(sb, tmp)
+                os.replace(tmp, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+                raise
+            patch_written = True
+            # The apply hint must paste into a shell as it stands (shlex.quote), as
+            # qwen-agent.sh quotes its own -- a state or repo path with a space or a '
+            # would break the bare spelling.
+            notes.append("probe patch: %s (not applied; to apply: git -C %s apply %s)"
+                         % (path, shlex.quote(str(user_repo)), shlex.quote(path)))
+            if o.keep_sandbox:
+                notes.append("sandbox kept: %s" % sb)
+        return path
+
+    def drop_sandbox():
+        # The sandbox holds the run's only copy of the work until probe.patch is out of
+        # it: never remove it when the patch could not be written. A probe.make that died
+        # halfway left no sandbox (sb None) but still left the half-made clone and the
+        # marker under run_dir -- and there is nothing to keep there, --keep-sandbox
+        # included. A sweep that fails (raises, or refuses) leaves a sandbox behind that
+        # nobody chose to keep: return its path so the caller says so -- probe.remove
+        # swallows the individual rmdir failures itself, so an exception OR a False
+        # answer both mean "something is still there".
+        if o.probe and run_dir is not None and (sb is None
+                                                or (patch_written and not o.keep_sandbox)):
+            try:
+                gone = probe.remove(run_dir)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                gone = False
+            if not gone:
+                return str(sb if sb is not None else run_dir)
+        return None
     try:
         # The handler in _stop_on_signal is not enough on its own: a signal
         # landing between the mkdir and `mine = True` would run the cleanup
@@ -450,20 +596,55 @@ def run(o):
                   "killed with SIGKILL or the machine went down -- remove that directory)" % lock,
                   file=sys.stderr)
             return EXIT_LOCKED
-        if _git(repo, "status", "--porcelain").strip() and not o.allow_dirty:
+        # A probe run copies the uncommitted state into its sandbox and writes nothing back.
+        # Under --probe the status call is skipped entirely, not just its answer: `git
+        # status` refreshes stat info and WRITES .git/index back. GIT_OPTIONAL_LOCKS=0
+        # does stop that opportunistic refresh -- but the user's tree is read-only for a
+        # probe run (the sandbox is meant to carry the dirt), so never calling status is
+        # the primary guard and no part of this run may depend on that env var. Same for
+        # the start sha: under --probe it is
+        # re-read from the sandbox below, so no git call here touches the user's repo
+        # (probe.make's own reads are the only ones that may).
+        if not o.probe and _git(repo, "status", "--porcelain").strip() and not o.allow_dirty:
             print("until-done: the working tree has uncommitted changes; commit them or pass --allow-dirty",
                   file=sys.stderr)
             return EXIT_DIRTY
-        start = _git(repo, "rev-parse", "HEAD").strip()
+        start = "" if o.probe else _git(repo, "rev-parse", "HEAD").strip()
         run_dir = os.path.join(sd, time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
         base, k = run_dir, 1
         while os.path.exists(run_dir):
             k += 1
             run_dir = "%s-%d" % (base, k)
         os.makedirs(run_dir)
+        if o.probe:
+            # probe.check() and probe.remove() only accept a run folder carrying create()'s
+            # marker; this run owns run_dir, so drop it in before the sandbox under it.
+            _write(os.path.join(run_dir, probe.RUN_MARKER), probe.RUN_MARKER_WORD + "\n")
+            try:
+                sb, _ = probe.make(repo, repo, run_dir)
+            except Exception as exc:
+                # A half-made clone must not outlive the run (drop_sandbox sweeps it:
+                # sb is still None), and the failure must leave a report. Write it
+                # BEFORE the sweep -- probe.remove empties a run_dir that holds nothing
+                # else, and the report would have nowhere to go. There is no sandbox to
+                # diff, so the report's git calls run against run_dir: under --probe the
+                # user's tree takes no git call of this process at all.
+                # (KeyboardInterrupt and SystemExit are BaseExceptions: they keep their
+                # own paths -- the interrupted report and 130 below.)
+                print("until-done: --probe: %s" % exc, file=sys.stderr)
+                path = _report(run_dir, reason="error: %s: %s" % (type(exc).__name__, exc),
+                               code=EXIT_HARNESS, rounds=rounds, session=session,
+                               tokens=tokens, results=results, log=log, start=start,
+                               repo=run_dir, denied=denied, switches=_switches(o))
+                report_path = path
+                print("report: %s" % path)
+                return EXIT_HARNESS
+            repo = str(sb)
+            start = _git(repo, "rev-parse", "HEAD").strip()
         _write(os.path.join(run_dir, "task.md"), task_text)
         log_path = os.path.join(run_dir, "decisions.jsonl")
         t0, prev, garbage, feedback = time.time(), None, 0, None
+        reviewed = False                # --review-round: the one review round has been asked for
         timeout_run = 0                 # consecutive unusable rounds that were timeouts
         reason, code = "round limit reached", EXIT_PARTIAL
         for rounds in range(1, o.max_rounds + 1):
@@ -472,7 +653,7 @@ def run(o):
             ppath = os.path.join(run_dir, "round-%d.prompt.md" % rounds)
             _write(ppath, prompt)
             sig_before = _tree_sig(repo)
-            r = call_agent(o.agent, repo, ppath, session, o.passthrough)
+            r = call_agent(o.agent, repo, ppath, session, o.passthrough, probe_here=o.probe)
             # The tree as the agent left it, taken once and before any check runs:
             # a `cmd` check runs in the live repo, so one that writes a file would
             # otherwise make a round that changed nothing look like progress.
@@ -545,10 +726,26 @@ def run(o):
                     why = "timed out" if audit_rc == AGENT_TIMEOUT else "unusable"
                     reason, code = ("checks pass; deviation audit %s "
                                     "\u2014 review the diff manually" % why), EXIT_PARTIAL
-                    notes = ["audit reply (unusable): %s" % p for p in audit_replies]
+                    notes += ["audit reply (unusable): %s" % p for p in audit_replies]
                     break
             now = frozenset(["item%d" % c.index for c in failing] + ["dev:%s" % u for u in unlogged])
             if not now:
+                if o.review_round and not reviewed:
+                    if session:
+                        reviewed = True
+                        spent = ((o.budget_tokens and tokens >= o.budget_tokens) or
+                                 (o.budget_seconds and time.time() - t0 >= o.budget_seconds))
+                        if rounds < o.max_rounds and not spent:
+                            # One more round in the same session; the checks (and the audit)
+                            # run again after it, and it counts toward --max-rounds.
+                            notes.append("review round: round %d" % (rounds + 1))
+                            prev, feedback = None, REVIEW_ROUND
+                            continue
+                        notes.append("review round skipped: the checks passed with no round or "
+                                     "budget left for it")
+                    else:
+                        # Nothing to resume: say so instead of letting "done" read as reviewed.
+                        notes.append("review round skipped: no session id")
                 reason, code = "done", EXIT_OK
                 break
             if unusable:
@@ -587,22 +784,47 @@ def run(o):
                 # round's count only -- the running total would be noise.
                 feedback += ("\n%d Bash calls were denied last round. Only qwen-test runs;"
                              " use Read, Grep and Glob for files." % len(r["denied"]))
+        patch = finish_probe()
         path = _report(run_dir, reason=reason, code=code, rounds=rounds, session=session,
                        tokens=tokens, results=results, log=log, start=start, repo=repo,
                        denied=denied, agent_err=agent_err, notes=notes,
-                       tools=tool_totals, transcript_found=transcript_found)
+                       tools=tool_totals, transcript_found=transcript_found,
+                       switches=_switches(o))
+        report_path = path
         print("until-done: %s after %d round(s); session %s" % (reason, rounds, session or "-"))
+        if patch:
+            print("patch: %s" % patch)
+        if sb is not None and o.keep_sandbox:
+            print("sandbox kept: %s" % sb)     # as --keep-sandbox's help promises
         print("report: %s" % path)
         return code
     except KeyboardInterrupt:
+        patch = None
         if run_dir:
+            with contextlib.suppress(Exception):
+                # an interrupted probe run still hands back its work; ANY failure here
+                # (a refused diff included) leaves patch_written False, so the sandbox
+                # is kept below rather than removed with the work still only in it
+                patch = finish_probe()
+            if patch is None and sb is not None:
+                print("sandbox kept: %s" % sb, file=sys.stderr)
+                # The stderr line dies with a closed terminal; the report is what
+                # the reader finds, and it must name the kept sandbox too.
+                notes.append("sandbox kept: %s" % sb)
             path = _report(run_dir, reason="interrupted", code=EXIT_INTERRUPTED, rounds=rounds,
-                           session=session, tokens=tokens, results=results, log=log, start=start, repo=repo, denied=denied,
-                           tools=tool_totals, transcript_found=transcript_found)
+                           session=session, tokens=tokens, results=results, log=log, start=start,
+                           repo=run_dir if (o.probe and sb is None) else repo,
+                           denied=denied, notes=notes,
+                           tools=tool_totals, transcript_found=transcript_found, switches=_switches(o))
+            report_path = path
             # A dead terminal (the window closed under the run) must not turn
             # the interrupt into exit 1: an OSError escaping this handler would
             # skip the 130 below, so every print here swallows it.
             with contextlib.suppress(OSError):
+                if patch:
+                    print("patch: %s" % patch)
+                    if o.keep_sandbox and sb is not None:
+                        print("sandbox kept: %s" % sb)     # as --keep-sandbox's help promises
                 print("report: %s" % path)
         with contextlib.suppress(OSError):
             if session:
@@ -621,11 +843,57 @@ def run(o):
             sys.stdout.flush()
             sys.stderr.flush()
         if __name__ == "__main__":
+            # os._exit skips the finally below, so the sweep and its leftover
+            # report happen here. The note goes in before the print: a dead
+            # terminal takes the print, not the report.
+            with contextlib.suppress(OSError, RuntimeError, subprocess.SubprocessError):
+                leftover = drop_sandbox()
+                if leftover is not None:
+                    _add_note(report_path, "sandbox not removed: %s" % leftover)
+                    print("sandbox not removed: %s" % leftover, file=sys.stderr)
             if mine:
                 shutil.rmtree(lock, ignore_errors=True)
             os._exit(EXIT_INTERRUPTED)
         return EXIT_INTERRUPTED
+    except Exception as exc:
+        # Without --probe the work sits in the user's tree and survives a crash; under
+        # --probe the sandbox is its only copy, so an error must not throw it away: try
+        # the patch first, and when it cannot be written (a refused diff, a dead agent
+        # that deleted the .base) KEEP the sandbox and say so on stderr. Then report and
+        # exit 8 -- no traceback either way.
+        if not o.probe or run_dir is None:
+            raise
+        patch = None
+        with contextlib.suppress(Exception):
+            patch = finish_probe()        # may raise again: the same refused diff
+        if patch is None and sb is not None:
+            print("sandbox kept: %s" % sb, file=sys.stderr)
+            # Name the kept sandbox in the report too: it holds the run's work.
+            notes.append("sandbox kept: %s" % sb)
+        path = _report(run_dir, reason="error: %s: %s" % (type(exc).__name__, exc),
+                       code=EXIT_HARNESS, rounds=rounds, session=session, tokens=tokens,
+                       results=results, log=log, start=start,
+                       repo=repo if sb is not None else run_dir,
+                       denied=denied, agent_err=agent_err, notes=notes,
+                       tools=tool_totals, transcript_found=transcript_found,
+                       switches=_switches(o))
+        report_path = path
+        with contextlib.suppress(OSError):
+            if patch:
+                print("patch: %s" % patch)
+            print("report: %s" % path)
+        return EXIT_HARNESS
     finally:
+        # A sandbox sweep that raises must not skip the lock removal: the next run
+        # would be locked out (exit 14) by a run that already ended. A sweep that
+        # cannot finish leaves a sandbox nobody chose to keep: say so -- stderr and
+        # the report, with the exit code unchanged (this is a leftover, not a failure
+        # of the run itself).
+        with contextlib.suppress(OSError, RuntimeError, subprocess.SubprocessError):
+            leftover = drop_sandbox()
+            if leftover is not None:
+                _add_note(report_path, "sandbox not removed: %s" % leftover)
+                print("sandbox not removed: %s" % leftover, file=sys.stderr)
         if mine:
             shutil.rmtree(lock, ignore_errors=True)
 
@@ -696,6 +964,9 @@ def main(argv=None):
     ap.add_argument("--budget-seconds", type=int, default=0)
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--no-deviation-audit", action="store_true")
+    ap.add_argument("--review-round", action="store_true")
+    ap.add_argument("--probe", action="store_true")
+    ap.add_argument("--keep-sandbox", action="store_true")
     try:
         o = ap.parse_args(argv)
     except SystemExit:

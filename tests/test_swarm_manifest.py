@@ -142,3 +142,43 @@ def test_non_string_default_depth(tmp_path, depth):
     with pytest.raises(manifest.ManifestError) as e:
         load(tmp_path, default_depth=depth)
     assert "default_depth must name a preset" in str(e.value)
+
+
+# ---------------------------------------------------------------- the role "deep" field
+
+def role_with(deep):
+    return {"roles": {"worker": {"file": "roles/worker.md", "fence": "none", "deep": deep}}}
+
+
+@pytest.mark.parametrize("deep,want", [
+    (True, ("review_round", "subagents")),
+    (False, ()),
+    ([], ()),
+    (["subagents"], ("subagents",)),
+    (["subagents", "review_round", "subagents"], ("review_round", "subagents")),
+])
+def test_role_deep_field(tmp_path, deep, want):
+    assert load(tmp_path, **role_with(deep)).roles["worker"].deep == want
+
+
+def test_role_deep_defaults_to_none(tmp_path):
+    assert load(tmp_path).roles["worker"].deep == ()
+
+
+@pytest.mark.parametrize("deep,needle", [
+    (["probe"], "\"probe\" is not a manifest option"),
+    (["review_round", "fast"], "unknown switch 'fast'"),
+    ("yes", "must be true, false or a list"),
+    # [1] IS a list -- the complaint is its items, so the message must say that too.
+    ([1], "a list must hold switch names as strings"),
+])
+def test_role_deep_field_errors(tmp_path, deep, needle):
+    with pytest.raises(manifest.ManifestError, match="roles.worker.deep") as e:
+        load(tmp_path, **role_with(deep))
+    assert needle in str(e.value)
+
+
+def test_a_knob_may_not_be_called_deep(tmp_path):
+    presets = {d: dict(p, deep=1) for d, p in BASE["presets"].items()}
+    with pytest.raises(manifest.ManifestError, match="knobs.deep"):
+        load(tmp_path, knobs={"items": "int", "deep": "int"}, presets=presets)
