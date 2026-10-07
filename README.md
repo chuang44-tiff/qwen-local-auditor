@@ -2,20 +2,27 @@
 
 Run Claude Code against a model you serve yourself. `qwen-agent` starts a separate,
 headless Claude Code process pointed at your own server (vLLM serving Qwen, or anything
-that speaks the Anthropic Messages API), fenced so that by default it can only read. On
-top of it sit six Claude Code skills and six commands: a free second opinion on a diff,
+that speaks the Anthropic Messages API), fenced so that by default it never writes your
+files. On top of it sit six Claude Code skills and six commands: a free second opinion on a diff,
 bulk reading you would rather not spend frontier tokens on, a coding loop that runs until
 its checks pass, an interactive session you can watch, web research with every claim
 checked by independent agents, and a swarm that runs a whole workflow — many agents, in
 rounds, over a codebase or over the web. The "qwen" in the name is historical; any model
 works.
 
-- **`qwen-agent`**: one question, one headless session, one answer. Read-only unless you say otherwise.
+- **`qwen-agent`**: one question, one headless session, one answer. Your files are never written unless you say otherwise.
 - **`qwen-sweep`**: the same question over many files, a diff, a set of documents or a large log.
 - **`qwen-test`**: your test command in a throwaway git worktree — the one shell command a `qwen-agent --test` run is granted.
 - **`qwen-cc`**: an interactive session on the local model inside tmux, which Claude Code can read, type into and stop.
 - **`qwen-deep-research`**: a swarm of local sessions that researches a question on the web and writes a cited report.
 - **`qwen-swarm`**: a workflow — the built-in `research` or `debug`, or one you write — run by many local agents in rounds, often overnight.
+
+**Depth is the default.** A bare `qwen-agent` run in a git repo works in a throwaway
+sandbox copy of your tree with a shell (Bash), Edit/Write and Task subagents, then a
+second call reviews its own answer; the timeout is 3600 s. The copy is not a jail: the
+shell runs as you, with your network. Your real tree is never written. `--shallow` (or
+`QWEN_DEPTH=shallow`) restores the plain read-only run: `Read,Glob,Grep`, one call, no
+shell, no subagents, no web. Details: [reference/qwen-agent.md](skill/local-auditor/reference/qwen-agent.md#depth-the-default).
 
 The skills (`local-agent` routes; `local-auditor`, `local-sweep`, `local-coder`,
 `local-deep-research` and `local-swarm` do the work) teach your Claude Code session when
@@ -126,14 +133,21 @@ qwen-swarm --check ./my-workflow                         # validate before a lon
 
 ## Safety
 
-A bare run can only read: the toolset is `Read,Glob,Grep`, MCP servers are dropped, and
-editing, shell access, web access and subagents are each a separate flag; any run that can
-modify files or run a shell prints a warning. `--test` opens exactly one command,
+A bare run never writes your files. Under default depth, inside a git repo, it gets a
+shell, Edit/Write and subagents in a throwaway sandbox copy of the tree — a copy, not a
+jail: the shell runs as you, with your network, so it can reach the web and any path
+you can. `--shallow` (or `--read-only`) keeps the old fence: the toolset is
+`Read,Glob,Grep`, MCP servers are dropped, and editing, shell access, web access and
+subagents are each a separate flag. Any run that can modify files or run a shell prints a
+warning. `--test` opens exactly one command,
 `qwen-test`, under `claude --restricted`, but the tests it runs are your repository's code
-running as you, so use it only on code you would run yourself. A `qwen-agent` run reaches
-the web only when you pass `--web`, which adds `WebFetch` and nothing else, or `--browser`,
+running as you, so use it only on code you would run yourself. Apart from that sandbox
+shell, a `qwen-agent` run gets web tools only when you pass `--web`, which adds `WebFetch`
+and nothing else, or `--browser`,
 which gives it a real browser that opens whatever URL it is told to — `--headed`,
-`--browser-eval`, `--scenarios` and `-r tester` each turn that browser on too. Research goes
+`--browser-eval`, `--scenarios` and `-r tester` each turn that browser on too. `--record` and
+`--replay` run model-written JavaScript with node, as you, unsandboxed: replay only folders
+you recorded or have read. Research goes
 online on purpose — `qwen-deep-research`, `qwen-swarm research`, or any workflow with a
 `search` or `web` fence — and its agents work in empty folders with no file tools. A swarm
 `browser` role is meant for a local UI suite, and what it sees is kept: its screenshots and

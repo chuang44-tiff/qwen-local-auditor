@@ -338,3 +338,14 @@ def test_symlinked_sandbox_is_refused(tmp_path, root):
     r = cli("remove", str(run2), env=e)
     assert r.returncode == 2 or not run2.exists()                # link only, or refused
     assert snap(outside2) == before2 and not (outside2 / "tree" / ".git").exists()
+
+
+def test_remove_reports_a_sandbox_it_could_not_delete(tmp_path, root, monkeypatch):
+    from lib.swarm_engine import sandbox
+    repo = git_repo(tmp_path / "repo", {"a.txt": "a\n"})
+    run, sb, _, _ = probe.create(repo)
+    monkeypatch.setattr(sandbox, "_rmtree", lambda path: None)     # deletion fails silently
+    assert probe.remove(run) is False
+    assert sb.exists()
+    monkeypatch.undo()                                  # the marker is still there:
+    assert probe.remove(run) is True and not sb.exists()

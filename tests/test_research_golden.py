@@ -84,7 +84,7 @@ def _part_b_key(role_text, prompt, toolset, grants, web, mcp_text, effort, deep=
 # default depth on: a research role with no "deep" field is deep now, so its key carries
 # the switch list; the fan-out roles (searcher, reader, verifier) say "deep": false and
 # their keys stay byte-identical to the released ones
-DEEP = "\ndeep:review_round,subagents"
+DEEP = "\ndeep:review_round"            # fence none: no subagent switch
 DEEP_ROLES = {"scoper": DEEP, "synthesizer": DEEP}
 
 

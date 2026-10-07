@@ -856,7 +856,7 @@ def test_web_with_test_warns(tmp_path, server, fake):
              "QWEN_WEB": "1"}
     r = run(tmp_path, ["--test", "-C", posix(repo), "hi"], server, fake, extra=extra)
     assert r.returncode == 0, r.stderr
-    # the spec fixes the LINE to start with the flag pair, not "qwen-agent: WARNING: ..."
+    # the LINE starts with the flag pair, not "qwen-agent: WARNING: ..."
     assert any(ln.startswith("WARNING: --web with --test") for ln in r.stderr.splitlines())
     assert "gamed" in r.stderr and "upstream" in r.stderr
     # without --test there is no warning (nothing to game), web still on

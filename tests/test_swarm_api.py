@@ -109,11 +109,11 @@ def test_timeouts_effort_and_seats_follow_the_role(tmp_path, fake):
     wf.agent("one", "voter", "- C9:", lambda text: steps.extract_json(text))
     by = {pathlib.Path(a[a.index("-C") + 1]).name: a for a in calls(fake)}
     # default depth on: every role here is deep, and a review round is two qwen-agent
-    # calls, so each unit is handed half its timeout (the budget the unit itself gets is
-    # the max(300, ...) figure below, halved on the way to the agent)
-    assert by["work-1"][by["work-1"].index("--timeout") + 1] == "150"   # max(300, 2 x 100) / 2
-    assert by["read-1"][by["read-1"].index("--timeout") + 1] == "200"   # weight 2: 2 x 2 x 100, / 2
-    assert by["one-1"][by["one-1"].index("--timeout") + 1] == "150"     # an agent counts 2 items
+    # calls, so each unit's budget (the max(300, ...) figure below) is halved on the way
+    # to the agent -- but never below the 300 s floor
+    assert by["work-1"][by["work-1"].index("--timeout") + 1] == "300"   # max(300, 2 x 100)
+    assert by["read-1"][by["read-1"].index("--timeout") + 1] == "300"   # weight 2: 400 / 2 < 300
+    assert by["one-1"][by["one-1"].index("--timeout") + 1] == "300"     # an agent counts 2 items
     assert by["work-1"][by["work-1"].index("-e") + 1] == "high"          # --role-effort
     assert by["one-1"][by["one-1"].index("-e") + 1] == "low"             # the manifest's effort
     assert "-e" not in by["read-1"]                                      # nothing set: qwen-agent's
@@ -421,3 +421,29 @@ def test_a_browser_role_runs_at_the_seats_and_needs_no_mcp(tmp_path, fake):
     assert wf.mcp is None
     assert wf.fan_out("ui", "tester", items(1), prompt,
                       lambda text, batch: steps.extract_json(text)).ok
+
+
+# ---------------------------------------------------------------- depth by fence
+
+def test_toolless_role_gets_no_subagent_switches_by_default(tmp_path, fake):
+    # A fence-none role has no tools to delegate with: depth gives it the review
+    # round only. A role with tools (web) keeps the delegation nudge.
+    wf = workflow(tmp_path)
+    assert wf._deep("worker") == ("review_round",)
+    assert wf._deep("reader") == ("review_round", "subagents")
+    wf = workflow(tmp_path, deep=["worker"])              # --deep ROLE: still no tools
+    assert wf._deep("worker") == ("review_round",)
+
+
+def test_toolless_role_keeps_subagents_it_lists(tmp_path, fake):
+    roles = dict(ROLES, worker=dict(ROLES["worker"], deep=["review_round", "subagents"]))
+    folder = make_workflow(tmp_path / "wf2", {"roles": roles}, roles=("worker", "reader", "voter"))
+    wf = workflow(tmp_path)
+    wf.manifest = manifest.load(folder)
+    assert wf._deep("worker") == ("review_round", "subagents")
+
+
+def test_role_lists_in_config_are_matched_by_name_not_substring(tmp_path, fake):
+    wf = workflow(tmp_path, deep="reader,voter", shallow="workers")   # hand-edited strings
+    assert wf._deep("worker") == ("review_round",)
+    assert wf._deep("reader") == ("review_round", "subagents")

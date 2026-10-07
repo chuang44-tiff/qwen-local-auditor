@@ -43,3 +43,24 @@ def test_no_personal_machine_details_are_committed():
                 line = text.count("\n", 0, m.start()) + 1
                 hits.append("%s:%d: %s (%s)" % (path.relative_to(ROOT), line, label, m.group(0)))
     assert not hits, "\n".join(hits)
+
+
+# Words that narrate how the code was reviewed rather than what it does. Planning notes
+# under docs/superpowers are working files, not shipped code, and are not checked.
+PROCESS_NARRATION = re.compile(
+    r"Review focus:|\bfix round\b|\bper the spec\b|\bMust-fix\b|\bShould-fix\b|\bTask \d+:")
+
+
+def test_shipped_files_do_not_narrate_their_review():
+    hits = []
+    for path in _tracked_files():
+        rel = path.relative_to(ROOT)
+        if rel.parts[:2] == ("docs", "superpowers") or rel == pathlib.Path(__file__).relative_to(ROOT):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for m in PROCESS_NARRATION.finditer(text):
+            hits.append("%s:%d: %s" % (rel, text.count("\n", 0, m.start()) + 1, m.group(0)))
+    assert not hits, "\n".join(hits)

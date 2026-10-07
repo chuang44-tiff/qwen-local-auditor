@@ -107,7 +107,8 @@ def unit_from(tmp_path, role, mcp=None):
 
 def test_swarm_role_default_is_deep(tmp_path, fake):
     # a role that says nothing about depth is deep: the unit is handed --shallow (so
-    # qwen-agent implies nothing) and then both switches.
+    # qwen-agent implies nothing) and then the review round. This role's fence is
+    # none -- no tools at all -- so it gets no delegation switch.
     out = tmp_path / "run"
     folder = make_workflow(tmp_path / "wfs")
     assert runner.main(agent_args() + [str(folder), "g", "--out", str(out)]) == 0
@@ -115,8 +116,8 @@ def test_swarm_role_default_is_deep(tmp_path, fake):
     assert got, "no unit ran"
     for argv in got:
         assert argv.count("--shallow") == 1, argv
-        assert all(a in argv for a in DEPTH_ON), argv
-        assert argv.index("--shallow") < argv.index("--review-round") < argv.index("--subagents-nudge"), argv
+        assert argv.index("--shallow") < argv.index("--review-round"), argv
+        assert not [a for a in argv if a.startswith("--subagents")], argv
         assert "--probe" not in argv and "--deep" not in argv, argv
 
 

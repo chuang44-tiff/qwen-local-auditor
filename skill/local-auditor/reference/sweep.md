@@ -47,9 +47,10 @@ is the `--probe` sandbox that depth would otherwise imply: `--probe` copies a pr
 and a batch's `-C` is a folder of extracted text, so every batch is dispatched with
 `--shallow` and the depth is typed after it. `--shallow` to `qwen-sweep` itself is the
 opt-out for a fan-out too wide to review twice: the batches then get plain `--shallow` and
-answer once. `--timeout SECS` (or `QWEN_TIMEOUT`) is the wall clock of one batch, and a
-review round is a second qwen-agent call on it, so a deep sweep wants more of it than a
-shallow one.
+answer once. `--timeout SECS` (or `QWEN_TIMEOUT`) is the wall clock of each qwen-agent call of a
+batch: a review round is a second call with the same full timeout, so a deep batch can
+take up to twice it. Batches are dispatched with `--shallow`, so their default stays
+1800 s per call.
 
 `claims` understands most source languages, but its guard against citing a comment as
 evidence is exact only for Python and approximate for C-family files (see `limits.md`).

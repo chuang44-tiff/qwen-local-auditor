@@ -704,8 +704,9 @@ def test_timeout_scales_with_items(tmp_path, env):
     agents = tmp_path / "run" / "agents"
     t = recorded_timeouts(env)
     # default depth on: scoper and synthesizer are deep, and a review round is two
-    # qwen-agent calls, so each is handed half of max(300, 2 * 240)
-    assert t["scope-1"] == 240 and t["synth-1"] == 240
+    # qwen-agent calls, so each is handed half of max(300, 2 * 240) -- but not less
+    # than the 300 s floor
+    assert t["scope-1"] == 300 and t["synth-1"] == 300
     # readers get twice the per-item budget: each source is a whole page
     for prefix, pat, weight in (("search-", r"^- A\d+:", 1), ("fetch-", r"^- S\d+:", 2),
                                 ("verify-", r"^- C\d+:", 1)):
@@ -976,8 +977,9 @@ def test_old_config_timeout_is_per_item_on_resume(tmp_path, env):
     assert rs.main(["--agent", sys.executable, "--agent", str(FAKE), "--resume", str(run2),
                     "--timeout", "100"]) == 0
     t2 = recorded_timeouts(env)
-    # default depth on: the scoper is deep, so it is handed half of max(300, 2 * 100)
-    assert t2["scope-1"] == 150
+    # default depth on: the scoper is deep, so it is handed half of max(300, 2 * 100),
+    # held at the 300 s floor
+    assert t2["scope-1"] == 300
     per_fetch = {n: unit_items(run2 / "agents", n, r"^- S\d+:")
                  for n in t2 if n.startswith("fetch-")}
     assert all(t2[n] == max(300, 2 * k * 100) for n, k in per_fetch.items())   # doubled for readers

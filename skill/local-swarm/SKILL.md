@@ -42,7 +42,8 @@ names the run:
 
 One `browser` agent runs one scenario, its screenshots kept in `RUN/browser/<unit>`, and every
 answer is scored by the same `lib/scenarios.py` that wrote the prompt: `RUN/results.json` and
-the report say PASS/FAIL/BLOCKED per scenario. Exit 0 when all passed; 4 when any did not. The
+the report say PASS/FAIL/BLOCKED (or NOT RUN, when the deadline kept its unit from
+starting) per scenario. Exit 0 when all passed; 4 when any did not, or an agent was dropped. The
 app must already be listening at the suite's URLs, and a missing `--set scenarios=` or a suite
 that does not parse is exit 2 naming its line before an agent starts.
 

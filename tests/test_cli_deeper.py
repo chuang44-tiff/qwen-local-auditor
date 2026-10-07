@@ -30,27 +30,24 @@ dispatch = test_sweep_cli.dispatch
 PUSH = "Delegation is part of this task"
 NUDGE = "Delegate more than feels necessary."
 
-# sha256 of the three texts that changed ON PURPOSE with this task: auditor-deep
-# gained the "1b. Coverage" entry-point list and the step-6 finish check (COVERAGE
-# section), coder-deep gained the finish check (NOT CHECKED), and REVIEW_PROMPT
-# gained the REVIEW ledger. These digests are of the NEW texts -- the old pins were
-# replaced deliberately. Every OTHER role text is unchanged (below, and the plain
-# auditor/coder/mechanic pins in test_cli_deep are untouched).
+# sha256 of the deep texts: auditor-deep with the "1b. Coverage" entry-point list and
+# the step-6 finish check (COVERAGE section), coder-deep with its finish check (NOT
+# CHECKED), and REVIEW_PROMPT with the REVIEW ledger. A change to any of them is a
+# deliberate change of what the model is told, and must re-pin here.
 CHANGED_TEXTS = {
     "auditor-deep": "ce9eca260b0eaf65b4ac2a997ad6721788c443ed43ed63c025c2e14a00fe3d5a",
     "coder-deep": "a8f7959a293ae82b767a71f2f458ae57fd73ec52e7c92231ba48b1ab4808e888",
     "review-prompt": "c2b5781be228b67eec746341255f7cf0d604b8a4c398734e86947a436440194f",
 }
 
-# the built-in role texts NOT touched by this task, pinned as released
+# the other built-in role texts, pinned
 UNCHANGED_TEXTS = {
     "plain": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "auditor": "dbcc0b8e488b3f4fc5ab2afc65903656dcb84b2cb55d7e467e7ba55c25d47e81",
     "coder": "ef4b57eae82a310a5b8cb9595d53e1be6719bb21e46d5d27252409b1d56ce652",
     "mechanic": "1648791f6b4b6e46f0c62696bb763bae30b5bb9aa3d8ac8a8d924ab27f34238d",
-    # the tester text gained the black-box sentence (the source-reaching browser
-    # tools are hidden by default now); re-pinned as released with it -- the
-    # other four are untouched
+    # the tester text carries the black-box sentence (the source-reaching browser
+    # tools are hidden by default)
     "tester": "640d1ebeec3e33228cb89c10d60e3dc4fca3998fabdac7e9418de6178df3bc1e",
 }
 

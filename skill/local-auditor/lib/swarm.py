@@ -41,6 +41,9 @@ AGENT_TIMEOUT = 5
 # The ceiling on any unit's --timeout, retry doublings included: a unit never runs
 # longer than this. research.py reads QWEN_DR_MAX_UNIT_SECONDS into the Swarm.
 MAX_UNIT_SECONDS = 14400
+# The least each call of a deep (review-round) unit gets when its budget is halved:
+# the minimum unit timeout a workflow hands out (swarm_engine.api.MIN_UNIT_TIMEOUT).
+DEEP_CALL_FLOOR = 300
 STOP_GRACE = 20
 REPAIR = ("Your last answer could not be used: {why}\n\n"
           "Reply again with ONLY the corrected answer as one ```json fenced block, "
@@ -180,9 +183,11 @@ class Swarm:
         # the caller owns the budget: a unit carries its own timeout, and a retry doubles it
         if u.deep and not resume and "review_round" in u.deep:
             # --review-round is TWO qwen-agent calls and qwen-agent gives each the full
-            # --timeout it is handed: halve the unit's budget (down, never below 1s)
-            # so a deep unit still fits the one unit's time MAX_UNIT_SECONDS promises.
-            timeout = max(1, timeout // 2)
+            # --timeout it is handed: halve the unit's budget (rounded down) so a deep
+            # unit still fits the time MAX_UNIT_SECONDS promises -- but never below
+            # DEEP_CALL_FLOOR, the least a unit is otherwise given, nor above the
+            # unit's own budget.
+            timeout = max(timeout // 2, min(timeout, DEEP_CALL_FLOOR), 1)
         # --shallow on every unit: depth is the unit's own decision below, never one
         # qwen-agent implies for itself. An implied --probe would sandbox the unit's -C
         # folder (its own empty agents/<name>/ directory, not a project), and a sandbox

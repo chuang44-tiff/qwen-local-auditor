@@ -122,7 +122,8 @@ def test_unit_timeout_overrides_swarm_timeout(tmp_path, fake):
 def test_deep_review_unit_halves_its_timeout(tmp_path):
     # --review-round is TWO qwen-agent calls and qwen-agent gives each the full
     # --timeout it is handed, so a deep unit would get twice a unit's budget.
-    # _argv halves it: rounded down, never below 1s; only the first call -- a
+    # _argv halves it, rounded down, while the half stays at 300 s or more; only the
+    # first call -- a
     # repair resume carries no second review, and a non-deep unit keeps 600.
     s = swarm(tmp_path)
     d = unit(tmp_path, "a")
@@ -133,8 +134,13 @@ def test_deep_review_unit_halves_its_timeout(tmp_path):
     plain = s._argv(unit(tmp_path, "b"), tmp_path / "p.md", 600)
     assert plain[plain.index("--timeout") + 1] == "600"     # without deep, untouched
     assert "--review-round" not in plain
-    odd = s._argv(d, tmp_path / "p.md", 301)
-    assert odd[odd.index("--timeout") + 1] == "150"          # down, not up
+    odd = s._argv(d, tmp_path / "p.md", 1201)
+    assert odd[odd.index("--timeout") + 1] == "600"          # down, not up
+    # never below the 300 s floor a unit is given, nor above what the unit was given
+    floor = s._argv(d, tmp_path / "p.md", 301)
+    assert floor[floor.index("--timeout") + 1] == "300"
+    small = s._argv(d, tmp_path / "p.md", 120)
+    assert small[small.index("--timeout") + 1] == "120"
     one = s._argv(d, tmp_path / "p.md", 1)
     assert one[one.index("--timeout") + 1] == "1"            # never below 1s
     repair = s._argv(d, tmp_path / "p.md", 600, resume="s1")

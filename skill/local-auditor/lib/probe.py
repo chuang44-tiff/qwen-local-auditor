@@ -37,10 +37,12 @@ faked into covering: the `.base` content names a commit that exists IN that sand
 sandbox's parent directory is named `sandboxes`, and realpath(DIR) is the sandbox top or
 inside it (compared component-wise, so sb2 is never read as inside sb) -- so a stray
 `<repo>.base` beside the user's own checkout never earns the --probe-here fence (a full
-shell there). Every git probe.py runs strips GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR,
-GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY and GIT_ALTERNATE_OBJECT_DIRECTORIES from the
-environment, so an inherited GIT_* cannot steer the gate -- or the session's Bash -- to
-or off a sandbox. Every line printed to stdout goes out as UTF-8 bytes through
+shell there). The git calls this module makes itself (the top-level lookup and the
+.base check) strip GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE,
+GIT_OBJECT_DIRECTORY and GIT_ALTERNATE_OBJECT_DIRECTORIES from the environment, so an
+inherited GIT_* cannot steer the gate to or off a sandbox. The clone in make() runs
+through sandbox.create, which inherits the environment: its callers unset those
+variables first. Every line printed to stdout goes out as UTF-8 bytes through
 sys.stdout.buffer, on every platform: qwen-agent reads them in bash, and a console
 codec that cannot encode the name -- cp1252 on a piped Windows stdout -- must not
 raise on the last print and leak
@@ -195,18 +197,23 @@ def make(source, cwd, run):
 
 
 def _purge(run):
-    """The deletion half of remove(): create()'s marker, the sandbox through
-    sandbox.cleanup (never following a link an agent left in its place), then the
-    emptied folders. A folder holding anything else is left in place."""
+    """The deletion half of remove(): the sandbox through sandbox.cleanup (never
+    following a link an agent left in its place), the emptied folders, and create()'s
+    marker last -- only once the sandbox is gone, so a folder whose deletion failed
+    can still be removed by a later remove(). A folder holding anything else is left
+    in place."""
     run = pathlib.Path(run)
-    try:
-        (run / RUN_MARKER).unlink()
-    except OSError:
-        pass
     sandbox.cleanup(run, None)
-    for d in (run / "sandboxes" / sandbox.TEMPLATE, run / "sandboxes", run):
+    for d in (run / "sandboxes" / sandbox.TEMPLATE, run / "sandboxes"):
         try:
             d.rmdir()
+        except OSError:
+            pass
+    if os.path.lexists(str(run / "sandboxes")):
+        return
+    for step in ((run / RUN_MARKER).unlink, run.rmdir):
+        try:
+            step()
         except OSError:
             pass
 
@@ -296,16 +303,22 @@ def check(dir_):
     return top
 
 
+def _is_run_folder(text):
+    return bool(text) and pathlib.Path(text).is_dir() and _has_run_marker(text)
+
+
 def remove(run):
-    """Remove a probe run folder made by create(); True when it is gone, False when
-    nothing was touched. A folder this module did not create is never touched: `run`
-    must be a non-empty path to an existing directory carrying create()'s run marker.
-    A folder holding anything else (after the sandbox is gone) is left in place."""
+    """Remove a probe run folder made by create(); True when its sandbox is gone, False
+    when nothing was touched or the sandbox could not be deleted (the deletions below
+    swallow their own errors, so what is still on disk is the answer). A folder this
+    module did not create is never touched: `run` must be a non-empty path to an
+    existing directory carrying create()'s run marker. A folder holding anything else
+    (after the sandbox is gone) is left in place."""
     text = str(run)
-    if not text or not pathlib.Path(text).is_dir() or not _has_run_marker(text):
+    if not _is_run_folder(text):
         return False
     _purge(text)
-    return True
+    return not os.path.lexists(os.path.join(text, "sandboxes"))
 
 
 def _out(text):
@@ -356,10 +369,14 @@ def main(argv=None):
             write_patch(o.sandbox, o.out)
         elif o.cmd == "check":
             _out("%s\n" % check(o.dir))
-        elif not remove(o.run):
+        elif not _is_run_folder(str(o.run)):
             print("%s is not a probe run folder made by create: removing nothing" % o.run,
                   file=sys.stderr)
             return EXIT_USAGE
+        elif not remove(o.run):
+            print("the sandbox in %s could not be removed completely" % o.run,
+                  file=sys.stderr)
+            return EXIT_FAIL
     except Refused as e:
         print(str(e), file=sys.stderr)
         return EXIT_USAGE

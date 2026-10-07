@@ -120,18 +120,24 @@ built-in defaults.
 | `QWEN_AUTOCOMPACT` | 3/4 of the window | compact-and-continue point, passed as `claude --autocompact`: `auto`, or 100000-1000000 and below the window; keeps long runs off the server's hard limit (a 400 that kills the run). `--no-autocompact` omits the flag |
 | `QWEN_EFFORT` | `medium` | passed to `claude --effort` (`-e`); `default` omits the flag. The level is also set as `CLAUDE_CODE_EFFORT_LEVEL` in the child, so Claude Code's internal calls use it too |
 | `QWEN_EFFORT_ALLOWED` | *(any)* | e.g. `low medium xhigh` when a chat template rejects other levels; a level outside the list is refused before any model call (exit 2) |
-| `QWEN_TIMEOUT` | `1800` | wall-clock seconds per run (`--timeout`); `0` is refused, `--no-timeout` really removes the limit |
+| `QWEN_TIMEOUT` | `3600` under depth, `1800` with `--shallow` | wall-clock seconds per call (`--timeout`); `0` is refused, `--no-timeout` really removes the limit |
+| `QWEN_DEPTH` | `deep` | `deep`: every direct run gets the depth switches that fit it (see [`qwen-agent.md`](qwen-agent.md#depth-the-default)); `shallow` = `--shallow`, one read-only call. Any other value: exit 2 |
 | `QWEN_TIMEOUT_BIN` | GNU `timeout`, else `gtimeout`, else the watchdog | pins a timeout binary; `none` forces the built-in watchdog |
 | `QWEN_PREFLIGHT` | `1` | `0` skips the `/v1/models` check (`QWEN_MODEL` is then required) |
 | `QWEN_AUTO_MODEL` | `0` | `1` = `--auto-model`: if the configured model is not served but exactly one other is, use that |
 | `QWEN_WEB` | `0` | `1` = `--web`: adds `WebFetch` (never `WebSearch`) |
-| `QWEN_SUBAGENTS` | `0` | `1` = `--subagents`: adds the `Task` tool |
+| `QWEN_SUBAGENTS` | `0` | `1` = `--subagents`: adds the `Task` tool. Depth turns `Task` on by itself (with `--subagents-push`); set it for a `--shallow` run |
 | `QWEN_SETTING_SOURCES` | *(claude's)* | passed to `claude --setting-sources`, e.g. `project,local`, so personal `~/.claude` settings cannot change results. Not passed under `--test` (`--restricted` already ignores settings files) |
 | `QWEN_CUSTOM_HEADERS` | | passed to claude as `ANTHROPIC_CUSTOM_HEADERS` (gateways) |
 | `QWEN_PYTHON` | first of `python3`, `python` that runs | Python 3.8+ for result parsing, probed by execution |
 | `QWEN_CLAUDE_BIN` | `claude` | the Claude Code executable |
 | `QWEN_ROLE_DIR` | | your own roles as `NAME.md` or `NAME.txt`, outside the clone |
-| `QWEN_OUTDIR` | the current directory | where `-w` puts generated output files |
+| `QWEN_OUTDIR` | the current directory | where `-w` puts generated output files. A `--probe --write` patch with no `-o` goes here only when you set it; unset, it goes to the probe directory |
+| `QWEN_PROBE_DIR` | `$XDG_CACHE_HOME/qwen-agent/probes` (else `~/.cache/qwen-agent/probes`) | where `--probe` sandboxes, and the default patch, live; relative to the caller's directory; may not be inside the tree being copied |
+| `QWEN_BROWSER_DIR` | `$XDG_CACHE_HOME/qwen-agent/browser` (else `~/.cache/qwen-agent/browser`) | where `--browser` run folders (screenshots, page snapshots, the MCP config) go; relative to the caller's directory |
+| `QWEN_PLAYWRIGHT_MCP` | `npx -y --prefer-offline @playwright/mcp@0.0.83` (`cmd /c ...` on Git Bash) | the browser MCP server command `--browser` writes into its config; split on whitespace, no globbing |
+| `QWEN_PLAYWRIGHT_NODE_PATH` | the npx cache | a `node_modules` directory holding `playwright`, for `--record` and `--replay` |
+| `QWEN_REPLAY_BASE` | the recorded suite's base URL | the URL a replayed script opens; set by `--replay --base` |
 | `QWEN_CONFIG` | `$XDG_CONFIG_HOME/qwen-agent/config` | the config file itself |
 
 The child process never inherits the parent Claude Code session's control channel, its

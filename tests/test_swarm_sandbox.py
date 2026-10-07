@@ -559,7 +559,7 @@ def test_without_include_dirty_nothing_changes(tmp_path):
 
 
 def test_include_dirty_file_turned_directory_and_odd_names(tmp_path):
-    # Review focus: a tracked file the user replaced by a directory, and (POSIX) an
+    # A tracked file the user replaced by a directory, and (POSIX) an
     # untracked name that is not valid UTF-8.
     target = git_repo(tmp_path / "tgt", {"thing": "was a file\n", "keep.txt": "k\n"})
     (target / "thing").unlink()

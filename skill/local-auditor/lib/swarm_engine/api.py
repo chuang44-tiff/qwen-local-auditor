@@ -134,14 +134,26 @@ class Workflow:
         per_role = self.cfg.get("role_effort") or {}
         return per_role.get(role) or self.cfg.get("effort") or self._role(role).effort or None
 
+    def _role_list(self, key):
+        """A stored --deep/--shallow role list. Only a list counts: a hand-edited string
+        in config.json must not match role names as substrings."""
+        names = self.cfg.get(key)
+        return names if isinstance(names, list) else ()
+
     def _deep(self, role):
         """--shallow ROLE forces the opt-out, --deep ROLE (all switches) forces all, and
-        otherwise the manifest's role "deep" (default: all); a tuple of names."""
-        if role in (self.cfg.get("shallow") or ()):
+        otherwise the manifest's role "deep" (default: all); a tuple of names. A
+        fence-none role has no tools to delegate with, so it gets the subagent
+        switches only when its own "deep" list names them."""
+        if role in self._role_list("shallow"):
             return ()
-        if role in (self.cfg.get("deep") or ()):
-            return manifest.DEEP_SWITCHES
-        return self._role(role).deep
+        r = self._role(role)
+        switches = manifest.DEEP_SWITCHES if role in self._role_list("deep") else r.deep
+        if r.fence == "none":
+            listed = r.deep if r.deep_listed else ()
+            if not any(s.startswith("subagents") for s in listed):
+                switches = tuple(s for s in switches if not s.startswith("subagents"))
+        return switches
 
     def _timeout(self, role, items):
         per_item = self.cfg["timeout_per_item"]

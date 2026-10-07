@@ -457,9 +457,9 @@ def run(o):
     _run pops the GIT_* steering variables and sets GIT_OPTIONAL_LOCKS under
     --probe; os.environ must come back exactly as it was found -- set the ones
     that were there, delete the ones that were not. A supervisor used
-    in-process (the test suite) that left the optional locks off would blind
-    every later git call in the process, and that masking silenced the
-    regression guard of the index-write fix. The __main__ interrupt path
+    in-process (the test suite) that left the optional locks off would change
+    every later git call in the process, and could hide a git call that writes
+    the user's index. The __main__ interrupt path
     os._exits past this finally; a hard exit leaves whatever the run set, but
     that process' environment dies with it.
     """
@@ -481,7 +481,7 @@ def _run(o):
         # probe.make's clone, the sandbox rounds, the checks alike -- at a repository
         # other than the one the arguments name: with GIT_INDEX_FILE=<the user's
         # .git/index> (a pre-commit hook keeps it in the environment), the sandbox's
-        # writes rewrote the user's index. qwen-agent.sh unsets the same six before
+        # writes would land in the user's index. qwen-agent.sh unsets the same six before
         # exec'ing this; this is the belt for that braces -- a supervisor started
         # directly gets the same hygiene, before the first git call.
         for _steer in probe.GIT_ENV_VARS:

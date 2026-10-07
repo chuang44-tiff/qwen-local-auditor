@@ -1115,7 +1115,7 @@ def test_probe_ignores_inherited_git_index_file(env):
     # An inherited GIT_* aims every git call this process and every child makes --
     # probe.make's clone and the dirty-state copy included -- at another index:
     # with GIT_INDEX_FILE=<the user's index> (as a pre-commit hook leaves it) the
-    # sandbox's writes rewrote the user's .git/index while the run reported done.
+    # sandbox's writes would land in the user's .git/index.
     # The run must pop the steering variables before its first git call, and the
     # user's index must survive byte-identical and usable.
     repo, task, tmp = env

@@ -85,15 +85,26 @@ model to decide something when it should have asked it to report something.
 What each command can reach, and which flag opens what. The sections that follow give
 the measured detail.
 
-- **A bare `qwen-agent` run can only read.** The toolset is `Read,Glob,Grep` and
-  configured MCP servers are dropped (`--strict-mcp-config`): a schema-level restriction,
-  the model has no Bash and no Write tool at all. Editing needs `--write` (or the
-  `mechanic` or `coder` role); Bash needs `--test` (which grants only `qwen-test`),
-  `--all-tools` or an explicit `--toolset`, and each prints a warning.
-- **Subagents are opt-in** (`--subagents`, `QWEN_SUBAGENTS=1`): the `Task` tool, same
-  model, same tool limits, one more concurrent request against your server.
-- **No run reaches the web unless you ask** (`--web`, `QWEN_WEB=1`), and that adds only
-  `WebFetch`, never `WebSearch`. Keep it off for test-driven work.
+- **A bare `qwen-agent` run never writes your files, but under default depth it has a
+  shell.** Inside a git repo, depth (the default) runs the session in a throwaway
+  sandbox copy of your tree with Bash, Edit, Write and `Task` subagents, then resumes it
+  once for a review call. The copy is not a jail: the shell runs as you, with your
+  network and every path you can reach. Outside a git repo, or where the sandbox cannot
+  be built, the run stays `Read,Glob,Grep` (plus `Task` and the review call).
+- **`--shallow` (or `QWEN_DEPTH=shallow`) or `--read-only` keeps the strict fence.** The
+  toolset is `Read,Glob,Grep` and configured MCP servers are dropped
+  (`--strict-mcp-config`): a schema-level restriction, the model has no Bash and no
+  Write tool at all. Editing then needs `--write` (or the `mechanic` or `coder` role);
+  Bash needs `--test` (which grants only `qwen-test`), `--all-tools`, `--probe` or an
+  explicit `--toolset`, and each prints a warning.
+- **Subagents come with depth** (`Task`, same model, same tool limits, one more
+  concurrent request against your server); under `--shallow` they are opt-in
+  (`--subagents`, `QWEN_SUBAGENTS=1`).
+- **Web tools are opt-in** (`--web`, `QWEN_WEB=1`, which adds only `WebFetch`, never
+  `WebSearch`; or `--browser`). Keep them off for test-driven work. The sandbox shell of
+  a depth run is not a web tool, but it can reach the network like any shell you run.
+- **`--record` and `--replay` run model-written JavaScript** with `node`, as you,
+  unsandboxed and with your network. Replay only folders you recorded or have read.
 - **`--test` limits the shell, not what code runs**: the tests `qwen-test` runs, including
   any the model wrote or edited, execute as you. Every `--test` run passes
   `claude --restricted`, so your own Claude settings cannot widen the fence.
@@ -191,13 +202,15 @@ working directory (and the test worktree): the same reach as `Read`/`Grep`/`Glob
 ever runs". The model is still told that only `qwen-test` runs, which keeps it from
 wasting turns on commands that are denied.
 
-## Subagents are opt-in
+## Subagents come with depth
 
-`--subagents` (`QWEN_SUBAGENTS=1`) adds the `Task` tool and a short note telling the model
-to delegate broad reading and searching and keep its own context for edits and tests. A
-subagent runs on the same local model, inherits the run's tool restrictions and grants
-(and `--restricted` under `--test`), and adds no capability. It is one more concurrent
-request against the server: off by default, and best left off on a small GPU. The
+Under the default depth, `Task` is part of the run and the model is pushed to hand broad
+reading and searching to a subagent. With `--shallow` they are opt-in: `--subagents`
+(`QWEN_SUBAGENTS=1`) adds the `Task` tool and a short note telling the model to delegate
+and keep its own context for edits and tests. A subagent runs on the same local model,
+inherits the run's tool restrictions and grants (and `--restricted` under `--test`), and
+adds no capability. It is one more concurrent request against the server; on a small GPU,
+`--shallow` without `--subagents` keeps it to one. The
 until-done report's `## Tool use` table shows whether it was used (when the session
 transcript is readable; otherwise it says "(no transcript found)"); Claude Code 2.1.288
 records the tool as `Agent` (`Task` is its older name, still accepted in `--tools`).

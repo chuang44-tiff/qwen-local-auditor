@@ -43,17 +43,22 @@ Code's own system prompt, never replacing it (replacing it breaks tool use).
 
 ## Tool policy: what a run may do
 
-The default is read-only: every widening that can touch YOUR tree is a flag. A bare
-run under the default depth does get Bash, Edit and Write (see
-[`Depth`](#depth-the-default)), but only inside a throwaway sandbox copy of the
-project — your tree is only ever read there. Any run that can modify files or run
+Your files are never written by a bare run: every widening that can touch YOUR tree
+is a flag. Inside a git repo, a bare run under the default depth gets Bash, Edit,
+Write and Task subagents (see [`Depth`](#depth-the-default)) in a throwaway sandbox
+copy of the project. The harness only reads your tree, but the copy is not a jail:
+the shell runs as you, with your network, and can reach any path you can by its
+absolute name. `--shallow` (or `QWEN_DEPTH=shallow`) or `--read-only` keeps the plain
+`Read,Glob,Grep` fence; outside a git repo there is no sandbox and a bare run stays
+read-only, with Task subagents and a review call. Any run that can modify files or run
 a shell on your tree (`--write`, the `coder` and `mechanic` roles, `--all-tools`, a `--toolset` naming Edit/Write/Bash, a
 read-only `--test` run) prints a warning on stderr, and so does `--web` or `--browser`
 combined with `--test`.
 
 | you pass | the run gets |
 |---|---|
-| nothing, or `--read-only` | toolset `Read,Glob,Grep` and `--strict-mcp-config`: no Bash, no Write, configured MCP servers dropped. A schema-level restriction, not a permission prompt |
+| `--read-only`, or nothing under `--shallow` | toolset `Read,Glob,Grep` and `--strict-mcp-config`: no Bash, no Write, configured MCP servers dropped. A schema-level restriction, not a permission prompt |
+| nothing (default depth) | in a git repo: the `--probe` sandbox below (Bash, Edit, Write in a copy, `dontAsk`, `--restricted`) plus Task and a review call. Elsewhere, or where the sandbox cannot be built: `Read,Glob,Grep` plus Task and a review call |
 | `--write` | toolset `Read,Edit,Write,Glob,Grep`, `--permission-mode acceptEdits` unless you set one. Still no Bash. Role `mechanic` implies it |
 | `--test` | one Bash command, `qwen-test`; `claude --restricted` and `--permission-mode dontAsk`. Not with `-w`, `--all-tools`, `--toolset`, `--read-only`, `-t/--tools` or any `--permission-mode`. See [`coding.md`](coding.md) |
 | `--test-repo DIR` | the repo whose tests run (default: the `-C` directory) |
@@ -74,11 +79,13 @@ What the fence does and does not guarantee, measured, is in [`limits.md`](limits
 
 Four switches make a session go deeper, and they are the DEFAULT: every direct run gets
 the ones that FIT it, silently dropping the rest. `--shallow` (or `QWEN_DEPTH=shallow`,
-environment or config) is the opt-out — the quick-question mode. What a run gets
+environment or config) is the opt-out — one call, read-only, the quick-question mode.
+What a run gets
 unasked:
 
 - `--role-variant deep` — only a role that HAS a deep variant: `auditor` and `coder`.
-- `--review-round` and `--subagents-push` — every session; not `--interactive`, not
+- `--review-round` and `--subagents-push` (or the nudge, when `--subagents-nudge`
+  is typed) — every session; not `--interactive`, not
   `--resume`, not a mode that never starts one (`--preflight-only`), and not when
   `--toolset none` was typed. `--dry-run` starts no session and makes no second call,
   but it shows both: the delegation push is part of the printed argv, and the review
@@ -91,9 +98,12 @@ unasked:
   actually be built here).
 
 An implied part never causes a refusal: where a typed switch refuses, its implied
-counterpart steps aside — including refusals only the sandbox build itself can know
-(an ignored `-C` directory, a `--test-repo` that does not contain `-C`): one note on
-stderr, and the run goes on unsandboxed. `--deep`'s own `--probe` is this implied one
+counterpart steps aside — including what only the sandbox build itself can know (an
+ignored `-C` directory, a `--test-repo` that does not contain `-C`, a probe directory
+that cannot be created, a failed clone, a symlink Windows will not make) and a Claude
+Code without `--restricted`: one note on stderr, and the run goes on unsandboxed and
+read-only, as under `--shallow`. An untracked nested git repository is not copied into
+the sandbox. `--deep`'s own `--probe` is this implied one
 (only a typed `--probe` is typed) and steps aside the same way — except where the run
 WRITES: there the sandbox is the promise that the edits come back as a patch and your
 tree stays untouched, so a build that cannot be made ends the run. Typed switches keep
@@ -110,11 +120,11 @@ unless one was typed; see [`coding.md`](coding.md).
 |---|---|
 | `--shallow` (`QWEN_DEPTH=shallow`) | no implied depth: only the switches you type. With `--deep`: exit 2 |
 | `--role-variant deep` | the deep variant of `-r auditor` or `-r coder`, implied for exactly those two roles. auditor-deep maps what the code must guarantee, lists every public entry point and makes each carry a failure mode (or a one-line reason it cannot fail visibly), tries to trigger each failure mode (with `--probe`: by running probes or tests), records evidence for every verdict, defaults to FAIL when evidence is missing, finishes by attempting every failure mode it had not, and ends with a `COVERAGE` section (entry point by entry point, FAIL / PASS / UNVERIFIED per failure mode) plus unverified suspicions listed separately. coder-deep is the coder text plus an edge-case pass after the checks, ending with an `EDGE CASES` section and a finish check that names the probe and result per edge case or parks it under `NOT CHECKED`. Other roles, `--role-file` and other variant names: exit 2. `-r` and `--list-roles` are unchanged |
-| `--subagents-nudge` | `--subagents` plus a section on when to delegate (independent probes, big or many files, long logs), what to hand a subagent (a self-contained question and the paths) and to verify what it reports. Typed; depth now implies `--subagents-push` instead, but `qwen-sweep` batches still nudge |
+| `--subagents-nudge` | `--subagents` plus a section on when to delegate (independent probes, big or many files, long logs), what to hand a subagent (a self-contained question and the paths) and to verify what it reports. Depth implies `--subagents-push` instead; a typed nudge is kept (the push is then not added). `qwen-sweep` batches and `qwen-swarm` roles with tools nudge |
 | `--subagents-push` | `--subagents` plus a section that makes delegation part of the task, not optional: split the work into independent areas, keep one, hand every other area to a subagent one at a time with a self-contained brief (exact paths, questions to answer, path:line evidence and the commands run), verify each subagent's key claims, and close with a `DELEGATION` section. It REPLACES the nudge text when both apply — push wins. Implied on every session by `--deep` and by the default depth; with `--review-round` the review prompt additionally hands the re-verification of the three most important claims to a subagent |
 | `--review-round` | implied on every session. After a clean end, the session is resumed once (`--resume <session id>`) with a fixed prompt: try to break what you just did or reported, check each claim, revise, and give the complete answer again in the same format. The prompt also asks for a `REVIEW` section — each earlier claim or change re-checked, the check run, and what changed (kept, corrected, dropped) — with particular attention to what the first pass never covered; with `--subagents-push` it adds handing the re-verification of the three most important claims to a subagent and comparing. The revised answer is the result. A failed review call leaves the first answer and exit code in place, with a `WARNING` on stderr — and so does a review answer shorter than 300 characters when the first answer had 1000 or more (a stub is the auto-compact failure, not a review). Each of the two calls gets the full `--timeout` |
-| `--probe` | implied for a read-only run (and it steps aside, unheard, wherever a typed one would refuse or the sandbox cannot be built). The session runs in a throwaway sandbox of the project: the git work tree holding `-C` (or `--test-repo DIR`), with your uncommitted and untracked files, never ignored ones. It gets Bash, Edit and Write — even a read-only role such as `auditor`, since the sandbox is throwaway and no patch is reported for a read-only role, so a scratch file is a tool call, not a denial —, `--permission-mode dontAsk` and `claude --restricted`; denials are reported as usual. Nothing in your work tree, index or refs is ever written; because the sandbox shares your repository's object files, git may refresh their mtimes (no object's content changes). A write run (`--write`, `-r coder`, `-r mechanic`) reports its edits as a patch and applies nothing: `FILE.patch` next to `-o FILE` (always written, empty when nothing changed), else a new `qwen-agent-XXXXXXXX.patch` — in `QWEN_OUTDIR` when you set it, otherwise in the probe directory, never in the tree being probed (and only when something changed); the path and the shell-quoted, paste-ready `git -C <tree> apply` line are printed on stderr. The sandbox is removed at exit, also on a timeout or a signal |
-| `--keep-sandbox` | with `--probe`: keep the sandbox and print its path (`sandbox kept: PATH`) |
+| `--probe` | implied for a read-only run (and it steps aside, with one note on stderr, wherever a typed one would refuse or the sandbox cannot be built). The session runs in a throwaway sandbox of the project: the git work tree holding `-C` (or `--test-repo DIR`), with your uncommitted and untracked files, never ignored ones. It gets Bash, Edit and Write — even a read-only role such as `auditor`, since the sandbox is throwaway and no patch is reported for a read-only role, so a scratch file is a tool call, not a denial —, `--permission-mode dontAsk` and `claude --restricted`; denials are reported as usual. Nothing in your work tree, index or refs is ever written; because the sandbox shares your repository's object files, git may refresh their mtimes (no object's content changes). A write run (`--write`, `-r coder`, `-r mechanic`) reports its edits as a patch and applies nothing: `FILE.patch` next to `-o FILE` (always written, empty when nothing changed), else a new `qwen-agent-XXXXXXXX.patch` — in `QWEN_OUTDIR` when you set it, otherwise in the probe directory, never in the tree being probed (and only when something changed); the path and the shell-quoted, paste-ready `git -C <tree> apply` line are printed on stderr. The sandbox is removed at exit, also on a timeout or a signal |
+| `--keep-sandbox` | with a typed `--probe` (`--probe --keep-sandbox`): keep the sandbox and print its path (`sandbox kept: PATH`). The sandbox depth makes on its own is always removed; one that cannot be removed is reported as `sandbox not removed: PATH` |
 | `--probe-here` | the `-C` directory is checked to be inside a sandbox kept by `--probe --keep-sandbox` (a plain checkout — yours above all — is refused with exit 2). There: the probe fence, nothing created or removed, no patch; `--test-repo` is refused, and `--test` runs the sandbox's own tests. This is how a probe session is resumed: `qwen-agent --probe-here -C <kept path> --resume ID "..."` (a fresh `--probe` refuses `--resume`, because Claude Code finds a session by its directory) |
 | `--deep` | all four TYPED at once: `--probe --role-variant deep --review-round --subagents-push`, with the typed refusals intact (the implied default drops what does not fit instead of refusing; deep's own `--probe` still steps aside where the sandbox cannot be built, as the implied one — a writing run refuses instead); it takes no value, and combining it with another `--role-variant` is a usage error; needs `-r auditor` or `-r coder` (or `--until-done`); with `--probe-here` it resumes in the kept sandbox instead of making a new one; with `--shallow`: exit 2 |
 
@@ -122,8 +132,8 @@ unless one was typed; see [`coding.md`](coding.md).
 `--read-only`, `-t/--tools`, `--permission-mode` and `-D/--add-dir` (exit 2); `--interactive`
 refuses every switch above. Sandboxes — and the default patch of a `--probe --write` run
 that gave no `-o` — live under `QWEN_PROBE_DIR` (default
-`$XDG_CACHE_HOME/qwen-agent/probes`, else `~/.cache/qwen-agent/probes`), which may not be
-inside the tree being copied. Every run that USES a sandbox (a typed `--probe`,
+`$XDG_CACHE_HOME/qwen-agent/probes`, else `~/.cache/qwen-agent/probes`; a relative value is
+relative to the caller's directory), which may not be inside the tree being copied. Every run that USES a sandbox (a typed `--probe`,
 `--probe-here` or `--deep`, or an implied `--probe` that was not stepped aside)
 clears `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
 `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` from the
@@ -196,7 +206,9 @@ out of the model's sight entirely:
 **Black-box testing:** a tester tests behaviour from the outside, so the two tools that
 reach the application's source — `browser_evaluate` and `browser_network_request`'s
 response bodies — are hidden by default, and `--browser-eval` is the explicit opt-in into
-both.
+both. That is the only part enforced: the browser can still navigate to a script URL
+such as `/app.js` and read it as a page, and the request list names the script URLs.
+The tester's role text forbids verdicts from source; that is an instruction, not a fence.
 
 | switch | effect |
 |---|---|
@@ -345,7 +357,14 @@ and the two replay commands, below.
 ### Record and replay (`--record` / `--replay`)
 
 A scenario suite costs a model run every time it is asked, and its answers vary.
-`--record` turns one scored run into a replay that costs neither:
+`--record` turns one scored run into a replay that costs neither.
+
+**The scripts are code the model wrote, and they run on your machine.** `--record`
+runs every script the session wrote with `node`, as you, unsandboxed and with your
+network, before deciding which to keep (the folder is named on stderr first);
+`--replay DIR` runs DIR's scripts the same way. The manifest's sha256 only proves the
+bytes are the ones that were recorded, not that they are harmless. Replay only folders
+you recorded or have read, and read the kept scripts before relying on them.
 
 ```bash
 qwen-agent --scenarios cart-suite.md --record ./cart-replay
@@ -386,7 +405,8 @@ asks them — no base override, so a kept script passes because of what it does 
 not because of what it was told.
 
 Later the same verdicts come back with **no model call at all**: no preflight, no
-claude, no browser MCP server, seconds, the same result every time.
+claude, no browser MCP server, seconds — deterministic for the same page state; a
+changed app can change the result.
 
 ```bash
 qwen-agent --replay ./cart-replay
@@ -413,9 +433,14 @@ directory with `NODE_PATH` set to the playwright package's `node_modules`, and
 with `QWEN_REPLAY_BASE` set when a base was given. Its `RESULT` line is the
 verdict — `PASS`, `FAIL` with the expectation that did not hold, or `ERROR` (it
 crashed, printed no `RESULT` line, or ran out its clock) — the table and
-`PASS n / FAIL n / ERROR n` print on **stderr**, and the exit is **0 when every
-scenario PASSED, 9 when any is FAIL or ERROR**: the code `--scenarios` gives,
-because a replay is those verdicts taken again.
+`PASS n / FAIL n / ERROR n` print on **stderr**. The scenarios the recording kept no
+script for are listed as `NOT RECORDED` with their reason (and counted as `NOT
+RECORDED n` when there are any); they are not run and do not change the exit. The exit
+is **0 when every kept script PASSED, 9 when any is FAIL or ERROR, and 9 when the
+folder kept no script at all** (a recording that kept nothing proves nothing): the code
+`--scenarios` gives, because a replay is those verdicts taken again. A manifest entry
+whose file is not a plain name inside the folder is `ERROR` and never runs, and a
+script's `RESULT` line counts only when it names that script's scenario.
 
 A replay asks nothing of a model, so every model-shaped flag is refused with exit
 2 naming the flag — `-r`, `-f`, a prompt argument, `--stdin`, `--scenarios`,
@@ -427,7 +452,9 @@ package is resolved in this order: `QWEN_PLAYWRIGHT_NODE_PATH`, a `node_modules`
 **directory** holding it; else a `node_modules/playwright` in the npx cache under
 `$(npm config get cache)/_npx/*/node_modules`. Neither: exit 2 with the fix in the
 message (`npm i -g playwright && npx playwright install chromium`), never scripts
-silently skipped. Nothing reaches the network but the app under test.
+silently skipped. On Windows the runner links `node_modules` beside each script with a
+symbolic link, else a directory junction; when neither can be made the replay stops
+with the reason (enable Developer Mode) instead of reporting every scenario as ERROR.
 
 The runner is `lib/scenarios.py`, runnable on its own:
 
@@ -491,7 +518,7 @@ blocks has been seen at both rc=0 and rc=8 (see [`limits.md`](limits.md)).
 | 6 | ran clean but returned no usable text |
 | 7 | a tool call was blocked by the permission system (see `--warn-denials`) |
 | 8 | harness failure (claude or python missing, or unparseable output) |
-| 9 | `--scenarios`: at least one scripted scenario ended FAIL or BLOCKED; `--replay`: at least one recorded script ended FAIL or ERROR |
+| 9 | `--scenarios`: at least one scripted scenario ended FAIL or BLOCKED; `--replay`: at least one recorded script ended FAIL or ERROR, or the folder kept no script |
 | 11-14 | `--until-done` outcomes; see [`coding.md`](coding.md) |
 
 ## Examples

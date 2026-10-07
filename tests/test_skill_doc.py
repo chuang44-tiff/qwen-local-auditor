@@ -335,3 +335,45 @@ def test_coding_and_swarm_references_cover_the_depth_switches():
     t = SW_REF.read_text(encoding="utf-8")
     for needle in ("`roles.R.deep`", '"review_round"', '"subagents"', "--deep ROLE[,ROLE...]|all"):
         assert needle in t, needle
+
+
+def _agent_help():
+    import os
+    import shutil
+    import subprocess
+    agent = ROOT / "skill" / "local-auditor" / "qwen-agent.sh"
+    bash = os.environ.get("TEST_BASH") or shutil.which("bash")
+    return subprocess.run([bash, str(agent).replace("\\", "/"), "--help"],
+                          capture_output=True, encoding="utf-8").stdout
+
+
+def _flat(text):
+    return " ".join(text.split())
+
+
+def test_safety_docs_describe_the_default_depth():
+    # Wherever a bare run is described, the sandbox shell of default depth and the way
+    # back to the strict fence are named with it.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    limits = (REF / "limits.md").read_text(encoding="utf-8")
+    help_text = _agent_help()
+    safety = help_text[help_text.index("SAFETY"):]
+    for name, text in (("README", readme), ("limits.md", limits), ("--help SAFETY", safety)):
+        flat = _flat(text)
+        assert "sandbox" in flat, name
+        assert "--shallow" in flat, name
+        assert "not a jail" in flat or "not confined" in flat, name
+    assert "Depth is the default" in readme and "3600" in readme
+    assert "the model has no Bash" not in _flat(safety).split("--shallow")[0]
+    assert "can only read" not in _flat(readme)
+
+
+def test_record_and_replay_disclose_that_scripts_run_as_you():
+    help_text = _flat(_agent_help())
+    ref = _flat((REF / "qwen-agent.md").read_text(encoding="utf-8"))
+    skill = _flat(_skill())
+    for name, text in (("--help", help_text), ("qwen-agent.md", ref), ("SKILL.md", skill)):
+        assert "as you" in text or "as the user" in text, name
+        assert "unsandboxed" in text, name
+        assert "same result every time" not in text, name
+    assert "Nothing reaches the network" not in ref

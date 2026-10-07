@@ -121,7 +121,7 @@ WRITE_MODE=0       # --write     : allow Edit/Write
 ALL_TOOLS=0         # --all-tools : no restriction at all (dangerous)
 WEB_MODE=0          # --web       : web access is opt-in (adds WebFetch only, never WebSearch)
 case "${QWEN_WEB:-}" in 1) WEB_MODE=1 ;; esac
-SUBAGENTS=0         # --subagents : opt-in Task tool (each subagent is one more concurrent request)
+SUBAGENTS=0         # --subagents : Task tool (default depth sets it) (each subagent is one more concurrent request)
 case "${QWEN_SUBAGENTS:-}" in 1) SUBAGENTS=1 ;; esac
 BROWSER=0           # --browser : a real browser through the Playwright MCP server (role tester implies it)
 HEADED=0            # --headed      : --browser with a visible window (implies --browser)
@@ -257,7 +257,7 @@ CONFIG FILE
   probed by EXECUTION, not by PATH presence -- on Windows a bare 'python3' is
   usually a Store stub that is on PATH but cannot run anything.
 
-EXECUTION  (the DEFAULT is read-only — mutation must be asked for)
+EXECUTION  (the DEFAULT never writes your tree — mutation must be asked for; see SAFETY)
       --interactive    Open an INTERACTIVE Claude Code session (no -p) on this
                        server for the person at the keyboard, in the -C directory
                        (default: the current one). Preflight, model, context and
@@ -312,7 +312,7 @@ EXECUTION  (the DEFAULT is read-only — mutation must be asked for)
                        an MCP server. With --test a warning is printed: tests
                        and checks can be gamed by fetching upstream answers.
                        (env QWEN_WEB=1)
-      --subagents      Subagents are opt-in: adds the Task tool, so the model can
+      --subagents      Adds the Task tool (already on under default depth), so the model can
                        hand broad reading and searching to a subagent and keep
                        its own context small. A subagent runs on the same model
                        with the same tool limits, and is one more concurrent
@@ -387,7 +387,7 @@ DEPTH  (the default, not the extra: unless --shallow is given every direct run g
       had. A depth run also defaults --timeout to 3600 (1800 with --shallow).
       QWEN_DEPTH=shallow is the environment form of --shallow.)
       --shallow        No implied depth: only the switches you type. This is the
-                       quick-question mode, the old default. With --deep: exit 2
+                       quick-question mode: one read-only call. With --deep: exit 2
                        (depth is already the default -- type what you want, or
                        nothing). --shallow plus a typed part = only that part.
       --role-variant deep  The deep variant of -r auditor or -r coder: the auditor
@@ -528,16 +528,23 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
                        table 'recorded: N of M scenarios (rejected: ids)' and the
                        manifest path print on stderr. Needs node and the playwright
                        package, like --replay. Replay the result: --replay DIR.
+                       The scripts are model-written JavaScript: --record runs
+                       them with node, as you, unsandboxed and with your network,
+                       before deciding which to keep. Read DIR before relying on it.
       --replay DIR     Run DIR's recorded scripts with NO model call at all -- no
-                       preflight, no claude: seconds, and the same result every time.
+                       preflight, no claude: seconds, and deterministic for the
+                       same page state (a changed app can change the result).
+                       The scripts run with node, as you, unsandboxed and with
+                       your network: replay only folders you recorded or have read.
                        Each script's sha256 is verified against the manifest first (a
                        script that changed since recording is ERROR and never runs),
                        then node runs it (120 s each) and its 'RESULT <id> ...' line
                        is the verdict: PASS, FAIL (with the expectation that did not
                        hold) or ERROR (it crashed, printed no RESULT line, or timed
                        out). The summary table and 'PASS n / FAIL n / ERROR n' print
-                       on stderr; exit 0 when every scenario PASSED, 9 when any is
-                       FAIL or ERROR. Every model-related flag (-r, -f, a prompt,
+                       on stderr, with the scenarios the recording kept no script
+                       for listed as NOT RECORDED; exit 0 when every kept script
+                       PASSED, 9 when any is FAIL or ERROR or none was kept. Every model-related flag (-r, -f, a prompt,
                        --scenarios, --until-done, --interactive, --deep, a model, a
                        timeout) is refused with exit 2 — a replay asks nothing. -b
                        and -q are accepted: -b URL is the base the scripts open.
@@ -611,8 +618,9 @@ EXIT CODES
   $QA_DENIED  a tool call was blocked by the permission system (see --warn-denials)
   $QA_HARNESS  harness failure (claude missing, or unparseable output)
   $QA_SCENARIO_FAIL  --scenarios: at least one scripted scenario ended FAIL or BLOCKED;
-                     --replay: at least one recorded script ended FAIL or ERROR (the
-                     same verdicts taken again exit the same way)
+                     --replay: at least one recorded script ended FAIL or ERROR, or the
+                     folder kept no script at all (the same verdicts taken again exit
+                     the same way)
   11  --until-done stopped at the round limit or a budget; also checks pass but the
       deviation audit was unusable twice -- review the diff manually (partial; report written)
   12  --until-done made no progress (same checks failed two rounds in a row)
@@ -631,18 +639,29 @@ EXAMPLES
   $QA_SELF --replay ./cart-replay       # the same verdicts again, with no model at all
 
 SAFETY
-  A bare run is read-only: --tools 'Read,Glob,Grep' --strict-mcp-config, which
-  is a schema-level restriction (the model has no Bash and no Write tool at
-  all). File mutation requires --write, --all-tools, or an explicit --toolset
-  naming Edit/Write/Bash. --allowed-tools alone never restricts anything.
-  --test adds Bash for qwen-test only; the tests it runs are arbitrary code.
-  No run gets web tools unless you pass --web: web access is opt-in, and --web
-  adds only WebFetch (never WebSearch, which local servers reject anyway).
+  A bare run never writes your files. Under default depth, inside a git repo,
+  it gets a shell (Bash), Edit, Write and Task subagents in a throwaway sandbox
+  copy of the tree (the implied --probe) -- a copy, not a jail: the shell runs
+  as you, with your network. --shallow (or QWEN_DEPTH=shallow) or --read-only
+  keeps the strict fence: --tools 'Read,Glob,Grep' --strict-mcp-config, a
+  schema-level restriction under which the model has no Bash and no Write tool
+  at all. Writing to your tree requires --write, --all-tools, or an explicit
+  --toolset naming Edit/Write/Bash. --allowed-tools alone never restricts
+  anything. --test adds Bash for qwen-test only; the tests it runs are arbitrary
+  code. Web tools are opt-in: --web adds only WebFetch (never WebSearch, which
+  local servers reject anyway), --browser a real browser. --record and --replay
+  run model-written JavaScript with node, as you, unsandboxed.
 EOF
 }
 
 die()  { printf '%s: %s\n' "$QA_SELF" "$*" >&2; }
 note() { [ "$QUIET" -eq 1 ] || printf '%s: %s\n' "$QA_SELF" "$*" >&2; }
+# A fresh private file for one helper's stderr, for the steps that run before the
+# run's own temp directory exists. The caller exits on failure: `x="$(err_file)" || exit`.
+err_file() {
+  mktemp "${TMPDIR:-/tmp}/qwen-agent-err.XXXXXXXX" 2>/dev/null \
+    || { die "cannot create a temporary file in ${TMPDIR:-/tmp}"; return 1; }
+}
 # Git Bash: argument conversion is switched off for the child (see CHILD_ENV), so
 # a path that must reach a native program is converted explicitly. No-op elsewhere.
 native_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
@@ -1037,7 +1056,8 @@ done
 DEPTH_ENV="${QWEN_DEPTH:-deep}"
 case "$DEPTH_ENV" in
   deep|shallow) ;;
-  *) die "QWEN_DEPTH is '$DEPTH_ENV' (expected 'deep' or 'shallow')"; exit $QA_USAGE ;;
+  *) [ -n "$REPLAY" ] && DEPTH_ENV=shallow        # a replay runs no model: depth is moot
+     [ -n "$REPLAY" ] || { die "QWEN_DEPTH is '$DEPTH_ENV' (expected 'deep' or 'shallow')"; exit $QA_USAGE; } ;;
 esac
 if [ "$SHALLOW" -eq 1 ] && [ "$DEEP" -eq 1 ]; then
   die "--shallow and --deep together: depth is on by default (drop --shallow) or you asked"
@@ -1065,7 +1085,9 @@ if [ "$DEPTH_MODE" = default ] && [ -z "$UNTIL_DONE" ]; then
   if [ "$INTERACTIVE" -eq 0 ] && [ -z "$RESUME_ID" ] && [ "$PREFLIGHT_ONLY" -eq 0 ] \
      && [ "$TOOLSET_NONE" -eq 0 ]; then
     REVIEW_ROUND=1
-    SUBAGENTS=1; PUSH=1
+    # A typed --subagents-nudge is the caller's choice of delegation text and stays;
+    # otherwise depth brings the push.
+    SUBAGENTS=1; [ "$NUDGE" -eq 1 ] || PUSH=1
   fi
 fi
 
@@ -1232,25 +1254,27 @@ if [ -n "$REPLAY" ]; then
   # that function exists, exactly as --scenarios validation does.
   _rp_py() { PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" \
                "$(native_path "$SKILL_DIR/lib/scenarios.py")" "$@"; }
-  _rp_err="${TMPDIR:-/tmp}/qwen-replay-err.$$"
+  _rp_err="$(err_file)" || exit $QA_HARNESS
   _rp_argv=(replay "$(native_path "$REPLAY")")
   [ -n "$_rp_base" ] && _rp_argv+=(--base "$_rp_base")
   note "replay: $(native_path "$REPLAY")"
   _rp_sum="$(_rp_py ${_rp_argv[@]+"${_rp_argv[@]}"} 2>"$_rp_err")"; _rp_rc=$?
   _rp_e="$(cat "$_rp_err" 2>/dev/null)"; rm -f "$_rp_err"
   case "$_rp_rc" in
-    0|9) : ;;
+    0)   : ;;
+    9)   : ;;
     2)   die "--replay: ${_rp_e#scenarios.py: }"
          exit $QA_USAGE ;;
     *)   [ -z "$_rp_e" ] || die "--replay: ${_rp_e#scenarios.py: }"
          die "--replay: could not run the recorded scripts (exit $_rp_rc)"
          exit $QA_HARNESS ;;
   esac
-  unset _rp_err _rp_e _rp_argv
+  unset _rp_err _rp_argv
   # The table and its counts, on stderr like the scored suite's: the answer of a
   # replay is the verdict, and a replay has no answer but that. die, not note: -q
   # must not hide which scenarios did not hold.
   [ -z "$_rp_sum" ] || die "$_rp_sum"
+  [ -z "$_rp_e" ] || die "--replay: ${_rp_e#scenarios.py: }"   # e.g. no script was kept
   exit "$_rp_rc"
 fi
 
@@ -1263,8 +1287,7 @@ fi
 # sandbox as the top level of `probe.py check` on the user's plain repo, so the
 # fence (a whole shell) lands on the user's tree. Unset for this process and every
 # child of it BEFORE the until-done exec below: that exec hands over to the
-# supervisor, and the --probe setup further down -- where this unset used to sit --
-# is never reached on the loop path. This is PROBE hygiene, not depth hygiene: it
+# supervisor, and the --probe setup further down is never reached on the loop path. This is PROBE hygiene, not depth hygiene: it
 # fires only where a sandbox of this run is actually used -- a typed --probe,
 # --probe-here or --deep here, an implied --probe at the place it applies below --
 # and never for a plain (say --write) run, which has no sandbox and no reason to
@@ -1407,7 +1430,7 @@ if [ -n "$UNTIL_DONE" ]; then
     export QWEN_TIMEOUT="$TIMEOUT"
   fi
   [ "$REVIEW_ROUND" -eq 1 ] && SUP_ARGS+=(--review-round)
-  [ "$KEEP_SANDBOX" -eq 0 ] || [ "$PROBE" -eq 1 ] || { die "--keep-sandbox needs --probe"; exit $QA_USAGE; }
+  [ "$KEEP_SANDBOX" -eq 0 ] || [ "$PROBE" -eq 1 ] || { die "--keep-sandbox needs --probe: type --probe --keep-sandbox (the sandbox depth makes on its own is always removed)"; exit $QA_USAGE; }
   [ "$PROBE" -eq 1 ] && SUP_ARGS+=(--probe)
   [ "$KEEP_SANDBOX" -eq 1 ] && SUP_ARGS+=(--keep-sandbox)
   SUP_ARGS+=(--depth "$DEPTH_MODE")
@@ -1444,7 +1467,7 @@ if [ "$PROBE" -eq 1 ] && [ "$PROBE_HERE" -eq 1 ]; then
   die "--probe and --probe-here are exclusive: --probe makes a sandbox, --probe-here runs in one that exists"
   exit $QA_USAGE
 fi
-[ "$KEEP_SANDBOX" -eq 0 ] || [ "$PROBE" -eq 1 ] || { die "--keep-sandbox needs --probe"; exit $QA_USAGE; }
+[ "$KEEP_SANDBOX" -eq 0 ] || [ "$PROBE" -eq 1 ] || { die "--keep-sandbox needs --probe: type --probe --keep-sandbox (the sandbox depth makes on its own is always removed)"; exit $QA_USAGE; }
 if [ "$PROBE" -eq 1 ] || [ "$PROBE_HERE" -eq 1 ]; then
   PROBING=1
   # Name the flag the caller typed: a refusal --deep's implied --probe triggers is
@@ -1567,7 +1590,7 @@ if [ -n "$SCENARIOS" ]; then
   # before that function exists.
   _sc_py() { PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" \
                "$(native_path "$SKILL_DIR/lib/scenarios.py")" "$@"; }
-  _sc_err="${TMPDIR:-/tmp}/qwen-scenarios-err.$$"
+  _sc_err="$(err_file)" || exit $QA_HARNESS
   if ! _sc_py check "$(native_path "$SCENARIOS")" >/dev/null 2>"$_sc_err"; then
     _e="$(cat "$_sc_err" 2>/dev/null)"; rm -f "$_sc_err"
     die "--scenarios: ${_e#scenarios.py: }"
@@ -1647,6 +1670,18 @@ if [ -n "$EXTRA_SYS" ]; then
 $EXTRA_SYS"; else SYSTEM="$EXTRA_SYS"; fi
 fi
 
+# The probe directory, resolved once, here, while this process still stands in the
+# caller's directory (a relative QWEN_PROBE_DIR is the caller's, like QWEN_OUTDIR):
+# the shell's checks, the default patch directory and probe.py all use this one path.
+PROBE_ROOT="${QWEN_PROBE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/qwen-agent/probes}"
+case "$PROBE_ROOT" in /*|[A-Za-z]:*) ;; *) PROBE_ROOT="$PWD/$PROBE_ROOT" ;; esac
+# An existing directory in this shell's spelling with every symlink resolved (the
+# drive form C:/x becomes /c/x under Git Bash); empty when it cannot be entered.
+physical_dir() {
+  local d="$1"
+  command -v cygpath >/dev/null 2>&1 && d="$(cygpath -u "$d")"
+  (cd -P -- "$d" 2>/dev/null && pwd -P)
+}
 # ------------------------------------------------------- implied --probe
 # P is the one implied part that can only be judged once the ROLE is known (coder
 # and mechanic default to write mode; tester implies --browser). Everything that
@@ -1666,30 +1701,27 @@ if [ "$DEPTH_MODE" = default ] && [ "$PROBE" -eq 0 ] && [ "$PROBE_HERE" -eq 0 ] 
    && [ "$ALL_TOOLS" -eq 0 ] && [ "$TOOLSET_EXPLICIT" -eq 0 ] && [ "$TOOLS_EXPLICIT" -eq 0 ] \
    && [ "$PERM_MODE_EXPLICIT" -eq 0 ] && [ "${#ADD_DIRS[@]}" -eq 0 ] && [ -z "$RESUME_ID" ]; then
   # A sandbox must also be BUILDABLE here: it copies the git work tree holding the -C
-  # directory and lives under the probe directory, and probe.py refuses (a typed
-  # --probe dies on it) when the tree has no commit or the probe directory sits
-  # inside that tree. An implied part never refuses -- where the sandbox cannot be
-  # made, the implied P steps aside and the run goes on read-only, unsandboxed.
-  # These are the cheap shapes of those checks; probe.py keeps the fine ones, and
-  # its finer refusals now only cost the run the sandbox (step aside), never a
-  # refusal.
+  # directory and lives under the probe directory, and probe.py refuses when the tree
+  # has no commit or the probe directory sits inside that tree. These are the cheap
+  # shapes of those checks; probe.py keeps the fine ones, and a refusal there only
+  # costs an implied probe its sandbox (it steps aside at create, below).
+  # Paths are compared in one spelling: git names the top level C:/... under Git Bash
+  # while the shell spells it /c/..., and a symlinked -C differs from both.
   _ip_src="${PROBE_SOURCE:-${WORKDIR:-$PWD}}"
   case "$_ip_src" in /*|[A-Za-z]:*) ;; *) _ip_src="$PWD/$_ip_src" ;; esac
   _ip_top="$(git -C "$_ip_src" rev-parse --show-toplevel 2>/dev/null)" || _ip_top=""
   [ -n "$_ip_top" ] && { git -C "$_ip_src" rev-parse --verify -q HEAD >/dev/null 2>&1 || _ip_top=""; }
+  [ -n "$_ip_top" ] && _ip_top="$(physical_dir "$_ip_top")"
   if [ -n "$_ip_top" ]; then
+    # the probe directory inside the tree it would copy: probe.py refuses it. The
+    # directory may not exist yet; its nearest existing parent decides the spelling.
+    _ip_root="$PROBE_ROOT"; _ip_rest=""
+    while [ ! -d "$_ip_root" ] && [ "${_ip_root%/*}" != "$_ip_root" ] && [ -n "${_ip_root%/*}" ]; do
+      _ip_rest="/${_ip_root##*/}$_ip_rest"; _ip_root="${_ip_root%/*}"
+    done
+    _ip_p="$(physical_dir "$_ip_root")"; _ip_root="${_ip_p:-$_ip_root}$_ip_rest"
     _ip_t="${_ip_top%/}"
-    # the working directory is the one copied, so it must sit inside the tree
-    if [ "$_ip_src" != "$_ip_t" ] && [ "${_ip_src#"$_ip_t"/}" = "$_ip_src" ]; then
-      _ip_top=""
-    else
-      _ip_root="${QWEN_PROBE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/qwen-agent/probes}"
-      case "$_ip_root" in /*|[A-Za-z]:*) ;; *) _ip_root="$_ip_src/$_ip_root" ;; esac
-      # the probe directory inside the tree it would copy: probe.py refuses it
-      if [ "$_ip_root" = "$_ip_t" ] || [ "${_ip_root%"$_ip_t"/*}" != "$_ip_root" ]; then
-        _ip_top=""
-      fi
-    fi
+    case "$_ip_root/" in "$_ip_t"/*) _ip_top="" ;; esac
   fi
   if [ -n "$_ip_top" ]; then
     PROBE=1; PROBING=1; _pf="--probe"
@@ -1702,7 +1734,7 @@ if [ "$DEPTH_MODE" = default ] && [ "$PROBE" -eq 0 ] && [ "$PROBE_HERE" -eq 0 ] 
     unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
           GIT_ALTERNATE_OBJECT_DIRECTORIES
   fi
-  unset _ip_src _ip_top _ip_t _ip_root
+  unset _ip_src _ip_top _ip_t _ip_root _ip_rest _ip_p
 fi
 
 # ------------------------------------------------------------- --browser setup
@@ -1806,8 +1838,7 @@ case "$QWEN_OUTDIR" in /*|[A-Za-z]:*) ;; *) QWEN_OUTDIR="$PWD/$QWEN_OUTDIR" ;; e
 _qa_outdir_kept=""
 if [ "$PROBE" -eq 1 ] && [ "$QWEN_OUTDIR_SET" -eq 0 ]; then
   _qa_outdir_kept="$QWEN_OUTDIR"
-  QWEN_OUTDIR="${QWEN_PROBE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/qwen-agent/probes}"
-  case "$QWEN_OUTDIR" in /*|[A-Za-z]:*) ;; *) QWEN_OUTDIR="$PWD/$QWEN_OUTDIR" ;; esac
+  QWEN_OUTDIR="$PROBE_ROOT"
 fi
 # --record DIR is the caller's directory too -- never the -C directory's, which is the
 # tree under test and has no business holding the replay scripts of a suite run against
@@ -1826,7 +1857,8 @@ cleanup() {
   [ -n "${TEST_WT:-}" ] && skill_py testrun.py --cleanup "$(native_path "$TEST_REPO")" "$(native_path "$TEST_WT")" >/dev/null 2>&1
   if [ -n "${PROBE_RUN:-}" ] && [ "$KEEP_SANDBOX" -eq 0 ]; then
     cd / 2>/dev/null                # Windows cannot remove the directory a process stands in
-    skill_py probe.py remove "$(native_path "$PROBE_RUN")" >/dev/null 2>&1
+    skill_py probe.py remove "$(native_path "$PROBE_RUN")" >/dev/null 2>&1 \
+      || die "sandbox not removed: $PROBE_RUN"
   fi
   return 0
 }
@@ -1871,20 +1903,44 @@ $_fence_note"; else SYSTEM="$_fence_note"; fi
 fi
 
 # ------------------------------------------------------------- --probe setup
+# An IMPLIED --probe (default depth, or --deep on a read-only run) never ends a run:
+# when the sandbox cannot be had, it steps aside and the run goes on exactly as the
+# --shallow run would, unsandboxed and read-only. A typed --probe keeps every
+# refusal, and so does --deep on a writing run: there the sandbox is the promise that
+# the edits come back as a patch and the tree stays untouched.
+probe_is_implied() {
+  [ "$PROBE" -eq 1 ] && [ "$PROBE_EXPLICIT" -eq 0 ] && [ "$PROBE_HERE" -eq 0 ] \
+    && { [ "$DEEP" -eq 0 ] || [ "$WRITE_MODE" -eq 0 ]; }
+}
+# Drop the probe and its fence. Nothing beyond the permission mode and the
+# QWEN_OUTDIR default is set from PROBING yet (the grants, the note and --restricted
+# all come later, keyed off PROBING). A --test run fixes dontAsk itself, so its
+# fence is left exactly as a --shallow --test run has it.
+probe_step_aside() {
+  PROBE=0; PROBING=0
+  if [ "$TEST_MODE" -eq 0 ]; then PERM_MODE=""; fi
+  [ -n "$_qa_outdir_kept" ] && QWEN_OUTDIR="$_qa_outdir_kept"
+  note "depth: no sandbox for this run ($1); running without --probe"
+}
 if [ "$PROBING" -eq 1 ]; then
   # --restricted keeps the fence independent of the user's and the project's settings
   # files and confines the file tools to the working directories -- here the sandbox.
-  "$CLAUDE_BIN" --help 2>/dev/null | grep -q -- '--restricted' \
-    || { die "$_pf needs a Claude Code with --restricted; upgrade claude"; exit $QA_USAGE; }
+  if ! "$CLAUDE_BIN" --help 2>/dev/null | grep -q -- '--restricted'; then
+    if probe_is_implied; then
+      probe_step_aside "this claude has no --restricted"
+    else
+      die "$_pf needs a Claude Code with --restricted; upgrade claude"; exit $QA_USAGE
+    fi
+  fi
 fi
 if [ "$PROBE_HERE" -eq 1 ]; then
-  # The marker lib/swarm_engine/sandbox.py writes beside every sandbox used to be the
-  # whole test here -- but `<toplevel>.base` is a text file anyone can write beside their
-  # own checkout, and a plain tree, the user's above all, must never get a probe fence.
+  # The marker lib/swarm_engine/sandbox.py writes beside every sandbox is not enough on
+  # its own: `<toplevel>.base` is a text file anyone can write beside their own
+  # checkout, and a plain tree, the user's above all, must never get a probe fence.
   # probe.py check verifies the whole footprint create() leaves (both markers, no symlink,
   # a `sandboxes/` parent, and a `.base` naming a commit inside) and prints the sandbox it
   # checked. The refusal comes before anything else this run would do in the tree.
-  _errf="${TMPDIR:-/tmp}/qwen-probe-here-err.$$"
+  _errf="$(err_file)" || exit $QA_HARNESS
   _out="$(skill_py probe.py check "$(native_path "$PWD")" 2>"$_errf")"
   _rc=$?
   _e="$(cat "$_errf")"; rm -f "$_errf"
@@ -1901,38 +1957,21 @@ if [ "$PROBE_HERE" -eq 1 ]; then
   unset _errf _out _rc _e _sbu
 fi
 if [ "$PROBE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
-  [ -n "${QWEN_PROBE_DIR:-}" ] && export QWEN_PROBE_DIR
-  _errf="${TMPDIR:-/tmp}/qwen-probe-err.$$"
+  QWEN_PROBE_DIR="$(native_path "$PROBE_ROOT")"; export QWEN_PROBE_DIR
+  _errf="$(err_file)" || exit $QA_HARNESS
   _src=()
   [ -n "$PROBE_SOURCE" ] && _src=(--source "$(native_path "$PROBE_SOURCE")")
   _out="$(skill_py probe.py create --cwd "$(native_path "$PWD")" ${_src[@]+"${_src[@]}"} 2>"$_errf")"
   _rc=$?
   if [ "$_rc" -ne 0 ]; then
     _e="$(cat "$_errf")"; rm -f "$_errf"
-    if [ "$_rc" -eq 2 ] && [ "$PROBE_EXPLICIT" -eq 0 ] \
-       && { [ "$DEEP" -eq 0 ] || [ "$WRITE_MODE" -eq 0 ]; }; then
-      # An IMPLIED --probe never refuses, and the pre-check above cannot see every
-      # refusal probe.py makes (a -C inside an ignored directory, a -C outside a
-      # --test-repo it is asked to copy). So create's refusal is the step-aside
-      # cue: drop the probe and its fence -- nothing beyond the permission mode and
-      # the QWEN_OUTDIR default is set from PROBING yet (the grants, the note and
-      # --restricted all come later, keyed off PROBING) -- and run on without a
-      # sandbox: the whole else branch below is the sandbox taking over, and it is
-      # skipped with it. --deep's --probe is implied in this sense too (only a
-      # typed --probe is PROBE_EXPLICIT -- the refusal-naming block above says the
-      # same) -- EXCEPT where the run writes: there the sandbox is the promise that
-      # the edits come back as a patch and the tree stays untouched, so a refused
-      # build ends the run rather than sending the writes to the user's tree. A
-      # typed --probe keeps its refusal either way. rc 8 is a broken environment,
-      # not a refusal: that dies.
-      PROBE=0; PROBING=0
-      # Undo the permission mode the PROBE fence pinned -- but only where the probe
-      # was what pinned it: a --test run fixes dontAsk itself (the elif chain above
-      # reaches its branch first), and the stepped-aside --test run must keep its
-      # fence exactly as a --shallow --test run has it.
-      if [ "$TEST_MODE" -eq 0 ]; then PERM_MODE=""; fi
-      [ -n "$_qa_outdir_kept" ] && QWEN_OUTDIR="$_qa_outdir_kept"
-      note "depth: no sandbox for this run ($_e); running without --probe"
+    if probe_is_implied; then
+      # The pre-check above cannot see every refusal probe.py makes (a -C inside an
+      # ignored directory, a -C outside a --test-repo it is asked to copy), nor a
+      # broken environment (an unwritable probe directory, a failed clone, a
+      # symlink Windows will not make). Any of them only costs an implied probe
+      # its sandbox.
+      probe_step_aside "${_e:-probe.py create failed with exit $_rc}"
     else
       die "--probe: $_e"
       [ "$_rc" -eq 2 ] && exit $QA_USAGE
@@ -1962,7 +2001,7 @@ if [ "$PROBE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
   unset _errf _src _out _rc _e _cd _sbu
 fi
 if [ "$TEST_MODE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
-  _errf="${TMPDIR:-/tmp}/qwen-test-err.$$"
+  _errf="$(err_file)" || exit $QA_HARNESS
   TEST_WT="$(skill_py testrun.py --prepare "$(native_path "$TEST_REPO")" 2>"$_errf")" || {
     _e="$(cat "$_errf")"; rm -f "$_errf"
     die "--test: ${_e#qwen-test: }"; exit $QA_USAGE; }
@@ -2038,16 +2077,15 @@ if [ "$WEB_MODE" -eq 1 ] && [ "$ALL_TOOLS" -eq 0 ]; then
     *) TOOLS="${TOOLS:+$TOOLS,}WebFetch" ;;
   esac
   if [ "$TEST_MODE" -eq 1 ]; then
-    # Raw printf, not die(): the spec fixes this line to START with
-    # "WARNING: --web with --test", and die() would prefix the program name.
-    # Unconditional (not note()) so -q cannot hide that the run can fetch the
-    # very answers its tests and checks are supposed to derive (seen in the
-    # benchmark).
+    # Raw printf, not die(): this line must START with "WARNING: --web with
+    # --test", and die() would prefix the program name. Unconditional (not
+    # note()) so -q cannot hide that the run can fetch the very answers its
+    # tests and checks are supposed to derive.
     printf 'WARNING: --web with --test: tests and checks can be gamed by fetching upstream answers (WebFetch is enabled)\n' >&2
   fi
 fi
 
-# Subagents are opt-in (--subagents / QWEN_SUBAGENTS=1): each one is another
+# Task subagents (--subagents / QWEN_SUBAGENTS=1, also set by default depth): each one is another
 # concurrent request against the same server, too much for a small GPU. A
 # subagent inherits this run's tool restrictions and grants (and --restricted
 # under --test), so Task adds no capability the run did not already have.
@@ -2771,10 +2809,10 @@ repro_section() {  # the '## REPRO FILES' block for the newline-separated files 
 # --json's record. Exported only when one is set, so a run without any emits Claude
 # Code's record unchanged.
 export_meta() {
-  # The key used to exist only to explain switches that changed the argv; with depth
-  # on by default it must also say WHICH depth ran (a bench totals records per mode),
-  # and a suspiciously short final answer must be findable in the record, not only
-  # in stderr a caller may not have kept.
+  # The key explains the switches that changed the argv, says WHICH depth ran (tools
+  # that read the record total by mode), and carries a suspiciously short final
+  # answer's mark, so it is findable in the record, not only in stderr a caller may
+  # not have kept.
   [ -n "$ROLE_VARIANT" ] || [ "$NUDGE" -eq 1 ] || [ "$PUSH" -eq 1 ] \
     || [ "$REVIEW_ROUND" -eq 1 ] || [ "$PROBING" -eq 1 ] \
     || [ "$BROWSER" -eq 1 ] || [ "$DEPTH_MODE" != shallow ] || [ "$SHORT_ANSWER_WARNING" -eq 1 ] \
@@ -2803,7 +2841,8 @@ write_probe_patch() {
   local target
   if [ -n "$OUT" ]; then
     target="$OUT.patch"
-  elif target="$(mktemp "$QWEN_OUTDIR/qwen-agent-XXXXXXXX")" && mv -- "$target" "$target.patch"; then
+  elif mkdir -p -- "$QWEN_OUTDIR" 2>/dev/null \
+       && target="$(mktemp "$QWEN_OUTDIR/qwen-agent-XXXXXXXX")" && mv -- "$target" "$target.patch"; then
     target="$target.patch"
   else
     KEEP_SANDBOX=1
@@ -2829,7 +2868,7 @@ write_probe_patch() {
 }
 
 # --review-round --json: the standing record is the review call's, but the run paid
-# for both calls -- the record a bench or a swarm totals from must carry their SUM
+# for both calls -- the record tools total from must carry their SUM
 # (usage per key, num_turns, total_cost_usd when either call has it). Rewrites $RAW
 # through a temp file, so a parse that fails halfway leaves the payload intact.
 sum_first_usage() {
@@ -2957,7 +2996,7 @@ review_round() {
 # The auto-compact death signature: a long session (many turns) whose final answer
 # is a stub. The answer still stands, but the person who asked must see why it may
 # not be the whole answer -- this exact line on stderr -- and --json must carry the
-# mark for benches that read the record, not the terminal.
+# mark for tools that read the record, not the terminal.
 short_answer_guard() {
   local stats len turns
   stats="$(result_stats "$RAW")"
@@ -3072,7 +3111,9 @@ record_scripts() {
   # Whatever exists is validated -- nothing, when the round could not run at all: the
   # manifest then keeps no scripts and says why per scenario, which is the honest
   # record of a run that recorded nothing.
-  _errf="${TMPDIR:-/tmp}/qwen-record-err.$$"
+  _errf="$TMPD/record-err"
+  # die, not note: these are model-written programs about to run as the user.
+  die "--record: running the scripts the session wrote in $(native_path "$BROWSER_DIR/replay") with node, as you, unsandboxed"
   _out="$(skill_py scenarios.py replay-check "$(native_path "$SCENARIOS")" \
             "$(native_path "$BROWSER_DIR/results.json")" \
             "$(native_path "$BROWSER_DIR/replay")" \
@@ -3179,7 +3220,7 @@ if [ "$BG" -eq 1 ]; then
   chmod 600 "$OUT.err" "$OUT.status" 2>/dev/null
 
   # Detached child writes its own status sidecar, so a background failure is
-  # never silent (the previous version discarded background errors entirely).
+  # never silent.
   (
     trap '' HUP
     started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -3195,6 +3236,7 @@ if [ "$BG" -eq 1 ]; then
         "$QA_DENIED")    echo "reason=permission_denied" ;;
         "$QA_HARNESS")   echo "reason=harness_failure" ;;
         "$QA_PREFLIGHT") echo "reason=preflight" ;;
+        "$QA_SCENARIO_FAIL") echo "reason=scenario_fail" ;;
         *) echo "reason=unknown" ;;
       esac
       echo "started=$started"

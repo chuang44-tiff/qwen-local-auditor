@@ -41,14 +41,18 @@ CLI:
                                                 and the manifest path, exit 0
   scenarios.py replay DIR [--base URL] [--out RESULTS_JSON]
                                                 runs every script OUT_DIR's manifest names,
-                                                no model at all: prints the summary, exit 0
-                                                all PASS, 9 any FAIL or ERROR
+                                                no model at all: prints the summary (the
+                                                scenarios it kept no script for listed as
+                                                NOT RECORDED), exit 0 all PASS, 9 any FAIL
+                                                or ERROR, or no script kept at all
 
 The reporting contract asks for the LAST fenced json block the answer carries;
 qwen-agent.sh takes the per-status counts off the summary line the `results`
 command prints, so this file is the only place the shape is decided.
 
-A replay script is a Node ES module the recorded session wrote itself. Its whole
+A replay script is a Node ES module the recorded session wrote itself, and the
+runner executes it with node, as the user, with no sandbox and the user's network:
+replay only a folder you recorded or have read. Its whole
 contract is one line on stdout -- 'RESULT <id> PASS' or 'RESULT <id> FAIL: <the
 expectation that did not hold>' -- exit 0 after it, exit 1 on a script error, and
 the base URL read from QWEN_REPLAY_BASE (its own default: the suite's base URL).
@@ -71,7 +75,9 @@ STATUSES = ("PASS", "FAIL", "BLOCKED")
 REPLAY_STATUSES = ("PASS", "FAIL", "ERROR")
 REPLAY_TIMEOUT = 120                       # wall-clock seconds per script
 # The one line a replay script must print, and nothing else that is read off it.
-REPLAY_RESULT = re.compile(r"^RESULT\s+\S+\s+(PASS|FAIL)(?::\s*(.*))?$")
+REPLAY_RESULT = re.compile(r"^RESULT\s+(\S+)\s+(PASS|FAIL)(?::\s*(.*))?$")
+# A scenario the recording kept no script for: listed by a replay, never run.
+NOT_RECORDED = "NOT RECORDED"
 REPLAY_MANIFEST = "manifest.json"
 REPLAY_INSTALL_HINT = "npm i -g playwright && npx playwright install chromium"
 _ID_OK = re.compile(r"[A-Za-z0-9_-]+")
@@ -308,8 +314,12 @@ def summary(res, statuses=STATUSES):
         note = str(r.get("notes") or "").replace("|", "\\|").replace("\n", " ")
         rows.append("| %s | %s | %s |" % (r.get("id", ""), r.get("status", ""), note))
     n = {s: sum(1 for r in res if r.get("status") == s) for s in statuses}
+    counts = ["%s %d" % (s, n[s]) for s in statuses]
+    unrecorded = sum(1 for r in res if r.get("status") == NOT_RECORDED)
+    if unrecorded:
+        counts.append("%s %d" % (NOT_RECORDED, unrecorded))
     rows.append("")
-    rows.append(" / ".join("%s %d" % (s, n[s]) for s in statuses))
+    rows.append(" / ".join(counts))
     return "\n".join(rows) + "\n"
 
 
@@ -321,8 +331,8 @@ def _read(path):
 # ------------------------------------------------------------------ replay
 #
 # The replay runner: node plus the playwright package, and one script per scenario
-# run in a fresh temporary directory. Nothing here reaches the network beyond the
-# app the script itself opens.
+# run in a fresh temporary directory. The scripts are model-written code run as the
+# user, unsandboxed: whatever they do, including network access, is not confined.
 
 def _npm_npx_node_modules():
     """The first node_modules holding playwright under "$(npm config get cache)"
@@ -371,20 +381,49 @@ def _replay_toolchain():
 
 def _kill_script(proc):
     """Kill the script AND what it started: a browser it left behind would hold the
-    output pipes open and keep a timed-out script's directory (and memory) alive."""
+    output pipes open and keep a timed-out script's directory (and memory) alive. On
+    Windows the tree goes through taskkill /T, under a timeout of its own."""
     try:
         if os.name == "posix":
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         else:
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                pass
             proc.kill()
     except OSError:                        # already gone: exactly what was wanted
         pass
 
 
-def _run_script(node, node_modules, script, base=None, timeout=REPLAY_TIMEOUT):
+def _link_node_modules(target, link):
+    """`link` -> `target`: a symlink, else (Windows without the symlink privilege) a
+    directory junction. Neither possible is a ReplayError: without the link every
+    script's `import 'playwright'` fails, and that is the environment, not a verdict."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return
+    except OSError as e:
+        first = e
+    if os.name == "nt":
+        try:
+            import _winapi
+            _winapi.CreateJunction(target, link)
+            return
+        except (ImportError, OSError, AttributeError):
+            pass
+    raise ReplayError("cannot link node_modules beside the replay script (%s); on "
+                      "Windows, enable Developer Mode or run from a shell that may "
+                      "create symbolic links" % first)
+
+
+def _run_script(node, node_modules, script, base=None, timeout=REPLAY_TIMEOUT, sid=None):
     """(status, note) for one replay script: PASS, FAIL with the expectation that
     did not hold, or ERROR -- no RESULT line (the script crashed) or its wall clock
-    ran out. stderr is not echoed: its first error line goes into the ERROR note.
+    ran out. With `sid`, only a RESULT line naming that scenario counts. stderr is not
+    echoed: its first error line goes into the ERROR note.
 
     The script runs as a COPY inside a fresh temp dir beside a node_modules link to the
     resolved Playwright: replay scripts are ES modules, and an ES module resolves a bare
@@ -398,12 +437,7 @@ def _run_script(node, node_modules, script, base=None, timeout=REPLAY_TIMEOUT):
     try:
         local = os.path.join(cwd, os.path.basename(script))
         shutil.copyfile(script, local)
-        try:
-            os.symlink(node_modules, os.path.join(cwd, "node_modules"),
-                       target_is_directory=True)
-        except OSError:
-            pass                       # no symlinks (Windows without the privilege):
-            #                            the import then fails and reads as an ERROR
+        _link_node_modules(node_modules, os.path.join(cwd, "node_modules"))
         proc = subprocess.Popen([node, local], cwd=cwd, env=env,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, start_new_session=True)
@@ -412,7 +446,10 @@ def _run_script(node, node_modules, script, base=None, timeout=REPLAY_TIMEOUT):
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             _kill_script(proc)
-            out, err = proc.communicate()
+            try:
+                out, err = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:  # a grandchild still holds the pipes
+                out, err = b"", b""
             timed_out = True
         code, out = proc.returncode, out.decode("utf-8", "replace")
         err = err.decode("utf-8", "replace")
@@ -423,14 +460,14 @@ def _run_script(node, node_modules, script, base=None, timeout=REPLAY_TIMEOUT):
     hit = None
     for line in out.splitlines():          # the LAST RESULT line is its verdict
         m = REPLAY_RESULT.match(line.strip())
-        if m:
+        if m and (sid is None or m.group(1) == sid):
             hit = m
     if hit is None:
         why = next((ln.strip() for ln in err.splitlines()
                     if "rror" in ln or "xecutable" in ln), "")
         return "ERROR", "no RESULT line (exit %s)%s" % (code, ": " + why[:200] if why else "")
-    if hit.group(1) == "FAIL":
-        return "FAIL", (hit.group(2) or "").strip()
+    if hit.group(2) == "FAIL":
+        return "FAIL", (hit.group(3) or "").strip()
     return "PASS", ""
 
 
@@ -459,6 +496,9 @@ def replay_check(suite_file, results_file, src_dir, out_dir, timeout=REPLAY_TIME
     BLOCKED and unreported scenarios get no script at all: nothing was established
     about them for a script to reproduce."""
     suite = parse(_read(suite_file))
+    if os.path.realpath(src_dir) == os.path.realpath(out_dir):
+        raise ReplayError("the recording folder %s is the folder the scripts were written "
+                          "to; record into another directory" % out_dir)
     recorded = _read_json(results_file, "the results file of the recorded run")
     if not isinstance(recorded, list):
         raise ReplayError("the results file of the recorded run is not a list of "
@@ -482,7 +522,7 @@ def replay_check(suite_file, results_file, src_dir, out_dir, timeout=REPLAY_TIME
             continue
         # No QWEN_REPLAY_BASE here: the script's own default IS the suite's base URL,
         # and validation has to run the same command a later replay runs.
-        got, note = _run_script(node, node_modules, src, None, timeout)
+        got, note = _run_script(node, node_modules, src, None, timeout, sid)
         if got != want:
             reason = "replay said %s, the run recorded %s" % (got, want)
             rejected.append({"id": sid, "reason": "%s: %s" % (reason, note)
@@ -513,7 +553,8 @@ def replay_check(suite_file, results_file, src_dir, out_dir, timeout=REPLAY_TIME
 
 def replay(rec_dir, base=None, timeout=REPLAY_TIMEOUT):
     """One result dict per manifest script, in manifest order -- with NO model in the
-    loop: the verdicts were recorded once, and the scripts carry them from there.
+    loop: the verdicts were recorded once, and the scripts carry them from there. The
+    scenarios the recording kept no script for follow as NOT RECORDED rows.
 
     A script whose bytes are not the ones that were validated is never run: the
     manifest is what says a PASS was ever observed for this file, and a file that
@@ -530,6 +571,11 @@ def replay(rec_dir, base=None, timeout=REPLAY_TIMEOUT):
                               % path)
         sid = entry["id"]
         name = entry.get("file") or (sid + ".mjs")
+        if not isinstance(name, str) or os.path.basename(name) != name \
+                or name in (os.curdir, os.pardir):
+            out.append({"id": sid, "status": "ERROR",
+                        "notes": "script is not a file of the recording: %s" % name})
+            continue
         script = os.path.join(rec_dir, name)
         try:
             with open(script, "rb") as fh:
@@ -542,8 +588,12 @@ def replay(rec_dir, base=None, timeout=REPLAY_TIMEOUT):
             out.append({"id": sid, "status": "ERROR",
                         "notes": "script changed since recording"})
             continue
-        status, note = _run_script(node, node_modules, script, base, timeout)
+        status, note = _run_script(node, node_modules, script, base, timeout, sid)
         out.append({"id": sid, "status": status, "notes": note})
+    for entry in manifest.get("rejected") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            out.append({"id": entry["id"], "status": NOT_RECORDED,
+                        "notes": str(entry.get("reason") or "")})
     return out
 
 
@@ -614,7 +664,12 @@ def _replay_main(cmd, args, prog, usage):
             print("%s: %s" % (prog, e), file=sys.stderr)
             return 2
     sys.stdout.write(summary(res, REPLAY_STATUSES))
-    return 0 if all(r["status"] == "PASS" for r in res) else 9
+    ran = [r for r in res if r["status"] != NOT_RECORDED]
+    if not ran:
+        print("%s: the recording kept no scripts: nothing was replayed" % prog,
+              file=sys.stderr)
+        return 9
+    return 0 if all(r["status"] == "PASS" for r in ran) else 9
 
 
 def main(argv=None):

@@ -25,9 +25,8 @@ LIB = ROOT / "skill" / "local-auditor" / "lib" / "scenarios.py"
 
 server = test_cli.server                             # the model server fixture
 
-# The reporting contract as the spec words it -- asserted against the prompt as
-# written, not against scenarios.CONTRACT, so the two can only agree by both
-# following the spec.
+# The reporting contract, written out -- asserted against the prompt as built, not
+# against scenarios.CONTRACT, so a change to either shows up here.
 SPEC_CONTRACT = (
     "Run the scenarios in order, each from a fresh page load. For each scenario "
     "follow the steps exactly; do not skip or reorder them. Then end your answer "
@@ -217,7 +216,7 @@ def test_results_last_block_missing_ids_invalid_status():
     assert res[2] == {"id": "s3", "status": "BLOCKED", "notes": "no result reported"}
     # A LAST block that parses but carries nothing usable is still the report:
     # an empty results list, or entries only for ids the suite does not know,
-    # replace the earlier one -- every scenario then went UNREPORTED ("no result
+    # replace the earlier one -- every scenario is then UNREPORTED ("no result
     # reported"), which is not the same verdict as "no result block".
     for empty_last in (json.dumps({"results": []}),
                        json.dumps({"results": [{"id": "not-in-suite", "status": "PASS"}]})):
@@ -435,3 +434,16 @@ def test_qwen_agent_scenarios_refuses_a_broken_suite(tmp_path, server, fake_scen
                  server, fake_scen)
     assert r.returncode == 2
     assert calls(tmp_path) == []
+
+
+def test_qwen_agent_scenarios_background_status_names_the_failure(tmp_path, server, fake_scen):
+    from test_cli import wait_for_status
+    suite = tmp_path / "suite.md"
+    suite.write_text(UNIT, encoding="utf-8")
+    answer = report([{"id": "add", "status": "FAIL", "notes": "no"}])
+    out = tmp_path / "bg.md"
+    r = run_scen(tmp_path, ["--scenarios", posix(suite), "-w", "-o", posix(out)], server,
+                 fake_scen, answer=answer)
+    assert r.returncode == 0, r.stdout + r.stderr
+    status = wait_for_status(pathlib.Path(str(out) + ".status"))
+    assert "exit=9" in status and "reason=scenario_fail" in status

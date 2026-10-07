@@ -55,14 +55,16 @@ qwen-agent -r auditor -C <dir> -f brief.md -o out.md
   `-r auditor` for review work: with no `-r` there is no role prompt at all.
 - Browser/UI audits use `-r tester` — a real browser through Playwright (`--headed` to watch).
 - Scripted UI suites: `qwen-agent --scenarios suite.md` runs a written scenario file through the tester and scores it (exit 9 = a scenario FAILED or BLOCKED; `reference/qwen-agent.md`, "Scripted UI suites").
-- Repeated UI checks: record once — `qwen-agent --scenarios suite.md --record DIR` (the scripts are kept only when replaying them reproduces what the run recorded) — then `qwen-agent --replay DIR`, which reruns them with no model at all: seconds, the same result every time, exit 9 for a FAILED or ERRORED scenario.
-- A bare run is read-only with MCP dropped. Writing requires `--write` or an explicit
-  `--toolset` naming Edit/Write/Bash.
+- Repeated UI checks: record once — `qwen-agent --scenarios suite.md --record DIR` (the scripts are kept only when replaying them reproduces what the run recorded) — then `qwen-agent --replay DIR`, which reruns them with no model at all: seconds, deterministic for the same page state, exit 9 for a FAILED or ERRORED scenario or a folder that kept no script. Both run the model-written scripts with node, as the user, unsandboxed and with network access: replay only folders you recorded or have read.
+- A bare run never writes the user's files, and MCP servers are dropped. Writing to the
+  tree requires `--write` or an explicit `--toolset` naming Edit/Write/Bash.
 - `-o` is relative to your current directory, never to `-C`.
 - DEPTH IS THE DEFAULT: a plain `-r auditor` run already gets the deep auditor text, a
-  review round, subagent delegation and — being read-only — a throwaway sandbox with a
-  shell (your tree is only read there). `--shallow` is the quick-question mode without
-  any of it (1800 s default timeout; a depth run defaults to 3600 s); `--deep` types all
+  review round, subagent delegation and — being read-only, in a git repo — a throwaway
+  sandbox with a shell, Edit and Write. The harness only reads the user's tree there,
+  but the shell is not confined: it runs as the user, with their network. `--shallow`
+  (or `--read-only`) is the strict `Read,Glob,Grep` quick-question mode without any of
+  it (1800 s default timeout; a depth run defaults to 3600 s); `--deep` types all
   four switches at once with their refusals
   (`reference/qwen-agent.md`, "Depth: the default").
 

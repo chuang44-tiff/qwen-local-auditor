@@ -38,10 +38,11 @@ class ManifestError(ValueError):
 
 
 class Role:
-    def __init__(self, name, file, fence, budget_weight, effort, deep=()):
+    def __init__(self, name, file, fence, budget_weight, effort, deep=(), deep_listed=False):
         self.name, self.file, self.fence = name, file, fence
         self.budget_weight, self.effort = budget_weight, effort
         self.deep = tuple(deep)         # switch names in the order _DEEP_LIST gives them
+        self.deep_listed = deep_listed  # True when the manifest gave "deep" as a list
 
 
 class Manifest:
@@ -174,7 +175,9 @@ def validate(data, folder):
         if effort is not None and not (isinstance(effort, str) and _EFFORT.fullmatch(effort)):
             raise ManifestError("%s.effort must be a level name such as low or high" % where)
         # depth is the default: only an explicit "deep": false opts a role out
-        roles[rname] = Role(rname, path, fence, weight, effort, _deep(where, spec.get("deep", True)))
+        deep = spec.get("deep", True)
+        roles[rname] = Role(rname, path, fence, weight, effort, _deep(where, deep),
+                            deep_listed=isinstance(deep, list))
     knobs = data["knobs"]
     if not isinstance(knobs, dict):
         raise ManifestError("knobs must be an object of name: type")

@@ -25,6 +25,10 @@ from test_cli import flag, posix, rule_path, run, same_path
 from test_cli_deep import calls, go
 from test_scenarios import report, senv
 
+# The fake node is a bash script that the runner starts directly, and Windows cannot
+# exec one (nor would shutil.which pick it over a real node.exe).
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="the fake node is a bash script")
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 LIB = ROOT / "skill" / "local-auditor" / "lib" / "scenarios.py"
 
@@ -534,3 +538,93 @@ def test_replay_script_runs_beside_a_node_modules_link(tmp_path):
     assert status == "PASS"
     line = log.read_text(encoding="utf-8")
     assert "node_modules=link" in line and "script=s1.mjs" in line
+
+
+# ------------------------------------------------------------------ what a replay never trusts
+
+def test_replay_of_a_recording_with_no_scripts_fails(tmp_path, toolchain):
+    # A recording that kept nothing proves nothing: it must not exit 0, and the
+    # scenarios it could not record are named, not left out of the table.
+    rec = recording(tmp_path, "rec", [])
+    m = json.loads((rec / "manifest.json").read_text(encoding="utf-8"))
+    m["rejected"] = [{"id": "c", "reason": "recorded BLOCKED"},
+                     {"id": "d", "reason": "no script was written"}]
+    (rec / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
+    r = cli_run("replay", posix(rec), env=renv(tmp_path, toolchain))
+    assert r.returncode == 9, r.stdout + r.stderr
+    assert "| c | NOT RECORDED | recorded BLOCKED |" in r.stdout
+    assert "| d | NOT RECORDED | no script was written |" in r.stdout
+    assert "kept no scripts" in r.stderr
+
+
+def test_replay_lists_unrecorded_scenarios_without_failing_the_kept_ones(tmp_path, toolchain):
+    rec = recording(tmp_path, "rec", [("a", "PASS", script("a"))])
+    m = json.loads((rec / "manifest.json").read_text(encoding="utf-8"))
+    m["rejected"] = [{"id": "c", "reason": "recorded BLOCKED"}]
+    (rec / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
+    r = cli_run("replay", posix(rec), env=renv(tmp_path, toolchain))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "| a | PASS |  |" in r.stdout
+    assert "| c | NOT RECORDED | recorded BLOCKED |" in r.stdout
+    assert r.stdout.splitlines()[-1] == "PASS 1 / FAIL 0 / ERROR 0 / NOT RECORDED 1"
+
+
+def test_replay_never_runs_a_file_outside_the_recording(tmp_path, toolchain):
+    outside = tmp_path / "x.mjs"
+    outside.write_text(script("a"), encoding="utf-8", newline="\n")
+    rec = recording(tmp_path, "rec", [("a", "PASS", script("a"))])
+    m = json.loads((rec / "manifest.json").read_text(encoding="utf-8"))
+    m["scripts"][0]["file"] = "../x.mjs"                  # same bytes, same sha
+    (rec / "manifest.json").write_text(json.dumps(m), encoding="utf-8")
+    r = cli_run("replay", posix(rec), env=renv(tmp_path, toolchain))
+    assert r.returncode == 9, r.stdout + r.stderr
+    assert "| a | ERROR |" in r.stdout
+    assert node_log(tmp_path) == []
+
+
+def test_replay_result_line_must_name_its_scenario(tmp_path, toolchain):
+    rec = recording(tmp_path, "rec", [("a", "PASS", script("other"))])
+    r = cli_run("replay", posix(rec), env=renv(tmp_path, toolchain))
+    assert r.returncode == 9, r.stdout + r.stderr
+    assert "| a | ERROR | no RESULT line" in r.stdout
+
+
+def test_replay_without_a_node_modules_link_is_refused(tmp_path, toolchain, monkeypatch):
+    # Without the link every `import 'playwright'` fails; that is the environment,
+    # not five scenarios that each broke, so the replay stops with the reason.
+    pin(monkeypatch, tmp_path, toolchain)
+    rec = recording(tmp_path, "rec", [("a", "PASS", script("a"))])
+
+    def no_symlink(*a, **k):
+        raise OSError("symbolic link privilege not held")
+    monkeypatch.setattr(scenarios.os, "symlink", no_symlink)
+    with pytest.raises(scenarios.ReplayError) as e:
+        scenarios.replay(posix(rec))
+    assert "node_modules" in str(e.value) and "privilege" in str(e.value)
+
+
+def test_qwen_agent_replay_of_an_empty_recording_exits_9(tmp_path, toolchain, fake):
+    rec = recording(tmp_path, "rec", [])
+    r = go(tmp_path, ["--replay", posix(rec)], None, fake, extra=renv(tmp_path, toolchain))
+    assert r.returncode == 9, r.stdout + r.stderr
+    assert "kept no scripts" in r.stderr
+
+
+def test_replay_ignores_an_invalid_qwen_depth(tmp_path, toolchain, fake):
+    rec = recording(tmp_path, "rec", [("a", "PASS", script("a"))])
+    r = go(tmp_path, ["--replay", posix(rec)], None, fake,
+           extra=dict(renv(tmp_path, toolchain), QWEN_DEPTH="wide"))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_replay_check_refuses_to_record_into_its_own_source(tmp_path, toolchain):
+    suite = tmp_path / "suite.md"
+    suite.write_text(FIVE, encoding="utf-8")
+    results = tmp_path / "results.json"
+    results.write_text(json.dumps([{"id": "a", "status": "PASS"}]), encoding="utf-8")
+    src = tmp_path / "replay"
+    src.mkdir()
+    (src / "a.mjs").write_text(script("a"), encoding="utf-8", newline="\n")
+    r = cli_run("replay-check", posix(suite), posix(results), posix(src), posix(src),
+                env=renv(tmp_path, toolchain))
+    assert r.returncode == 2 and "record into another directory" in r.stderr

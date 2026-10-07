@@ -216,7 +216,8 @@ def test_until_done_forwards_variant_and_nudge_to_each_round(tmp_path):
 def test_the_deviation_audit_drops_the_depth_switches():
     from lib import supervisor
     got = supervisor._read_only_passthrough(["--role-variant", "deep", "--subagents-nudge",
-                                             "--model", "m", "--role-variant=deep"])
+                                             "--subagents-push", "--model", "m",
+                                             "--role-variant=deep"])
     assert got == ["--model", "m"]
 
 
@@ -299,7 +300,7 @@ def test_interactive_refuses_review_round(tmp_path, fake):
 
 
 def test_review_round_in_a_detached_run(tmp_path, server, fake):
-    # Review focus: -w runs emit() in the background; the review round must still happen.
+    # -w runs emit() in the background; the review round must still happen.
     r = go(tmp_path, ["-w", "-o", "bg.md", "--review-round", "hi"], server, fake)
     assert r.returncode == 0, r.stderr
     status = test_cli.wait_for_status(tmp_path / "bg.md.status")
@@ -482,10 +483,10 @@ def head_sha(repo):
 
 
 def test_probe_here_refuses_a_stray_base_marker(tmp_path, server, fake):
-    # The .base and run-marker files are only text: next to a real repo they used to be
-    # the whole --probe-here test, and a coder with full Bash ran in the user's tree.
-    # A genuine-looking marker (the repo's own HEAD sha) and a copied run marker must
-    # not change that.
+    # The .base and run-marker files are only text: next to a real repo they must not
+    # be enough for --probe-here, or a coder with full Bash would run in the user's
+    # tree. A genuine-looking marker (the repo's own HEAD sha) and a copied run marker
+    # must not change that.
     repo = dirty_repo(tmp_path)
     (tmp_path / "repo.base").write_text(head_sha(repo) + "\n", encoding="utf-8")
     r = go(tmp_path, ["--probe-here", "-C", posix(repo), "hi"], server, fake)
@@ -656,7 +657,7 @@ def test_sigterm_mid_session_still_removes_the_sandbox(tmp_path, server, fake):
 
 
 def test_probe_with_spaces_in_every_path_and_web(tmp_path, server, fake):
-    # Review focus: a project and a probe directory whose paths hold spaces, plus --web.
+    # A project and a probe directory whose paths hold spaces, plus --web.
     repo = dirty_repo(tmp_path, "my project")
     r = go(tmp_path, ["--probe", "--web", "-r", "coder", "-C", posix(repo), "-o", "out file.md", "hi"],
            server, fake, modes="edit", extra={"QWEN_PROBE_DIR": posix(tmp_path / "probe dir")})
@@ -818,9 +819,9 @@ def test_subagents_nudge_refuses_a_value(tmp_path, fake):
 
 
 def test_deep_rejects_another_role_variant(tmp_path, server, fake):
-    # --deep sets --role-variant deep. An explicit different variant used to win or
+    # --deep sets --role-variant deep. An explicit different variant must not win or
     # lose by flag ORDER alone -- under --until-done the forwarded --role-variant
-    # deep came last, so an explicit shallow silently became deep. Refuse it.
+    # deep comes last, so an explicit shallow would silently become deep. Refuse it.
     r = go(tmp_path, ["--deep", "-r", "auditor", "--role-variant", "shallow", "hi"], server, fake)
     assert r.returncode == 2 and "--deep sets --role-variant deep" in r.stderr
     assert calls(tmp_path) == [] and probe_runs(tmp_path) == []
@@ -828,7 +829,7 @@ def test_deep_rejects_another_role_variant(tmp_path, server, fake):
     assert r.returncode == 2 and "--deep sets --role-variant deep (got --role-variant shallow)" in r.stderr
     r = go(tmp_path, ["--deep", "-r", "auditor", "--role-variant=shallow", "hi"], server, fake)
     assert r.returncode == 2 and "--deep sets --role-variant deep (got --role-variant=shallow)" in r.stderr
-    # The collision --until-done used to resolve silently by order is refused too.
+    # The same collision under --until-done is refused too.
     r, _ = _until_done_argv(tmp_path, ["--deep", "--role-variant", "shallow"])
     assert r.returncode == 2 and "--deep sets --role-variant deep" in r.stderr
     # Naming the variant --deep names is fine.
@@ -888,9 +889,9 @@ def test_until_done_probe_end_to_end(tmp_path, server, fake):
 def test_until_done_probe_clears_git_env(tmp_path, server, fake):
     # The until-done path execs the supervisor, so qwen-agent's unset of the six
     # steering GIT_* must happen BEFORE that exec: with GIT_INDEX_FILE=<the user's
-    # index> -- as a pre-commit hook leaves it -- probe.make's dirty-state copy ran
-    # against the user's index: the loop reported done while the user's `git status`
-    # died with "unable to read <sha>" and their index listed the session's files.
+    # index> -- as a pre-commit hook leaves it -- probe.make's dirty-state copy would
+    # run against the user's index, leaving it listing the session's files and
+    # unreadable to `git status`.
     repo = dirty_repo(tmp_path)
     py = posix(shutil.which("python3") or shutil.which("python"))
     (repo / "check.py").write_text(

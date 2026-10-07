@@ -442,7 +442,8 @@ def test_deep_flag_gives_a_role_the_depth_switches(tmp_path, fake):
     assert swarm_main(echo(tmp_path), "g", "--out", str(out), "--deep", "worker") == 0
     cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
     assert cfg["deep"] == ["worker"]
-    assert all("--review-round" in a and "--subagents-nudge" in a for a in calls_of(fake))
+    # a fence-none role has no tools to delegate with: the review round only
+    assert all("--review-round" in a and "--subagents-nudge" not in a for a in calls_of(fake))
 
 
 def test_no_depth_flag_leaves_the_config_alone_and_runs_deep(tmp_path, fake):
@@ -452,8 +453,8 @@ def test_no_depth_flag_leaves_the_config_alone_and_runs_deep(tmp_path, fake):
     assert swarm_main(echo(tmp_path), "g", "--out", str(out)) == 0
     cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
     assert "deep" not in cfg and "shallow" not in cfg
-    assert all("--shallow" in a and "--review-round" in a and "--subagents-nudge" in a
-               for a in calls_of(fake))
+    assert all("--shallow" in a and "--review-round" in a and "--subagents-nudge" not in a
+               for a in calls_of(fake))                 # fence none: nothing to delegate
 
 
 def test_manifest_deep_reaches_the_agents(tmp_path, fake):

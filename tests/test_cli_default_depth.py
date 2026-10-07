@@ -13,6 +13,7 @@ so the default depth is what runs).
 import http.server
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -42,6 +43,7 @@ case "$mode" in
   ok)        answer ;;
   edit)      cat a.txt u.txt > "$d/seen.$n" 2>/dev/null
              printf 'probe edit\n' > a.txt; printf 'new\n' > made-by-session.txt; answer ;;
+  lock)      mkdir -p locked && : > locked/f && chmod 500 locked; answer ;;
   apierr)    printf '%s\n' '{"type":"result","is_error":true,"api_error_status":400,"result":"API Error: 400"}' ;;
   repro)     wt="$QWEN_TEST_WORKTREE"; command -v cygpath >/dev/null 2>&1 && wt="$(cygpath -u "$wt")"
              printf 'def test_repro():\n    assert False\n' > "$wt/test_repro.py"; answer ;;
@@ -82,7 +84,7 @@ def fake(tmp_path):
 # ------------------------------------------------------------------ the implied set
 
 def test_auditor_default_is_full_deep(tmp_path, server, fake):
-    # The auditor is exactly what --deep means today, and it is now the default.
+    # The auditor gets exactly what --deep means, by default.
     repo = dirty_repo(tmp_path)
     r = go(tmp_path, ["-r", "auditor", "--json", "-C", posix(repo), "hi"], server, fake,
            extra=dict(DEEP_ENV))
@@ -209,8 +211,8 @@ def test_implied_probe_steps_aside_on_ignored_dir(tmp_path, server, fake):
 def test_implied_probe_steps_aside_on_test_repo_mismatch(tmp_path, server, fake):
     # The other shape: --test-repo names the tree to copy, and -C sits in a
     # different repo. probe.py refuses the combination; an implied P turns the
-    # refusal into "no sandbox". (--test itself never reaches this -- H1 keeps it
-    # out of the implied sandbox, so --test-repo is passed without --test here.)
+    # refusal into "no sandbox". (--test itself never reaches this -- a --test run
+    # gets no implied sandbox -- so --test-repo is passed without --test here.)
     r1 = _git_repo(tmp_path / "r1")
     r2 = _git_repo(tmp_path / "r2")
     r = go(tmp_path, ["-r", "auditor", "-C", posix(r1), "--test-repo", posix(r2), "hi"],
@@ -291,6 +293,216 @@ def test_deep_write_run_still_refuses_an_unbuildable_sandbox(tmp_path, server, f
     assert "no sandbox for this run" not in r.stderr
     assert calls(tmp_path) == []
     assert probe_runs(tmp_path) == []
+
+
+@pytest.fixture
+def fake_unrestricted(tmp_path):
+    """FAKE_LONG for a Claude Code whose --help has no --restricted."""
+    p = tmp_path / "fake-unrestricted"
+    p.write_text(FAKE_LONG.replace('echo "  --restricted  Restricted mode"', 'echo "  --print"'),
+                 encoding="utf-8", newline="\n")
+    p.chmod(0o755)
+    (tmp_path / "calls").mkdir(exist_ok=True)
+    return p
+
+
+def test_implied_probe_steps_aside_without_restricted(tmp_path, server, fake_unrestricted):
+    # A Claude Code too old for the probe fence costs a bare run its sandbox, not
+    # the run: one note, then the read-only run it would have been under --shallow.
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "-C", posix(repo), "hi"], server, fake_unrestricted,
+           extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stderr.count("depth: no sandbox for this run (") == 1
+    assert "--restricted" in r.stderr and "upgrade claude" not in r.stderr
+    assert probe_runs(tmp_path) == []
+    (a1, c1), (a2, c2) = calls(tmp_path)
+    assert flag(a1, "--tools").split(",")[:3] == ["Read", "Glob", "Grep"]
+    assert "Bash" not in flag(a1, "--tools").split(",")
+    assert "--restricted" not in a1 and flag(a1, "--permission-mode") is None
+    assert same_path(c1) == same_path(repo) and same_path(c2) == same_path(repo)
+
+
+def test_typed_probe_still_refuses_without_restricted(tmp_path, server, fake_unrestricted):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["--probe", "-r", "auditor", "-C", posix(repo), "hi"], server,
+           fake_unrestricted, extra=dict(DEEP_ENV))
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "--probe needs a Claude Code with --restricted" in r.stderr
+    assert calls(tmp_path) == []
+
+
+def _unusable_probe_dir(tmp_path):
+    """A QWEN_PROBE_DIR under a regular file: creating it fails with an OSError,
+    which probe.py create reports as a broken environment (rc 8), not a refusal."""
+    f = tmp_path / "not-a-dir"
+    f.write_text("x\n", encoding="utf-8")
+    return posix(f / "probes")
+
+
+def test_implied_probe_steps_aside_when_probe_dir_unusable(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV, QWEN_PROBE_DIR=_unusable_probe_dir(tmp_path)))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stderr.count("depth: no sandbox for this run (") == 1
+    assert "); running without --probe" in r.stderr
+    (a1, c1), (a2, c2) = calls(tmp_path)
+    assert "Bash" not in flag(a1, "--tools").split(",")
+    assert "--restricted" not in a1
+    assert same_path(c1) == same_path(repo) and same_path(c2) == same_path(repo)
+
+
+def test_typed_probe_still_fails_when_probe_dir_unusable(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["--probe", "-r", "auditor", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV, QWEN_PROBE_DIR=_unusable_probe_dir(tmp_path)))
+    assert r.returncode == 8, r.stdout + r.stderr
+    assert "--probe:" in r.stderr and "no sandbox for this run" not in r.stderr
+    assert calls(tmp_path) == []
+
+
+def test_deep_write_run_still_fails_when_probe_dir_unusable(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["--deep", "-r", "coder", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV, QWEN_PROBE_DIR=_unusable_probe_dir(tmp_path)))
+    assert r.returncode == 8, r.stdout + r.stderr
+    assert "no sandbox for this run" not in r.stderr
+    assert calls(tmp_path) == []
+
+
+def test_implied_probe_through_a_symlinked_cd(tmp_path, server, fake):
+    # -C spelled through a symlink names the same work tree: the implied probe
+    # applies, it does not quietly step aside over a spelling.
+    repo = dirty_repo(tmp_path)
+    link = tmp_path / "link"
+    try:
+        os.symlink(str(repo), str(link), target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("cannot make a symlink here")
+    r = go(tmp_path, ["-r", "auditor", "-C", posix(link), "hi"], server, fake,
+           extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "no sandbox for this run" not in r.stderr
+    (a1, c1), _ = calls(tmp_path)
+    assert same_path(c1).startswith(same_path(os.path.realpath(str(tmp_path / "probes"))))
+    assert probe_runs(tmp_path) == []
+
+
+FAKE_DRIVE_GIT = r'''#!/usr/bin/env bash
+# Git for Windows prints the top level as C:/...; this one answers the same way.
+case " $* " in
+  *" rev-parse --show-toplevel "*) out="$("$REAL_GIT" "$@")" || exit $?
+                                   printf 'C:%s\n' "$out"; exit 0 ;;
+esac
+exec "$REAL_GIT" "$@"
+'''
+
+FAKE_CYGPATH = r'''#!/usr/bin/env bash
+# -u turns C:/x into /x (this test's drive is the root); -w and -m keep the path.
+p="$2"
+[ "$1" = -u ] && case "$p" in [A-Za-z]:/*) p="${p#?:}" ;; esac
+printf '%s\n' "$p"
+'''
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the fake git and cygpath are bash scripts")
+def test_implied_probe_with_drive_letter_toplevel(tmp_path, fake):
+    # Under Git Bash the -C directory is /c/... while git names its top level C:/...;
+    # the two spellings of one tree must not cost the run its implied probe.
+    real_git = shutil.which("git")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name, text in (("git", FAKE_DRIVE_GIT), ("cygpath", FAKE_CYGPATH)):
+        (bindir / name).write_text(text, encoding="utf-8", newline="\n")
+        (bindir / name).chmod(0o755)
+    repo = dirty_repo(tmp_path)
+    r = run(tmp_path, ["--dry-run", "-r", "auditor", "-C", posix(repo), "hi"], None, fake,
+            extra=dict(DEEP_ENV, REAL_GIT=real_git, QWEN_PROBE_DIR=posix(tmp_path / "probes"),
+                       PATH=str(bindir) + os.pathsep + os.environ["PATH"]))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "# probe: the sandbox is made at run time" in r.stdout
+
+
+def test_relative_probe_dir_is_the_callers(tmp_path, server, fake):
+    # A relative QWEN_PROBE_DIR resolves against the caller's directory, as
+    # QWEN_OUTDIR does -- never against -C, which would put it inside the tree.
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["--probe", "-r", "coder", "--write", "-C", posix(repo), "hi"], server,
+           fake, modes="edit", extra=dict(DEEP_ENV, QWEN_PROBE_DIR="rel-probes",
+                                          QWEN_OUTDIR=""))
+    assert r.returncode == 0, r.stdout + r.stderr
+    (a1, c1), = calls(tmp_path)[:1]
+    assert same_path(c1).startswith(same_path(os.path.realpath(str(tmp_path / "rel-probes"))))
+    patches = list((tmp_path / "rel-probes").glob("qwen-agent-*.patch"))
+    assert len(patches) == 1 and "probe edit" in patches[0].read_text(encoding="utf-8")
+    assert not (repo / "rel-probes").exists()
+
+
+@pytest.mark.skipif(os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="needs POSIX permissions that bind the user")
+def test_a_sandbox_that_cannot_be_removed_is_reported(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["--probe", "-r", "auditor", "-C", posix(repo), "hi"], server, fake,
+           modes="lock", extra={"QWEN_DEPTH": "shallow"})
+    try:
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "sandbox not removed: " in r.stderr
+        assert probe_runs(tmp_path) != []
+    finally:
+        # the failed removal also stripped permissions on the way up: restore them all
+        subprocess.run(["chmod", "-R", "u+rwx", str(tmp_path / "probes")], check=False)
+
+
+def test_typed_nudge_is_kept_under_default_depth(tmp_path, server, fake):
+    # A typed --subagents-nudge is the caller's choice of delegation text: depth
+    # does not turn it into the push, as --until-done does not either.
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--subagents-nudge", "--json", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stdout + r.stderr
+    sw = json.loads(r.stdout)["qwen_agent"]["switches"]
+    assert sw["subagents_nudge"] is True and sw.get("subagents_push", False) is False
+    p = sys_prompt(calls(tmp_path)[0][0])
+    assert "Delegate more than feels necessary." in p
+    assert "Delegation is part of this task" not in p
+
+
+def test_mechanic_default_gets_review_and_push_but_no_probe(tmp_path, server, fake):
+    # -r mechanic writes, so the probe never applies; the review round and the push do.
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "mechanic", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stdout + r.stderr
+    (a1, c1), (a2, c2) = calls(tmp_path)
+    assert same_path(c1) == same_path(repo) and probe_runs(tmp_path) == []
+    assert "--restricted" not in a1 and "throwaway copy" not in sys_prompt(a1)
+    assert "Delegation is part of this task" in sys_prompt(a1)
+    assert "Task" in flag(a1, "--tools").split(",")
+    assert a2[-4:-1] == ["--resume", "sess-1", "--"]
+
+
+def test_toolset_none_default_is_one_plain_call(tmp_path, server, fake):
+    # No tools: nothing to probe, nothing to delegate with, nothing to review with.
+    r = go(tmp_path, ["--toolset", "none", "hi"], server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stdout + r.stderr
+    (argv, cwd), = calls(tmp_path)
+    assert "Task" not in (flag(argv, "--tools") or "").split(",")
+    assert "Delegation is part of this task" not in sys_prompt(argv)
+    assert "--resume" not in argv and probe_runs(tmp_path) == []
+
+
+def test_config_file_depth_shallow_is_one_plain_call(tmp_path, server, fake):
+    cfg = tmp_path / "config"
+    cfg.write_text('QWEN_DEPTH="shallow"\n', encoding="utf-8")
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV, QWEN_CONFIG=posix(cfg)))
+    assert r.returncode == 0, r.stdout + r.stderr
+    (argv, cwd), = calls(tmp_path)
+    assert flag(argv, "--tools") == "Read,Glob,Grep"
+    assert same_path(cwd) == same_path(repo) and probe_runs(tmp_path) == []
+    assert "DEEP audit" not in sys_prompt(argv)
 
 
 # ------------------------------------------------------------------ opting out
@@ -533,7 +745,7 @@ def test_until_done_default_deep_rounds(tmp_path):
     assert "--probe" not in argv[:sep] and "--keep-sandbox" not in argv[:sep]
     assert argv[sep + 1:] == ["--role-variant", "deep", "--subagents-push"]
     assert argv[:sep][argv[:sep].index("--depth") + 1] == "default"
-    # --shallow keeps the old, plain loop.
+    # --shallow keeps the plain loop.
     r, argv = _until_done_argv(tmp_path, [], depth_env="shallow")
     assert r.returncode == 0, r.stdout + r.stderr
     sep = argv.index("--")

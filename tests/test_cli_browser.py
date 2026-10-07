@@ -161,8 +161,8 @@ def test_network_request_body_hidden_by_default(tmp_path, server, fake):
 
 
 def test_browser_eval_opts_into_network_request(tmp_path, server, fake):
-    # --browser-eval already opted into the source-reaching browser_evaluate; it now
-    # opts into browser_network_request too -- both granted, neither hidden.
+    # --browser-eval opts into both source-reaching tools, browser_evaluate and
+    # browser_network_request -- both granted, neither hidden.
     r = go(tmp_path, ["--browser-eval", "hi"], server, fake, extra=bdir(tmp_path))
     assert r.returncode == 0, r.stderr
     argv, _ = calls(tmp_path)[0]
@@ -193,7 +193,7 @@ def test_browser_with_test_warns(tmp_path, server, fake):
                  QWEN_TEST_WORKTREES=posix(tmp_path / "wts"))
     r = go(tmp_path, ["--test", "--browser", "-C", posix(repo), "hi"], server, fake, extra=extra)
     assert r.returncode == 0, r.stderr
-    # the spec fixes the LINE to start with the flag pair, not "qwen-agent: WARNING: ..."
+    # the LINE starts with the flag pair, not "qwen-agent: WARNING: ..."
     assert any(ln.startswith("WARNING: --browser with --test") for ln in r.stderr.splitlines())
     assert "tests and checks can be gamed by browsing upstream answers" in r.stderr
     # without --test there is no warning (nothing to game), browser still on
