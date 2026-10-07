@@ -71,6 +71,7 @@ engine() { PYTHONPATH="$(native_path "$SKILL_DIR")" "$PY" "$(native_path "$SKILL
 
 BUILDER=""; BRIEF=""; REPO="$PWD"; BASE=""; GLOB=""; INPUT=""; DOCS=""; ITEMS=""
 DRY=0; RESUME=0; STRICT=0; ALLOW_EMPTY=0; BUDGET=""; ITEM_BUDGET=""; ROLE="auditor"; OUT=""
+SHALLOW=0
 PREFLIGHT=1
 case "${QWEN_PREFLIGHT:-1}" in 0|false|no) PREFLIGHT=0 ;; esac
 EXTRA_ARGS=()
@@ -115,6 +116,10 @@ OPTIONS
   --strict            a builder exception aborts the run instead of withholding the item
   --allow-empty       exit 0 even when there is nothing to audit
   --test              let every batch run the project's tests via qwen-test (implied by --builder deviations)
+  --shallow           batches answer once: no review round, no delegation nudge.
+                      Depth is the default (every batch gets qwen-agent --review-round
+                      --subagents-nudge, plus --role-variant deep for -r auditor/coder);
+                      this is the opt-out for a large fan-out run
   --no-preflight      skip the one-time server check (also QWEN_PREFLIGHT=0)
   -V, --version       print the version
 
@@ -171,6 +176,7 @@ while [ $# -gt 0 ]; do
     --allow-empty)  ALLOW_EMPTY=1; shift ;;
     --no-preflight) PREFLIGHT=0;   shift ;;
     --test)         TEST=1;        shift ;;
+    --shallow)      SHALLOW=1;     shift ;;
     -V|--version)   echo "qwen-sweep $SWEEP_VERSION"; exit 0 ;;
     -h|--help)      usage; exit 0 ;;
     *) echo "qwen-sweep: unknown option: $1 (see --help)" >&2; exit 2 ;;
@@ -197,6 +203,18 @@ done
 unset _n
 REPO="$(cd "$REPO" 2>/dev/null && pwd)" || { echo "qwen-sweep: --repo is not a directory" >&2; exit 2; }
 if [ "$TEST" -eq 1 ]; then DISPATCH_EXTRA=(--test --test-repo "$REPO"); else DISPATCH_EXTRA=(); fi
+# Depth is the default for a sweep too: every batch reviews its own answer and is nudged
+# to delegate, and an auditor/coder batch reads the deep variant of its role. The depth is
+# typed, never implied: an implied one would also imply --probe, whose sandbox is built
+# from a project tree, while this run's -C is a batch folder of extracted text. So
+# --shallow, which switches qwen-agent's own implying off, goes on every batch; what
+# differs is what follows it. --shallow here (the opt-out for a large fan-out run) leaves
+# the batches plain --shallow: one answer each, nothing typed.
+DEPTH_ARGS=(--shallow)
+if [ "$SHALLOW" -eq 0 ]; then
+  DEPTH_ARGS+=(--review-round --subagents-nudge)
+  case "$ROLE" in auditor|coder) DEPTH_ARGS+=(--role-variant deep) ;; esac
+fi
 
 # ---- one preflight for the whole sweep, instead of one failing retry per batch ----
 CTX_DETECTED=""
@@ -341,6 +359,7 @@ for d in "$OUT"/b[0-9][0-9]*; do
     # -C is the batch dir: no repo file is reachable by a relative path at all.
     "$DISPATCH" -r "$ROLE" -C "$d" -f "$d/brief.md" -o "$d/out.md" \
         ${DISPATCH_EXTRA[@]+"${DISPATCH_EXTRA[@]}"} \
+        "${DEPTH_ARGS[@]}" \
         >"$d/stdout.txt" 2>"$d/stderr.txt"
     rc=$?
     status="$(engine check --dir "$(native_path "$d")" | tr -d '\r')"

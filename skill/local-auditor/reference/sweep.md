@@ -34,7 +34,22 @@ qwen-sweep --builder deviations --repo . --base main --arg spec=SPEC.md
 | `--strict` | a builder exception aborts the run instead of withholding the item |
 | `--allow-empty` | exit 0 even when there is nothing to audit |
 | `--test` | let every batch run the project's tests via `qwen-test` (needs `QWEN_TEST_CMD`; implied by `--builder deviations`) |
+| `--shallow` | batches answer once: no review round, no delegation nudge. Depth is the default (see below), so this is the opt-out for a large fan-out run |
 | `--no-preflight` | skip the one-time server check (also `QWEN_PREFLIGHT=0`) |
+
+### Depth
+
+A sweep gives every batch the depth an auditor gets standing at the repo, and a batch is
+worth the same care: each one reviews its own answer (`qwen-agent --review-round`) and is
+nudged to delegate (`--subagents-nudge`), and an `--role auditor` or `--role coder` batch
+reads the deep variant of that role (`--role-variant deep`). What a batch does **not** get
+is the `--probe` sandbox that depth would otherwise imply: `--probe` copies a project tree,
+and a batch's `-C` is a folder of extracted text, so every batch is dispatched with
+`--shallow` and the depth is typed after it. `--shallow` to `qwen-sweep` itself is the
+opt-out for a fan-out too wide to review twice: the batches then get plain `--shallow` and
+answer once. `--timeout SECS` (or `QWEN_TIMEOUT`) is the wall clock of one batch, and a
+review round is a second qwen-agent call on it, so a deep sweep wants more of it than a
+shallow one.
 
 `claims` understands most source languages, but its guard against citing a comment as
 evidence is exact only for Python and approximate for C-family files (see `limits.md`).

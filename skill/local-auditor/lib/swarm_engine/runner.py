@@ -39,7 +39,7 @@ LEGACY = {"research": {"goal_key": "question", "goal_file": "question.md",
 DEFAULT_PROFILE = {"goal_key": "goal", "goal_file": "goal.md", "out_root": None,
                    "env": ("QWEN_SWARM_",)}
 RESUMABLE = "--seats, --web-seats, --timeout, --retries, --rounds, --hours, --effort, " \
-            "--role-effort, --deep and --keep-sandboxes"
+            "--role-effort, --deep, --shallow and --keep-sandboxes"
 # the --resume error keeps each command's own wording: deep-research's text is the one
 # it released with, which predates the engine-only --rounds and --keep-sandboxes
 RESUME_MSG = {
@@ -52,7 +52,8 @@ USAGE = {
     None: "usage: qwen-swarm WORKFLOW GOAL [--depth NAME] [--set KNOB=VALUE] [--target DIR] "
           "[--max-agents N] [--max-items N] [--seats N] [--web-seats N] [--timeout N] "
           "[--retries N] [--rounds N|until] [--hours H] [--effort LEVEL] "
-          "[--role-effort ROLE=LEVEL[,ROLE=LEVEL...]] [--deep ROLE[,ROLE...]|all] [--out DIR] "
+          "[--role-effort ROLE=LEVEL[,ROLE=LEVEL...]] [--deep ROLE[,ROLE...]|all] "
+          "[--shallow ROLE[,ROLE...]|all] [--out DIR] "
           "[--keep-sandboxes] | WORKFLOW --stdin | --resume RUN_DIR | --check WORKFLOW | --preflight [WORKFLOW] "
           "| --list",
     "deep-research": "usage: qwen-deep-research QUESTION "
@@ -202,15 +203,25 @@ def role_efforts(text, roles):
     return out
 
 
-def deep_roles(text, roles):
-    """--deep ROLE[,ROLE...] or all: the sorted role names that get every depth switch."""
+def _roles_of(flag, text, roles):
+    """ROLE[,ROLE...] or all for a depth flag: the sorted role names it names."""
     names = [r.strip() for r in text.split(",") if r.strip()]
     if names == ["all"]:
         return sorted(roles)
     if not names or any(n not in roles for n in names):
-        raise Usage("--deep: %r is not ROLE[,ROLE...] or all, with ROLE one of %s"
-                    % (text, ", ".join(roles)))
+        raise Usage("%s: %r is not ROLE[,ROLE...] or all, with ROLE one of %s"
+                    % (flag, text, ", ".join(roles)))
     return sorted(set(names))
+
+
+def deep_roles(text, roles):
+    """--deep ROLE[,ROLE...] or all: the sorted role names that get every depth switch."""
+    return _roles_of("--deep", text, roles)
+
+
+def shallow_roles(text, roles):
+    """--shallow ROLE[,ROLE...] or all: the roles that opt out of depth (the default)."""
+    return _roles_of("--shallow", text, roles)
 
 
 def load_json(path):
@@ -282,9 +293,11 @@ def parse_args(argv, compat=None):
     ap.add_argument("--effort")
     ap.add_argument("--role-effort", dest="role_effort")
     if compat is None:
-        # deeper agents (qwen-agent --review-round --subagents-nudge) per role; the released
-        # qwen-deep-research does not take it
+        # depth per role: --deep forces the switches on (qwen-agent --review-round
+        # --subagents-nudge), --shallow opts a role out of the default; the released
+        # qwen-deep-research takes neither
         ap.add_argument("--deep")
+        ap.add_argument("--shallow")
     ap.add_argument("--out")
     ap.add_argument("--target")
     ap.add_argument("--keep-sandboxes", action="store_true")
@@ -385,6 +398,8 @@ def _main(o, compat):
     max_unit = env_min_int(env, "MAX_UNIT_SECONDS", 1, swarm.MAX_UNIT_SECONDS)
     efforts = role_efforts(o.role_effort, tuple(m.roles)) if o.role_effort is not None else {}
     deep = deep_roles(o.deep, tuple(m.roles)) if getattr(o, "deep", None) is not None else None
+    shallow = (shallow_roles(o.shallow, tuple(m.roles))
+               if getattr(o, "shallow", None) is not None else None)
     seats, web_seats = _seats(o, env)
     if o.preflight:
         ok = preflight(o.agent)
@@ -446,6 +461,8 @@ def _main(o, compat):
                 "workflow_dir": None if folder.parent == BUILTIN else str(folder)})
     if deep is not None:
         cfg["deep"] = deep              # only when given: a run without it keeps its config
+    if shallow is not None:
+        cfg["shallow"] = shallow        # the depth opt-out per role, same rule
     try:
         mod = load_module(folder)
     except Exception as e:
@@ -575,6 +592,10 @@ def _resume(o, compat, wf_spec, words):
         stored = cfg.get("deep")
         stored = set(stored) if isinstance(stored, list) else set()
         cfg["deep"] = sorted(stored | set(deep_roles(o.deep, tuple(m.roles))))
+    if getattr(o, "shallow", None) is not None:
+        stored = cfg.get("shallow")
+        stored = set(stored) if isinstance(stored, list) else set()
+        cfg["shallow"] = sorted(stored | set(shallow_roles(o.shallow, tuple(m.roles))))
     if o.hours is not None:
         cfg["hours"] = o.hours
         cfg["deadline"] = utc_iso(time.time() + o.hours * 3600)

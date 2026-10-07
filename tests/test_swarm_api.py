@@ -108,9 +108,12 @@ def test_timeouts_effort_and_seats_follow_the_role(tmp_path, fake):
     wf.fan_out("read", "reader", items(6), prompt, echo_parse)
     wf.agent("one", "voter", "- C9:", lambda text: steps.extract_json(text))
     by = {pathlib.Path(a[a.index("-C") + 1]).name: a for a in calls(fake)}
-    assert by["work-1"][by["work-1"].index("--timeout") + 1] == "300"   # max(300, 2 x 100)
-    assert by["read-1"][by["read-1"].index("--timeout") + 1] == "400"   # weight 2: 2 x 2 x 100
-    assert by["one-1"][by["one-1"].index("--timeout") + 1] == "300"     # an agent counts 2 items
+    # default depth on: every role here is deep, and a review round is two qwen-agent
+    # calls, so each unit is handed half its timeout (the budget the unit itself gets is
+    # the max(300, ...) figure below, halved on the way to the agent)
+    assert by["work-1"][by["work-1"].index("--timeout") + 1] == "150"   # max(300, 2 x 100) / 2
+    assert by["read-1"][by["read-1"].index("--timeout") + 1] == "200"   # weight 2: 2 x 2 x 100, / 2
+    assert by["one-1"][by["one-1"].index("--timeout") + 1] == "150"     # an agent counts 2 items
     assert by["work-1"][by["work-1"].index("-e") + 1] == "high"          # --role-effort
     assert by["one-1"][by["one-1"].index("-e") + 1] == "low"             # the manifest's effort
     assert "-e" not in by["read-1"]                                      # nothing set: qwen-agent's

@@ -14,6 +14,10 @@ qwen-sweep --builder history    --repo . --arg files=src/net.py,src/retry.py
 
 - `--test` lets every batch run tests through `qwen-test` (needs `QWEN_TEST_CMD`).
   `--builder deviations` implies it.
+- Depth is the default: every batch reviews its own answer and is nudged to delegate
+  (`qwen-agent --review-round --subagents-nudge`), and an auditor/coder batch reads the
+  deep variant of its role. `--shallow` is the opt-out for a fan-out too wide to review
+  twice — then every batch answers once.
 - A big repo is just a big glob: batches are sized to the model's window automatically.
 - Batch EDITS are not a sweep job: use `local-coder` with one checklist item per file.
 

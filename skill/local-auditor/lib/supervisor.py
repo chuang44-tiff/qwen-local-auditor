@@ -112,7 +112,13 @@ def _backoff():
 
 def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", test=True,
                probe_here=False):
-    argv = list(agent) + ["--json", "--warn-denials", "-q", "-r", role]
+    # --shallow goes on the command line, not only into the environment below:
+    # qwen-agent reads its config file AFTER the environment, so a QWEN_DEPTH=deep
+    # sitting in the config would otherwise re-imply depth (a review round, a
+    # probe) into every round and into the audit. A typed flag beats env and
+    # config alike. The rounds carry the depth the loop decomposed once as typed
+    # tokens in the passthrough; nothing else may add to that.
+    argv = list(agent) + ["--shallow", "--json", "--warn-denials", "-q", "-r", role]
     if test:
         argv.append("--test")
     if probe_here:
@@ -148,10 +154,19 @@ def _run_agent(argv):
     signal handler could remove the qwen-test worktree. Instead the agent is
     asked to stop (SIGTERM; on POSIX it runs in its own session, so this is the
     only signal it gets) and given STOP_GRACE seconds to clean up before a kill.
+
+    Every agent call runs with QWEN_DEPTH=shallow (and a typed --shallow on its
+    command line, which beats a config file): the loop decomposed depth once
+    (qwen-agent.sh hands the rounds their switches as typed tokens), and a round
+    that re-implied depth would compound it -- review-round a review round,
+    nudge on top of a nudge -- until every round is a deep run.
     """
     posix = os.name == "posix"
+    env = dict(os.environ)
+    env["QWEN_DEPTH"] = "shallow"
     p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+                         env=env,
                          **({"start_new_session": True} if posix else {}))
     try:
         out, err = p.communicate()
@@ -248,7 +263,7 @@ _MUTATING_FLAGS = {"--write": 0, "--all-tools": 0, "--unrestricted": 0,
                    "-t": 1, "--tools": 1, "--toolset": 1, "--permission-mode": 1,
                    # The depth switches shape the coder's rounds; the audit stays the plain
                    # extraction its CONTRADICTION parser expects.
-                   "--role-variant": 1, "--subagents-nudge": 0}
+                   "--role-variant": 1, "--subagents-nudge": 0, "--subagents-push": 0}
 
 
 def _read_only_passthrough(passthrough):
@@ -359,7 +374,7 @@ def _tool_totals(repo, session):
 
 
 def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, start, repo, denied=(),
-            agent_err="", notes=(), tools=None, transcript_found=False, switches=()):
+            agent_err="", notes=(), tools=None, transcript_found=False, switches=(), depth=None):
     diff = _git(repo, "diff", start)
     new = _new_files(repo)
     for rel in new:
@@ -384,6 +399,7 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
         "tokens: %d" % tokens,
         "denied tool calls: %d%s" % (len(denied), " (%s)" % ", ".join(sorted(set(denied))) if denied else ""),
         "start commit: %s" % start,
+        *(["depth: %s" % depth] if depth else []),
         *(["switches: %s" % ", ".join(switches)] if switches else []), "",
         "## Checklist", "", "| # | item | status | evidence |", "|---|---|---|---|", *rows, "",
         "## Tool use", "", *tool_lines, "",
@@ -430,6 +446,8 @@ def _switches(o):
             out.append("role_variant=%s" % a.split("=", 1)[1])
         elif a == "--subagents-nudge":
             out.append("subagents_nudge")
+        elif a == "--subagents-push":
+            out.append("subagents_push")
     return out
 
 
@@ -635,7 +653,8 @@ def _run(o):
                 path = _report(run_dir, reason="error: %s: %s" % (type(exc).__name__, exc),
                                code=EXIT_HARNESS, rounds=rounds, session=session,
                                tokens=tokens, results=results, log=log, start=start,
-                               repo=run_dir, denied=denied, switches=_switches(o))
+                               repo=run_dir, denied=denied, switches=_switches(o),
+                               depth=getattr(o, "depth", None))
                 report_path = path
                 print("report: %s" % path)
                 return EXIT_HARNESS
@@ -789,7 +808,7 @@ def _run(o):
                        tokens=tokens, results=results, log=log, start=start, repo=repo,
                        denied=denied, agent_err=agent_err, notes=notes,
                        tools=tool_totals, transcript_found=transcript_found,
-                       switches=_switches(o))
+                       switches=_switches(o), depth=getattr(o, "depth", None))
         report_path = path
         print("until-done: %s after %d round(s); session %s" % (reason, rounds, session or "-"))
         if patch:
@@ -815,7 +834,8 @@ def _run(o):
                            session=session, tokens=tokens, results=results, log=log, start=start,
                            repo=run_dir if (o.probe and sb is None) else repo,
                            denied=denied, notes=notes,
-                           tools=tool_totals, transcript_found=transcript_found, switches=_switches(o))
+                           tools=tool_totals, transcript_found=transcript_found,
+                           switches=_switches(o), depth=getattr(o, "depth", None))
             report_path = path
             # A dead terminal (the window closed under the run) must not turn
             # the interrupt into exit 1: an OSError escaping this handler would
@@ -876,7 +896,7 @@ def _run(o):
                        repo=repo if sb is not None else run_dir,
                        denied=denied, agent_err=agent_err, notes=notes,
                        tools=tool_totals, transcript_found=transcript_found,
-                       switches=_switches(o))
+                       switches=_switches(o), depth=getattr(o, "depth", None))
         report_path = path
         with contextlib.suppress(OSError):
             if patch:
@@ -967,6 +987,11 @@ def main(argv=None):
     ap.add_argument("--review-round", action="store_true")
     ap.add_argument("--probe", action="store_true")
     ap.add_argument("--keep-sandbox", action="store_true")
+    # The depth mode the shell computed for this loop (report.md records it). The
+    # shell decomposes depth ONCE: every agent call this runs gets a typed
+    # --shallow and QWEN_DEPTH=shallow (see _run_agent), so a round never implies
+    # a depth switch of its own.
+    ap.add_argument("--depth", choices=("default", "deep", "shallow"), default=None)
     try:
         o = ap.parse_args(argv)
     except SystemExit:

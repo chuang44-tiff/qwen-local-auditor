@@ -161,8 +161,10 @@ def test_role_deep_field(tmp_path, deep, want):
     assert load(tmp_path, **role_with(deep)).roles["worker"].deep == want
 
 
-def test_role_deep_defaults_to_none(tmp_path):
-    assert load(tmp_path).roles["worker"].deep == ()
+def test_role_deep_defaults_to_every_switch(tmp_path):
+    # default depth on: a role that says nothing about depth gets the whole depth;
+    # "deep": false (above) is the opt-out
+    assert load(tmp_path).roles["worker"].deep == ("review_round", "subagents")
 
 
 @pytest.mark.parametrize("deep,needle", [

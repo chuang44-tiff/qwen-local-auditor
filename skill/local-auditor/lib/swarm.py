@@ -145,7 +145,9 @@ class Unit:
         # deadline stopped), and teardown once when it ends, whatever the outcome
         self.setup, self.teardown = setup, teardown
         # qwen-agent depth switches: "review_round" (--review-round), "subagents"
-        # (--subagents-nudge); () keeps the unit's argv and cache key exactly as before
+        # (--subagents-nudge), "subagents_push" (--subagents-push, which replaces the
+        # nudge when both are listed); () leaves the unit plain --shallow and its
+        # cache key exactly as before
         self.deep = tuple(deep)
 
 
@@ -175,7 +177,11 @@ class Swarm:
             # --timeout it is handed: halve the unit's budget (down, never below 1s)
             # so a deep unit still fits the one unit's time MAX_UNIT_SECONDS promises.
             timeout = max(1, timeout // 2)
-        argv = self.agent_cmd + ["--json", "-q", "--warn-denials",
+        # --shallow on every unit: depth is the unit's own decision below, never one
+        # qwen-agent implies for itself. An implied --probe would sandbox the unit's -C
+        # folder (its own empty agents/<name>/ directory, not a project), and a sandbox
+        # role already has a shell -- so no unit gets one, whatever its depth.
+        argv = self.agent_cmd + ["--json", "-q", "--warn-denials", "--shallow",
                                  "--role-file", str(u.role_file),
                                  "--toolset", u.toolset or "none",
                                  "--permission-mode", "dontAsk", "--timeout", str(timeout),
@@ -193,7 +199,11 @@ class Swarm:
             # a repair round only re-asks for the answer's format: no second review there
             if "review_round" in u.deep:
                 argv.append("--review-round")
-            if "subagents" in u.deep:
+            if "subagents_push" in u.deep:
+                # the mandate replaces the nudge: with both names in the list the
+                # unit gets push only, exactly as qwen-agent resolves the pair
+                argv.append("--subagents-push")
+            elif "subagents" in u.deep:
                 argv.append("--subagents-nudge")
         if resume:
             argv += ["--resume", resume]

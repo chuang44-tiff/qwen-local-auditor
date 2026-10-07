@@ -445,11 +445,15 @@ def test_deep_flag_gives_a_role_the_depth_switches(tmp_path, fake):
     assert all("--review-round" in a and "--subagents-nudge" in a for a in calls_of(fake))
 
 
-def test_no_deep_flag_leaves_config_and_argv_alone(tmp_path, fake):
+def test_no_depth_flag_leaves_the_config_alone_and_runs_deep(tmp_path, fake):
+    # default depth on: neither "deep" nor "shallow" is written unless its flag is given,
+    # and the units get the depth switches (besides their always-present --shallow) anyway
     out = tmp_path / "run"
     assert swarm_main(echo(tmp_path), "g", "--out", str(out)) == 0
-    assert "deep" not in json.loads((out / "config.json").read_text(encoding="utf-8"))
-    assert not any("--review-round" in a for a in calls_of(fake))
+    cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
+    assert "deep" not in cfg and "shallow" not in cfg
+    assert all("--shallow" in a and "--review-round" in a and "--subagents-nudge" in a
+               for a in calls_of(fake))
 
 
 def test_manifest_deep_reaches_the_agents(tmp_path, fake):
@@ -467,9 +471,14 @@ def test_deep_flag_names_roles_or_all(tmp_path, fake, capsys, value):
 
 
 def test_deep_on_resume_is_merged_and_reruns_the_units(tmp_path, fake):
+    # default depth on: the role starts out "deep": false, because a role that is already
+    # deep by default has no cache key left for --deep to change
     out = tmp_path / "run"
-    assert swarm_main(echo(tmp_path), "g", "--out", str(out)) == 0
+    shallow_worker = {"worker": {"file": "roles/worker.md", "fence": "none", "deep": False}}
+    assert swarm_main(echo(tmp_path, manifest={"roles": shallow_worker}), "g",
+                      "--out", str(out)) == 0
     first = len(calls_of(fake))
+    assert all("--review-round" not in a for a in calls_of(fake))
     assert swarm_main("--resume", str(out), "--deep", "all") == 0
     assert json.loads((out / "config.json").read_text(encoding="utf-8"))["deep"] == ["worker"]
     later = calls_of(fake)[first:]

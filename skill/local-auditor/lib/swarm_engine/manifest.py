@@ -15,9 +15,13 @@ ENGINE_KNOBS = ("budget", "retries", "rounds", "hours")
 TOP_KEYS = ("name", "description", "goal", "target", "roles", "knobs", "presets",
             "default_depth")
 ROLE_KEYS = ("file", "fence", "budget_weight", "effort", "deep")
-# qwen-agent depth switches a role may ask for ("deep": true = all of them), in the order
-# qwen-agent is given them: --review-round, --subagents-nudge.
+# qwen-agent depth switches a role may ask for ("deep": true, or no "deep" field at all,
+# = all of them; "deep": false = none of them), in the order qwen-agent is given them:
+# --review-round, --subagents-nudge. A role's default depth keeps nudging; a list may
+# ask for "subagents_push" (--subagents-push, the mandate that replaces the nudge text)
+# instead of or on top of "subagents" -- qwen-agent lets push win.
 DEEP_SWITCHES = ("review_round", "subagents")
+_DEEP_LIST = DEEP_SWITCHES + ("subagents_push",)
 # config.json keys a knob would shadow
 RESERVED = ENGINE_KNOBS + ("workflow", "workflow_dir", "goal", "question", "depth",
                            "max_agents", "max_items", "timeout_per_item", "effort",
@@ -37,7 +41,7 @@ class Role:
     def __init__(self, name, file, fence, budget_weight, effort, deep=()):
         self.name, self.file, self.fence = name, file, fence
         self.budget_weight, self.effort = budget_weight, effort
-        self.deep = tuple(deep)         # a subset of DEEP_SWITCHES, in that order
+        self.deep = tuple(deep)         # switch names in the order _DEEP_LIST gives them
 
 
 class Manifest:
@@ -85,7 +89,9 @@ def _check_engine(depth, preset):
 
 
 def _deep(where, value):
-    """A role's "deep" field as a tuple of DEEP_SWITCHES: true = all, false = none, or a list."""
+    """A role's "deep" field as a tuple of switch names: true or absent = all of
+    DEEP_SWITCHES (depth is the default; nudging stays the default), false = none (the
+    shallow opt-out), or a list of the switches wanted, "subagents_push" included."""
     if value is True:
         return DEEP_SWITCHES
     if value is False:
@@ -98,15 +104,15 @@ def _deep(where, value):
                                 % (where, value))
     else:
         raise ManifestError("%s.deep must be true, false or a list of %s (got %r)"
-                            % (where, ", ".join(DEEP_SWITCHES), value))
+                            % (where, ", ".join(_DEEP_LIST), value))
     if "probe" in value:
         raise ManifestError("%s.deep: \"probe\" is not a manifest option: a sandbox role already "
                             "has a shell, and the other fences have no tree to probe" % where)
     for v in value:
-        if v not in DEEP_SWITCHES:
+        if v not in _DEEP_LIST:
             raise ManifestError("%s.deep: unknown switch %r (allowed: %s)"
-                                % (where, v, ", ".join(DEEP_SWITCHES)))
-    return tuple(d for d in DEEP_SWITCHES if d in value)
+                                % (where, v, ", ".join(_DEEP_LIST)))
+    return tuple(d for d in _DEEP_LIST if d in value)
 
 
 def validate(data, folder):
@@ -167,7 +173,8 @@ def validate(data, folder):
         effort = spec.get("effort")
         if effort is not None and not (isinstance(effort, str) and _EFFORT.fullmatch(effort)):
             raise ManifestError("%s.effort must be a level name such as low or high" % where)
-        roles[rname] = Role(rname, path, fence, weight, effort, _deep(where, spec.get("deep", False)))
+        # depth is the default: only an explicit "deep": false opts a role out
+        roles[rname] = Role(rname, path, fence, weight, effort, _deep(where, spec.get("deep", True)))
     knobs = data["knobs"]
     if not isinstance(knobs, dict):
         raise ManifestError("knobs must be an object of name: type")

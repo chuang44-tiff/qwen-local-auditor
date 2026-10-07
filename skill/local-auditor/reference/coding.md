@@ -131,18 +131,32 @@ disk).
 | `--allow-dirty` | start even with uncommitted changes |
 | `--no-deviation-audit` | skip the spec-vs-diff audit after the checks pass |
 
-### Deeper rounds (opt-in)
+### Depth: the rounds are deep by default
 
-The depth switches of [`qwen-agent.md`](qwen-agent.md#depth-switches-opt-in) work with
-`--until-done` too:
+Depth ([`qwen-agent.md`](qwen-agent.md#depth-the-default)) is the default for the loop
+too, and it decomposes ONCE, in the shell before the loop starts: the coder rounds get
+V, R and the delegation push (`--subagents-push`, which replaces the softer
+`--subagents-nudge` text) — what `--deep` forwards, minus `--probe`, which stays the
+loop's own sandbox and is only ever typed. Every round's agent call then runs with `--shallow` on its
+command line and `QWEN_DEPTH=shallow` in its environment (the flag, because a
+`QWEN_DEPTH=deep` in the config file would outrank the env var), so a round never
+implies a depth switch of its own; `--shallow` (or `QWEN_DEPTH=shallow`)
+restores the plain loop, and a typed token outranks the implied one. A single direct
+depth run defaults its `--timeout` to 3600 s, and under depth the shell hands that
+3600 default to every round through `QWEN_TIMEOUT` in the environment the rounds
+inherit, unless `--timeout` or `QWEN_TIMEOUT` was given; a `--shallow` loop keeps the
+1800 default.
 
-- `--role-variant deep` and `--subagents-nudge` go to every round (coder-deep adds the
-  edge-case pass); the deviation audit stays the plain auditor.
+- `--role-variant deep` and `--subagents-push` go to every round (coder-deep adds the
+  edge-case pass and its finish check; the push text replaces the nudge text); the
+  deviation audit stays the plain auditor — the supervisor strips the depth tokens
+  from its passthrough.
 - `--review-round`: when the checks first pass, one more round resumes the session with a
   "try to break your change" prompt, then every check (and the deviation audit) runs
   again. It counts toward `--max-rounds`; with no round or budget left it is skipped and
   the report says so.
-- `--probe`: the whole loop runs in one sandbox under the run folder, with your
+- `--probe`, TYPED only (an implied `--probe` is for single read-only runs — a coding
+  loop writes): the whole loop runs in one sandbox under the run folder, with your
   uncommitted and untracked files in it (no `--allow-dirty` needed); each round gets a
   shell there (`--probe-here`), the checks run there, and nothing in your work tree,
   index or refs is written (the sandbox shares your repository's object files, so git
@@ -155,13 +169,15 @@ The depth switches of [`qwen-agent.md`](qwen-agent.md#depth-switches-opt-in) wor
   and its path is printed as `sandbox kept: PATH`. Every printed apply command is
   shell-quoted and pastes into a shell as it stands. `--keep-sandbox` keeps
   `RUN/sandboxes/tree`.
-- `--deep` is all four (it takes no value; combining it with another `--role-variant`
-  is a usage error). `report.md` lists the switches on a `switches:` line.
+- `--deep` is all four TYPED at once (it takes no value; combining it with another
+  `--role-variant` is a usage error; with `--shallow`: exit 2). `report.md` records the
+  mode on a `depth:` line and lists the switches used on a `switches:` line.
 
 ### The report
 
 The last stdout line is `report: <path>`. `report.md` holds the final checklist with
-evidence, the stop reason, the decision log, the new (untracked) files, any denied tool
+evidence, the stop reason, the depth mode and switches used, the decision log, the new
+(untracked) files, any denied tool
 calls, and a `## Tool use` table that shows whether subagents were used (when the session
 transcript is readable). Read the new files and the denials before trusting a "done".
 Reports and run state live in `QWEN_AGENT_STATE` (default `$XDG_CACHE_HOME/qwen-agent/runs`),

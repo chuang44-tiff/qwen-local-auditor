@@ -57,8 +57,12 @@ qwen-agent -r auditor -C <dir> -f brief.md -o out.md
 - A bare run is read-only with MCP dropped. Writing requires `--write` or an explicit
   `--toolset` naming Edit/Write/Bash.
 - `-o` is relative to your current directory, never to `-C`.
-- Deeper, opt-in and still being measured: `-r auditor --deep` audits in a throwaway
-  sandbox with a shell and a review round (`reference/qwen-agent.md`, "Depth switches").
+- DEPTH IS THE DEFAULT: a plain `-r auditor` run already gets the deep auditor text, a
+  review round, subagent delegation and — being read-only — a throwaway sandbox with a
+  shell (your tree is only read there). `--shallow` is the quick-question mode without
+  any of it (1800 s default timeout; a depth run defaults to 3600 s); `--deep` types all
+  four switches at once with their refusals
+  (`reference/qwen-agent.md`, "Depth: the default").
 
 ## Running tests and reproduction tests
 
@@ -71,7 +75,9 @@ worktree) and nothing else, under `claude --restricted`; it refuses `-w`, `--all
 `--toolset`, `--read-only` and any `--permission-mode`. The tests it runs are code that runs as
 the user, so use it only on code you would run. The auditor may write ONLY
 inside that worktree; files it writes come back under `## REPRO FILES` in the result,
-for you or local-coder to adopt. It needs `QWEN_TEST_CMD` in the config.
+for you or local-coder to adopt. That is why a `--test` run gets no implied sandbox
+even under depth: the sandbox takes the reproduction test with it at exit (a typed
+`--probe` still gets its shell). It needs `QWEN_TEST_CMD` in the config.
 
 ## Why does the code differ from the spec?
 

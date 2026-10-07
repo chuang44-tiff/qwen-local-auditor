@@ -58,7 +58,13 @@ explicitly asked you to accept that prompt: the permission decision is theirs. `
 ## 4. What stays the same in all of them
 
 - Read-only is the default; writing and tests are explicit flags.
-- A plain `qwen-agent` run gets no shell: `qwen-test` is the one command `--test` grants it
+- DEPTH is the default too: a direct `qwen-agent` run gets the depth switches that fit it
+  (deep role variants, a review round, subagent delegation; `--probe` for a read-only
+  run), and a 3600 s default `--timeout`. `--shallow` is the opt-out for quick questions
+  (1800 s).
+- A plain read-only `qwen-agent` run gets a full shell only inside its throwaway sandbox
+  copy of the project (the implied `--probe`; your tree is only read there). Outside a
+  sandbox it gets no shell: `qwen-test` is the one command `--test` grants it
   (an interactive `qwen-cc` session is the user's own Claude Code, with its normal
   permission prompts). A `local-swarm` workflow chooses its tools per role's fence instead:
   a `sandbox` agent gets a shell inside a throwaway clone of the target, and a `read` agent

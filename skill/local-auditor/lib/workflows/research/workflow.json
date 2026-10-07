@@ -10,16 +10,19 @@
   },
   "searcher": {
    "file": "roles/searcher.md",
-   "fence": "search"
+   "fence": "search",
+   "deep": false
   },
   "reader": {
    "file": "roles/reader.md",
    "fence": "web",
-   "budget_weight": 2
+   "budget_weight": 2,
+   "deep": false
   },
   "verifier": {
    "file": "roles/verifier.md",
-   "fence": "web"
+   "fence": "web",
+   "deep": false
   },
   "planner": {
    "file": "roles/planner.md",

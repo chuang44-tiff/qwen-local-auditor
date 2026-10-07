@@ -43,8 +43,11 @@ Code's own system prompt, never replacing it (replacing it breaks tool use).
 
 ## Tool policy: what a run may do
 
-The default is read-only; every widening is a flag. Any run that can modify files or run
-a shell (`--write`, the `coder` and `mechanic` roles, `--all-tools`, a `--toolset` naming Edit/Write/Bash, a
+The default is read-only: every widening that can touch YOUR tree is a flag. A bare
+run under the default depth does get Bash, Edit and Write (see
+[`Depth`](#depth-the-default)), but only inside a throwaway sandbox copy of the
+project — your tree is only ever read there. Any run that can modify files or run
+a shell on your tree (`--write`, the `coder` and `mechanic` roles, `--all-tools`, a `--toolset` naming Edit/Write/Bash, a
 read-only `--test` run) prints a warning on stderr, and so does `--web` or `--browser`
 combined with `--test`.
 
@@ -67,48 +70,92 @@ combined with `--test`.
 
 What the fence does and does not guarantee, measured, is in [`limits.md`](limits.md).
 
-## Depth switches (opt-in)
+## Depth: the default
 
-Four switches make a session go deeper. Each is off by default and is being measured
-(seeded-defect recall and precision for audits, hidden-test pass rate for coding) before
-any of them becomes a default. They compose with the other flags.
+Four switches make a session go deeper, and they are the DEFAULT: every direct run gets
+the ones that FIT it, silently dropping the rest. `--shallow` (or `QWEN_DEPTH=shallow`,
+environment or config) is the opt-out — the quick-question mode. What a run gets
+unasked:
+
+- `--role-variant deep` — only a role that HAS a deep variant: `auditor` and `coder`.
+- `--review-round` and `--subagents-push` — every session; not `--interactive`, not
+  `--resume`, not a mode that never starts one (`--preflight-only`), and not when
+  `--toolset none` was typed. `--dry-run` starts no session and makes no second call,
+  but it shows both: the delegation push is part of the printed argv, and the review
+  round is noted as `# review round: one --resume call after the first`.
+- `--probe` — only a READ-ONLY run (no `--write`, not `coder`/`mechanic`, no
+  `--until-done`, not `--interactive`/`--resume`/`--probe-here`/`--browser`, no
+  `--test` — its reproduction test must survive the run, and a sandbox deletes
+  itself at exit —, no typed `-t/--tools`, `--toolset`, `--all-tools`,
+  `--read-only`, `--permission-mode` or `-D/--add-dir`, and a sandbox that can
+  actually be built here).
+
+An implied part never causes a refusal: where a typed switch refuses, its implied
+counterpart steps aside — including refusals only the sandbox build itself can know
+(an ignored `-C` directory, a `--test-repo` that does not contain `-C`): one note on
+stderr, and the run goes on unsandboxed. `--deep`'s own `--probe` is this implied one
+(only a typed `--probe` is typed) and steps aside the same way — except where the run
+WRITES: there the sandbox is the promise that the edits come back as a patch and your
+tree stays untouched, so a build that cannot be made ends the run. Typed switches keep
+every refusal.
+`--shallow` with a typed part runs exactly that part; `--shallow` and `--deep`
+together exit 2. A depth run — implied or typed — defaults `--timeout` to **3600 s**
+(1800 with `--shallow`); a typed `--timeout` or `QWEN_TIMEOUT` always wins.
+`--until-done` gets V, R and the delegation push on its coder rounds, `--probe` only
+if typed, and the
+3600 s default handed to every round through `QWEN_TIMEOUT` in their environment
+unless one was typed; see [`coding.md`](coding.md).
 
 | switch | effect |
 |---|---|
-| `--role-variant deep` | the deep variant of `-r auditor` or `-r coder`. auditor-deep maps what the code must guarantee, tries to trigger each failure mode (with `--probe`: by running probes or tests), records evidence for every verdict, defaults to FAIL when evidence is missing, and lists unverified suspicions separately. coder-deep is the coder text plus an edge-case pass after the checks, ending with an `EDGE CASES` section. Other roles, `--role-file` and other variant names: exit 2. `-r` and `--list-roles` are unchanged |
-| `--subagents-nudge` | `--subagents` plus a section on when to delegate (independent probes, big or many files, long logs), what to hand a subagent (a self-contained question and the paths) and to verify what it reports |
-| `--review-round` | after a clean end, the session is resumed once (`--resume <session id>`) with a fixed prompt: try to break what you just did or reported, check each claim, revise, and give the complete answer again in the same format. The revised answer is the result. A failed review call leaves the first answer and exit code in place, with a `WARNING` on stderr. Each of the two calls gets the full `--timeout` |
-| `--probe` | the session runs in a throwaway sandbox of the project: the git work tree holding `-C` (or `--test-repo DIR`), with your uncommitted and untracked files, never ignored ones. It gets Bash, Edit and Write, `--permission-mode dontAsk` and `claude --restricted`; denials are reported as usual. Nothing in your work tree, index or refs is ever written; because the sandbox shares your repository's object files, git may refresh their mtimes (no object's content changes). A write run (`--write`, `-r coder`, `-r mechanic`) reports its edits as a patch and applies nothing: `FILE.patch` next to `-o FILE` (always written, empty when nothing changed), else a new `qwen-agent-XXXXXXXX.patch` — in `QWEN_OUTDIR` when you set it, otherwise in the probe directory, never in the tree being probed (and only when something changed); the path and the shell-quoted, paste-ready `git -C <tree> apply` line are printed on stderr. The sandbox is removed at exit, also on a timeout or a signal |
+| `--shallow` (`QWEN_DEPTH=shallow`) | no implied depth: only the switches you type. With `--deep`: exit 2 |
+| `--role-variant deep` | the deep variant of `-r auditor` or `-r coder`, implied for exactly those two roles. auditor-deep maps what the code must guarantee, lists every public entry point and makes each carry a failure mode (or a one-line reason it cannot fail visibly), tries to trigger each failure mode (with `--probe`: by running probes or tests), records evidence for every verdict, defaults to FAIL when evidence is missing, finishes by attempting every failure mode it had not, and ends with a `COVERAGE` section (entry point by entry point, FAIL / PASS / UNVERIFIED per failure mode) plus unverified suspicions listed separately. coder-deep is the coder text plus an edge-case pass after the checks, ending with an `EDGE CASES` section and a finish check that names the probe and result per edge case or parks it under `NOT CHECKED`. Other roles, `--role-file` and other variant names: exit 2. `-r` and `--list-roles` are unchanged |
+| `--subagents-nudge` | `--subagents` plus a section on when to delegate (independent probes, big or many files, long logs), what to hand a subagent (a self-contained question and the paths) and to verify what it reports. Typed; depth now implies `--subagents-push` instead, but `qwen-sweep` batches still nudge |
+| `--subagents-push` | `--subagents` plus a section that makes delegation part of the task, not optional: split the work into independent areas, keep one, hand every other area to a subagent one at a time with a self-contained brief (exact paths, questions to answer, path:line evidence and the commands run), verify each subagent's key claims, and close with a `DELEGATION` section. It REPLACES the nudge text when both apply — push wins. Implied on every session by `--deep` and by the default depth; with `--review-round` the review prompt additionally hands the re-verification of the three most important claims to a subagent |
+| `--review-round` | implied on every session. After a clean end, the session is resumed once (`--resume <session id>`) with a fixed prompt: try to break what you just did or reported, check each claim, revise, and give the complete answer again in the same format. The prompt also asks for a `REVIEW` section — each earlier claim or change re-checked, the check run, and what changed (kept, corrected, dropped) — with particular attention to what the first pass never covered; with `--subagents-push` it adds handing the re-verification of the three most important claims to a subagent and comparing. The revised answer is the result. A failed review call leaves the first answer and exit code in place, with a `WARNING` on stderr — and so does a review answer shorter than 300 characters when the first answer had 1000 or more (a stub is the auto-compact failure, not a review). Each of the two calls gets the full `--timeout` |
+| `--probe` | implied for a read-only run (and it steps aside, unheard, wherever a typed one would refuse or the sandbox cannot be built). The session runs in a throwaway sandbox of the project: the git work tree holding `-C` (or `--test-repo DIR`), with your uncommitted and untracked files, never ignored ones. It gets Bash, Edit and Write — even a read-only role such as `auditor`, since the sandbox is throwaway and no patch is reported for a read-only role, so a scratch file is a tool call, not a denial —, `--permission-mode dontAsk` and `claude --restricted`; denials are reported as usual. Nothing in your work tree, index or refs is ever written; because the sandbox shares your repository's object files, git may refresh their mtimes (no object's content changes). A write run (`--write`, `-r coder`, `-r mechanic`) reports its edits as a patch and applies nothing: `FILE.patch` next to `-o FILE` (always written, empty when nothing changed), else a new `qwen-agent-XXXXXXXX.patch` — in `QWEN_OUTDIR` when you set it, otherwise in the probe directory, never in the tree being probed (and only when something changed); the path and the shell-quoted, paste-ready `git -C <tree> apply` line are printed on stderr. The sandbox is removed at exit, also on a timeout or a signal |
 | `--keep-sandbox` | with `--probe`: keep the sandbox and print its path (`sandbox kept: PATH`) |
 | `--probe-here` | the `-C` directory is checked to be inside a sandbox kept by `--probe --keep-sandbox` (a plain checkout — yours above all — is refused with exit 2). There: the probe fence, nothing created or removed, no patch; `--test-repo` is refused, and `--test` runs the sandbox's own tests. This is how a probe session is resumed: `qwen-agent --probe-here -C <kept path> --resume ID "..."` (a fresh `--probe` refuses `--resume`, because Claude Code finds a session by its directory) |
-| `--deep` | all four: `--probe --role-variant deep --review-round --subagents-nudge`; it takes no value, and combining it with another `--role-variant` is a usage error; needs `-r auditor` or `-r coder` (or `--until-done`); with `--probe-here` it resumes in the kept sandbox instead of making a new one |
+| `--deep` | all four TYPED at once: `--probe --role-variant deep --review-round --subagents-push`, with the typed refusals intact (the implied default drops what does not fit instead of refusing; deep's own `--probe` still steps aside where the sandbox cannot be built, as the implied one — a writing run refuses instead); it takes no value, and combining it with another `--role-variant` is a usage error; needs `-r auditor` or `-r coder` (or `--until-done`); with `--probe-here` it resumes in the kept sandbox instead of making a new one; with `--shallow`: exit 2 |
 
 `--probe` and `--probe-here` refuse `--interactive`, `-w`, `--all-tools`, `--toolset`,
 `--read-only`, `-t/--tools`, `--permission-mode` and `-D/--add-dir` (exit 2); `--interactive`
 refuses every switch above. Sandboxes — and the default patch of a `--probe --write` run
 that gave no `-o` — live under `QWEN_PROBE_DIR` (default
 `$XDG_CACHE_HOME/qwen-agent/probes`, else `~/.cache/qwen-agent/probes`), which may not be
-inside the tree being copied. These runs clear `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+inside the tree being copied. Every run that USES a sandbox (a typed `--probe`,
+`--probe-here` or `--deep`, or an implied `--probe` that was not stepped aside)
+clears `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
 `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` from the
 environment, so an inherited git setting cannot point the session's git calls at your
-tree. A sandbox protects your tree from accidents, not from a hostile model: a shell can
+tree; a run with no sandbox keeps them. A sandbox protects your tree from accidents, not from a hostile model: a shell can
 still `cd` out of it.
 
-With `--json`, a run that used any switch carries a `qwen_agent` key next to Claude Code's
-own fields (a run without one emits Claude Code's record unchanged):
+With `--json`, a depth run carries a `qwen_agent` key next to Claude Code's own fields
+saying which depth ran and which switches were used (a `--shallow` run that typed no
+switch emits Claude Code's record unchanged):
 
 ```json
 "qwen_agent": {
-  "switches": {"probe": true, "role_variant": "deep", "review_round": true, "subagents_nudge": true},
+  "depth": "default",
+  "switches": {"probe": true, "role_variant": "deep", "review_round": true, "subagents_nudge": false, "subagents_push": true},
   "review_round": {"status": "ok", "first_session": "<id>", "warning": null},
   "patch": "/path/out.json.patch",
   "sandbox": null
 }
 ```
 
-`review_round` (`status` `ok`, `failed` or `skipped`) is present with `--review-round`,
-`patch` and `sandbox` (the kept path, else `null`) with `--probe`/`--probe-here`. With
-`--until-done` the switches behave as described in [`coding.md`](coding.md).
+`depth` is `"default"` (the implied set), `"deep"` (`--deep` typed) or `"shallow"`;
+`switches` names the switches actually used — `subagents_push` appears only on runs
+that pushed (`--subagents-push`, typed or implied; a nudge run says
+`"subagents_nudge": true` without it). `review_round` (`status` `ok`, `failed` or
+`skipped`) is present with `--review-round`, `patch` and `sandbox` (the kept path, else
+`null`) with `--probe`/`--probe-here`. A run whose final answer is shorter than 300
+characters after more than 20 requests (the auto-compact failure signature) adds
+`"short_answer_warning": true` and prints `WARNING: the answer is suspiciously short
+for a long session (possible auto-compact failure); check it` on stderr; the answer
+still stands. With `--until-done` the switches behave as described in
+[`coding.md`](coding.md).
 
 ## Browser testing (opt-in)
 
@@ -206,7 +253,7 @@ qwen-agent -r tester --headed "watch the checkout flow at http://localhost:3000"
 | `--auto-model` | `QWEN_AUTO_MODEL=1` | if the configured model is not served but exactly one other is, use it |
 | `--no-preflight` | `QWEN_PREFLIGHT=0` | skip the `/v1/models` check |
 | `--preflight-only` | | run the checks and exit: 0 usable, 2, 3 or 8 not. Also runs with `QWEN_PREFLIGHT=0` |
-| `--timeout SECS` / `--no-timeout` | `QWEN_TIMEOUT` | wall clock, default 1800; `0` is refused |
+| `--timeout SECS` / `--no-timeout` | `QWEN_TIMEOUT` | wall clock; default 3600 whenever depth is on (the default), 1800 with `--shallow`; a set `QWEN_TIMEOUT` wins over both; `0` is refused |
 
 Preflight exit 0 means the server is up, a model is actually served (the configured one,
 or the only one), and a working python and `claude` were found by running them. Exit 3

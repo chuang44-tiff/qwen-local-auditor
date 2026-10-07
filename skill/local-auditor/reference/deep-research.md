@@ -27,6 +27,15 @@ planner (from round 2), synthesizer:
 
 Every agent is a Claude Code session on the local model, run through `qwen-agent`.
 
+Depth (a review round of its own answer, and the nudge to delegate) is the default for a
+role, so the three single-agent roles — scoper, planner, synthesizer — get it. The three
+high fan-out roles do not: search, fetch and verify mark themselves `"deep": false` in the
+manifest, because a review round is a second call and these phases already run dozens of
+agents. `qwen-deep-research` has no flag for any of it (that is what its manifest says);
+`qwen-swarm research` takes `--deep ROLE` and `--shallow ROLE` to steer it from outside.
+Every unit is dispatched with `--shallow` first, so no agent gets the `--probe` sandbox
+qwen-agent would otherwise imply for the empty folder it runs in.
+
 Between phases the harness does only mechanical work, deliberately: those are the steps an LLM
 loses track of. URLs are normalised (scheme and host lowercased, fragment and the `utm_*`,
 `fbclid`, `gclid` and `ref` params dropped), deduped, ranked by best relevance then by how

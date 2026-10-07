@@ -51,6 +51,10 @@ Rules that keep a workflow resumable:
   business — the user's `--set`, the workflow's own code, or an agent's proposal (with no
   `--set repro=`, debug runs the triager's reproduction) — but it never runs anywhere but
   in that sandbox.
+- Depth is the default: an agent reviews its own answer and is nudged to delegate unless
+  its role says `"deep": false` (what a high fan-out role says), `--deep ROLE` forces
+  depth on and `--shallow ROLE` opts out. Mark a role that fans out over many items
+  shallow; the review round is a second call per unit.
 
 Before launching anything (step 3), run
 
@@ -87,5 +91,5 @@ Read the report (the path is the last line of stdout on exit 0 and 4).
 After an exit 8 in your own workflow, fix `workflow.py` and continue with
 `qwen-swarm --resume RUN`: finished agents are reused from the cache. Exit 130 or a crash:
 `qwen-swarm --resume RUN` too. On resume only `--seats`, `--web-seats`, `--timeout`,
-`--retries`, `--rounds`, `--hours`, `--effort`, `--role-effort` and `--keep-sandboxes`
-may change.
+`--retries`, `--rounds`, `--hours`, `--effort`, `--role-effort`, `--deep`, `--shallow` and
+`--keep-sandboxes` may change.

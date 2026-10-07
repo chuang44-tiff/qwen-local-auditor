@@ -90,6 +90,8 @@ AUTOCOMPACT="${QWEN_AUTOCOMPACT:-default}"
 EFFORT="${QWEN_EFFORT:-medium}"
 EFFORT_ALLOWED="${QWEN_EFFORT_ALLOWED:-}"
 TIMEOUT="${QWEN_TIMEOUT:-1800}"
+TIMEOUT_EXPLICIT=0                       # --timeout typed, or QWEN_TIMEOUT (env or config) set
+[ -n "${QWEN_TIMEOUT:-}" ] && TIMEOUT_EXPLICIT=1
 TIMEOUT_BIN=""                           # resolved below (env QWEN_TIMEOUT_BIN; 'none' = built-in watchdog)
 CLAUDE_BIN="${QWEN_CLAUDE_BIN:-claude}"
 SETTING_SOURCES="${QWEN_SETTING_SOURCES:-}"
@@ -162,6 +164,8 @@ TEST_REPO=""        # --test-repo : the repo whose tests run (default: the -C di
 TEST_WT=""
 ROLE_VARIANT=""     # --role-variant NAME : the NAME variant of the built-in -r role (auditor/coder: deep)
 NUDGE=0             # --subagents-nudge   : --subagents plus a section on when and how to delegate
+PUSH=0              # --subagents-push    : --subagents plus a section that makes delegation
+                    #                       mandatory; it REPLACES the nudge text
 REVIEW_ROUND=0      # --review-round      : resume the finished session once with REVIEW_PROMPT
 PROBE=0             # --probe        : run in a throwaway sandbox of the project, with a shell
 PROBE_EXPLICIT=0    # --probe given by the caller (not the one --deep implies)
@@ -173,7 +177,10 @@ PROBE_SB=""         # and the directory the sandbox copies (all from lib/probe.p
 PROBE_CWD=""
 PROBE_SRC=""
 PROBE_PATCH=""      # the patch file a --probe --write run wrote
-DEEP=0              # --deep : all four switches above
+DEEP=0              # --deep : all four switches above (V, R, PUSH, P)
+SHALLOW=0           # --shallow : no depth switch is implied; only the typed ones apply
+DEPTH_MODE=""       # computed after parsing: shallow | deep (--deep typed) | default (implied)
+SHORT_ANSWER_WARNING=0  # the final answer was short after a long session (set in emit)
 
 # --------------------------------------------------------------------- help
 usage() {
@@ -265,7 +272,10 @@ EXECUTION  (the DEFAULT is read-only — mutation must be asked for)
                        and --permission-mode acceptEdits unless you set one.
                        Still no Bash. Role 'mechanic' implies this.
       --test           Let the run execute the project's tests through qwen-test
-                       (the ONLY shell command granted). The test command is
+                       (the ONLY shell command granted -- a --test run also gets
+                       no implied --probe: the sandbox would delete the
+                       reproduction test with itself, so the full shell there is
+                       only what a typed --probe brings). The test command is
                        QWEN_TEST_CMD from the config; the model only picks which
                        tests. Runs in a throwaway git worktree. Read-only runs may
                        write ONLY inside that worktree (reproduction tests, listed
@@ -297,7 +307,8 @@ EXECUTION  (the DEFAULT is read-only — mutation must be asked for)
                        hand broad reading and searching to a subagent and keep
                        its own context small. A subagent runs on the same model
                        with the same tool limits, and is one more concurrent
-                       request: leave it off on a small GPU. Off by default.
+                       request: leave it off on a small GPU. Depth turns it on --
+                       every session gets it (opt-in again with --shallow).
                        (env QWEN_SUBAGENTS=1)
       --toolset LIST   Passed to claude as --tools — the REAL restriction: it
                        removes every built-in tool you do not name. Overrides
@@ -320,7 +331,9 @@ EXECUTION  (the DEFAULT is read-only — mutation must be asked for)
       --permission-mode M   Passed through to claude (e.g. acceptEdits, plan).
   -C, --cd DIR         chdir here before running (tool access is rooted at cwd).
   -D, --add-dir DIR    Extra readable directory. Repeatable.
-      --timeout SECS   Wall clock limit, default $TIMEOUT.  (env QWEN_TIMEOUT)
+      --timeout SECS   Wall clock limit. Default: 3600 whenever depth is on
+                       (the default), 1800 with --shallow; a typed --timeout
+                       or QWEN_TIMEOUT always wins.  (env QWEN_TIMEOUT)
                        0 is refused: it would mean "no timeout". Uses GNU
                        timeout (or gtimeout) when present, else a built-in
                        watchdog; stock macOS ships neither. QWEN_TIMEOUT_BIN
@@ -356,23 +369,51 @@ UNTIL DONE  (a coding task with a checklist, checked by the harness)
       --allow-dirty    Start even with uncommitted changes.
       --no-deviation-audit  Skip the read-only spec-vs-diff audit after checks pass.
 
-DEPTH  (opt-in switches for deeper sessions; recorded under qwen_agent in --json)
+DEPTH  (the default, not the extra: unless --shallow is given every direct run gets
+      the switches below that FIT it, and --json records which ones under qwen_agent.
+      V goes to a role that has a deep variant; R and the delegation push (see
+      --subagents-push) go to every session; P goes to a read-only run.
+      Parts that do not fit are silently dropped, and an implied
+      part never causes a refusal -- a typed switch keeps every refusal it has ever
+      had. A depth run also defaults --timeout to 3600 (1800 with --shallow).
+      QWEN_DEPTH=shallow is the environment form of --shallow.)
+      --shallow        No implied depth: only the switches you type. This is the
+                       quick-question mode, the old default. With --deep: exit 2
+                       (depth is already the default -- type what you want, or
+                       nothing). --shallow plus a typed part = only that part.
       --role-variant deep  The deep variant of -r auditor or -r coder: the auditor
                        maps what the code must guarantee, tries to break each
                        guarantee and records evidence for every verdict; the
-                       coder adds an edge-case pass after the checks. Other
-                       roles, --role-file and other variant names: exit 2.
+                       coder adds an edge-case pass after the checks. Implied
+                       for exactly these two roles. Other roles, --role-file and
+                       other variant names: exit 2 when typed.
       --subagents-nudge  --subagents plus a section on when to delegate
                        (independent probes, big or many files, long logs), what
-                       to hand a subagent, and to verify what it reports.
+                       to hand a subagent, and to verify what it reports. Typed,
+                       and what qwen-sweep batches and the swarm role default
+                       give; --deep and the implied default use --subagents-push
+                       instead. The delegation section -- nudge or push -- is
+                       implied on every session (not --interactive, --resume,
+                       --preflight-only or an explicit --toolset none; --dry-run
+                       shows it, because it is part of the argv a real run
+                       execs).
+      --subagents-push  --subagents plus a section that makes delegation part of
+                       the task: split the work into independent areas, keep one,
+                       hand every other area to a subagent one at a time with a
+                       self-contained brief, verify each subagent's claims, and
+                       close with a DELEGATION section. It REPLACES the nudge
+                       text when both apply (push wins). Implied by --deep and
+                       by the default depth; refused with --interactive.
       --review-round   When the session has ended cleanly, resume it once with a
                        fixed prompt: try to break what you just did or reported,
                        check each claim, revise. The revised answer is the result.
-                       If the review round fails, the first answer stands (a
-                       WARNING on stderr). Each of the two calls gets the full
-                       --timeout. With --until-done: one review round after the
-                       checks first pass, then every check runs again; it counts
-                       toward --max-rounds.
+                       If the review round fails -- or returns a stub under 300
+                       characters while the first answer had 1000 or more -- the
+                       first answer stands (a WARNING on stderr). Each of the two
+                       calls gets the full --timeout. With --until-done: one
+                       review round after the checks first pass, then every check
+                       runs again; it counts toward --max-rounds. Implied on
+                       every session (same exclusions as --subagents-nudge).
       --probe          Run in a throwaway sandbox of the project -- the git work
                        tree holding -C (or --test-repo DIR), uncommitted and
                        untracked files included -- with a shell: Bash, Edit and
@@ -388,7 +429,14 @@ DEPTH  (opt-in switches for deeper sessions; recorded under qwen_agent in --json
                        \$XDG_CACHE_HOME/qwen-agent/probes) and isolate against
                        accidents, not against a hostile model. Not with
                        --interactive, -w, --resume, --all-tools, --toolset,
-                       --read-only, -t/--tools, --permission-mode or -D.
+                       --read-only, -t/--tools, --permission-mode or -D -- and
+                       not implied for such a run, for a --test run (its
+                       reproduction test lives in the worktree, not in a sandbox
+                       that ends with the run) or wherever the sandbox cannot be
+                       built either: an implied --probe steps aside exactly
+                       where a typed one refuses (one note on stderr, the run
+                       goes on unsandboxed), and for any other read-only run it
+                       is the default.
                        With --until-done the whole loop runs in one sandbox (the
                        checks too), the patch is RUN/probe.patch (printed as
                        'patch: PATH' before 'report: PATH'), and a dirty tree
@@ -397,9 +445,14 @@ DEPTH  (opt-in switches for deeper sessions; recorded under qwen_agent in --json
       --probe-here     The -C directory is inside a probe sandbox (one kept with
                        --keep-sandbox): the --probe fence, nothing created or
                        removed, no patch. Use it to --resume a probe session.
-      --deep           All four: --probe --role-variant deep --review-round
-                       --subagents-nudge. Needs -r auditor or -r coder, or
-                       --until-done.
+      --deep           All four TYPED at once: --probe --role-variant deep
+                       --review-round --subagents-push, with every typed
+                       refusal intact (the implied default drops what does not
+                       fit instead of refusing -- deep's own --probe still steps
+                       aside on a sandbox that cannot be built, like the implied
+                       one, unless the run writes: then the refusal stands).
+                       Needs -r auditor or -r coder, or --until-done.
+                       With --shallow: exit 2.
 
 BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
       --browser        Load exactly ONE MCP server, "playwright", which qwen-agent
@@ -439,6 +492,9 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
 ENVIRONMENT  (also settable in the config file; flags win)
   QWEN_BASE_URL, QWEN_MODEL, QWEN_CTX, QWEN_AUTOCOMPACT, QWEN_EFFORT, QWEN_TIMEOUT
                        Defaults for the flags above.
+  QWEN_DEPTH           deep (the default: every direct run gets the depth switches
+                       that fit it) or shallow (no implied switch -- only what you
+                       type, the --shallow mode). Any other value: exit 2.
   QWEN_API_KEY         Sent as the auth token, and on the preflight request.
   QWEN_CUSTOM_HEADERS  Passed to claude as ANTHROPIC_CUSTOM_HEADERS (gateways).
   QWEN_EFFORT_ALLOWED  Effort levels the server accepts; others are refused up
@@ -447,7 +503,9 @@ ENVIRONMENT  (also settable in the config file; flags win)
                        the child environment as CLAUDE_CODE_EFFORT_LEVEL, so
                        Claude Code's own internal model calls use it too.
   QWEN_WEB=1           Same as --web: adds WebFetch. Off by default.
-  QWEN_SUBAGENTS=1     Same as --subagents: adds Task. Off by default.
+  QWEN_SUBAGENTS=1     Same as --subagents: adds Task. Depth turns it on with
+                       the delegation push (--subagents-push) on every session;
+                       set it for a --shallow run.
   QWEN_PREFLIGHT=0     Skip the /v1/models check (QWEN_MODEL is then required).
   QWEN_AUTO_MODEL=1    Same as --auto-model.
   QWEN_SETTING_SOURCES Passed to claude --setting-sources (e.g. project,local) so
@@ -641,6 +699,10 @@ You are operating as a CODE AUDITOR doing a DEEP audit. Work in this order:
 1. Map what the code must guarantee: its inputs and their edge cases,
    concurrency and ordering, error paths, platform differences (Windows,
    macOS, Linux) and security boundaries. Write that list down first.
+1b. Coverage: list every public entry point (function, method, CLI option,
+   file format) of the code you were asked to audit. Every entry point needs
+   at least one failure mode on your list, or a one-line reason why it cannot
+   fail in a way a user would notice.
 2. For EACH failure mode on the list, try to trigger it: read the code path
    that handles it and, when you have a shell, write and run a probe or a
    test that exercises it.
@@ -650,6 +712,10 @@ You are operating as a CODE AUDITOR doing a DEEP audit. Work in this order:
    the inputs or state and the wrong result), PASS (with the evidence that
    rules the failure out), or UNVERIFIED (with what you would need).
 5. Default to FAIL when evidence is missing for a guarantee that matters.
+6. Finish check: before you answer, go back over the list from steps 1 and 1b.
+   Any failure mode you have not tried to trigger, try now. Your answer ends
+   with a COVERAGE section: each entry point, and per failure mode
+   FAIL / PASS / UNVERIFIED.
 Rules:
 - Ground every claim in a file you actually read or a command you actually
   ran. There is no length limit, but every claim carries its evidence.
@@ -673,6 +739,11 @@ When the checks pass, do an edge-case pass before you stop:
 - End your reply with a section headed EDGE CASES: one line per case,
   saying how you checked it (the test id or the command) and what you
   changed, or that you did not check it and why.
+
+Finish check: before you answer, list the edge cases you identified; for each
+one name the probe or test that exercised it and its result. An edge case
+without a probe is either probed now or listed under NOT CHECKED with the
+reason.
 ROLE_EOF
       ;;
     *) return 1 ;;
@@ -681,7 +752,10 @@ ROLE_EOF
 
 # The one fixed prompt of --review-round. It asks for the WHOLE answer again, in the
 # format the first answer had to follow, because the reviewed answer replaces it.
-REVIEW_PROMPT='Review round: before your answer is final, try to break it. Go back over every claim you made and every change you made. For each one, look for the input, state or code path that would make it wrong, and check it: read the code again and, where you have a shell, run a probe or a test. Correct or drop anything that does not survive, and add anything you missed. Then reply with your complete revised answer. It replaces your previous answer, so repeat everything that still stands, in exactly the format your previous answer had to follow.'
+REVIEW_PROMPT='Review round: before your answer is final, try to break it. Go back over every claim you made and every change you made. For each one, look for the input, state or code path that would make it wrong, and check it: read the code again and, where you have a shell, run a probe or a test. Correct or drop anything that does not survive, and add anything you missed. List, under REVIEW, each earlier claim or change you re-checked, the check you ran, and what changed (kept, corrected, dropped). Look in particular for what you did not cover the first time: a part of the code you did not open, an input class you did not try. Then reply with your complete revised answer. It replaces your previous answer, so repeat everything that still stands, in exactly the format your previous answer had to follow.'
+# With --subagents-push the review round also delegates: appended to REVIEW_PROMPT
+# only when PUSH is on, so a nudge-only review round keeps the prompt above verbatim.
+REVIEW_PUSH_TEXT=' Hand the re-verification of your three most important claims to a subagent, and compare its result with yours.'
 
 list_roles() {
   echo "built-in: auditor, coder, mechanic, plain, tester"
@@ -744,7 +818,7 @@ while [ $# -gt 0 ]; do
   # the until-done refusals of the switches named here need no such repeat.
   case "$arg" in
     --probe=*|--probe-here=*|--keep-sandbox=*|--review-round=*|--deep=*|--subagents-nudge=*|\
-    --browser=*|--headed=*|--browser-eval=*)
+    --subagents-push=*|--shallow=*|--browser=*|--headed=*|--browser-eval=*)
       die "option ${arg%%=*} takes no value (got '$arg')"; exit $QA_USAGE ;;
   esac
   # support --opt=value
@@ -774,13 +848,15 @@ while [ $# -gt 0 ]; do
     --web)                WEB_MODE=1; shift ;;
     --subagents)          SUBAGENTS=1; shift ;;
     --subagents-nudge)    SUBAGENTS=1; NUDGE=1; shift ;;
+    --subagents-push)     SUBAGENTS=1; PUSH=1; shift ;;
     --role-variant)       need_arg "$1" $(($#-1)); ROLE_VARIANT="$2"; shift 2 ;;
     --review-round)       REVIEW_ROUND=1; shift ;;
     --probe)              PROBE=1; PROBE_EXPLICIT=1; shift ;;
     --probe-here)         PROBE_HERE=1; shift ;;
     --keep-sandbox)       KEEP_SANDBOX=1; shift ;;
-    --deep)               DEEP=1; PROBE=1; REVIEW_ROUND=1; ROLE_VARIANT="deep"; SUBAGENTS=1; NUDGE=1
+    --deep)               DEEP=1; PROBE=1; REVIEW_ROUND=1; ROLE_VARIANT="deep"; SUBAGENTS=1; PUSH=1
                           shift ;;
+    --shallow)            SHALLOW=1; shift ;;
     --interactive)        INTERACTIVE=1; shift ;;
     --test)               TEST_MODE=1; shift ;;
     --test-repo)          need_arg "$1" $(($#-1)); TEST_REPO="$2"; shift 2 ;;
@@ -810,7 +886,7 @@ while [ $# -gt 0 ]; do
     -C|--cd)              need_arg "$1" $(($#-1)); WORKDIR="$2"; shift 2 ;;
     -D|--add-dir)         need_arg "$1" $(($#-1)); ADD_DIRS+=("$2"); shift 2 ;;
     --permission-mode)    need_arg "$1" $(($#-1)); PERM_MODE="$2"; PERM_MODE_EXPLICIT=1; shift 2 ;;
-    --timeout)            need_arg "$1" $(($#-1)); TIMEOUT="$2"; shift 2 ;;
+    --timeout)            need_arg "$1" $(($#-1)); TIMEOUT="$2"; TIMEOUT_EXPLICIT=1; shift 2 ;;
     --no-timeout)         NO_TIMEOUT=1; shift ;;
     --force)              FORCE=1; shift ;;
     -w|--detach|--bg)     BG=1; shift ;;
@@ -842,6 +918,57 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# ---------------------------------------------------------------------- depth
+# Depth is the DEFAULT: unless --shallow (or QWEN_DEPTH=shallow) is given, every run
+# gets the depth switches that FIT it, and the ones that do not fit are silently
+# dropped. Implied switches never cause a refusal; typed switches keep theirs.
+#   V --role-variant deep : only roles that HAVE a deep variant (auditor, coder)
+#   R --review-round and N --subagents-push : every session -- not --interactive,
+#     not --resume, not --preflight-only, and not an explicit --toolset none (the
+#     push replaces the softer --subagents-nudge text; sweep batches still nudge). A
+#     --dry-run gets N (it shapes the argv the dry run must print truthfully) and
+#     notes R; it starts no session and makes no second call.
+#   P --probe : only for a read-only session that runs no --test (a --test run
+#     keeps its worktree and its ## REPRO FILES; the sandbox would delete the
+#     reproduction test with itself), and it is judged further down, after roles
+#     are resolved (it must see what --write and the role decided).
+# --until-done decomposes depth once, in its own block below, and the rounds it
+# spawns run shallow -- implied depth there would compound, round by round.
+DEPTH_ENV="${QWEN_DEPTH:-deep}"
+case "$DEPTH_ENV" in
+  deep|shallow) ;;
+  *) die "QWEN_DEPTH is '$DEPTH_ENV' (expected 'deep' or 'shallow')"; exit $QA_USAGE ;;
+esac
+if [ "$SHALLOW" -eq 1 ] && [ "$DEEP" -eq 1 ]; then
+  die "--shallow and --deep together: depth is on by default (drop --shallow) or you asked"
+  die "for all of it by name (drop --deep) -- pick one"
+  exit $QA_USAGE
+fi
+if   [ "$SHALLOW" -eq 1 ];       then DEPTH_MODE="shallow"   # the flag wins over the env
+elif [ "$DEEP" -eq 1 ];          then DEPTH_MODE="deep"
+elif [ "$DEPTH_ENV" = shallow ]; then DEPTH_MODE="shallow"
+else                                  DEPTH_MODE="default"
+fi
+# A deep session reads, probes, delegates and reviews: give it an hour, not the
+# 30 minutes a single read-only answer needed. A typed --timeout or QWEN_TIMEOUT
+# (env or config) always wins; --no-timeout needs no default at all.
+if [ "$DEPTH_MODE" != shallow ] && [ "$TIMEOUT_EXPLICIT" -eq 0 ] && [ "$NO_TIMEOUT" -eq 0 ]; then
+  TIMEOUT=3600
+fi
+if [ "$DEPTH_MODE" = default ] && [ -z "$UNTIL_DONE" ]; then
+  # Not for a resume either: --resume continues the session that ran with the
+  # plain role text, and swapping the deep variant in mid-session is wrong.
+  if [ -z "$ROLE_VARIANT" ] && [ -z "$ROLE_FILE" ] && [ "$INTERACTIVE" -eq 0 ] \
+     && [ -z "$RESUME_ID" ]; then
+    case "$ROLE" in auditor|coder) ROLE_VARIANT=deep ;; esac
+  fi
+  if [ "$INTERACTIVE" -eq 0 ] && [ -z "$RESUME_ID" ] && [ "$PREFLIGHT_ONLY" -eq 0 ] \
+     && [ "$TOOLSET_NONE" -eq 0 ]; then
+    REVIEW_ROUND=1
+    SUBAGENTS=1; PUSH=1
+  fi
+fi
+
 # ------------------------------------------------------- --interactive
 # An interactive session is Claude Code as the person at the keyboard knows it:
 # they answer its permission prompts themselves, and the session ends when they
@@ -871,6 +998,7 @@ if [ "$INTERACTIVE" -eq 1 ]; then
       --web|--web=*)                     _ia_refuse "--web" ;;
       --subagents|--subagents=*)         _ia_refuse "--subagents" ;;
       --subagents-nudge|--subagents-nudge=*) _ia_refuse "--subagents-nudge" ;;
+      --subagents-push|--subagents-push=*)   _ia_refuse "--subagents-push" ;;
       --role-variant|--role-variant=*)   _ia_refuse "--role-variant" ;;
       --review-round)                    _ia_refuse "--review-round" ;;
       --probe|--probe=*|--probe-here|--probe-here=*|--keep-sandbox|--keep-sandbox=*|\
@@ -933,8 +1061,13 @@ fi
 # fence (a whole shell) lands on the user's tree. Unset for this process and every
 # child of it BEFORE the until-done exec below: that exec hands over to the
 # supervisor, and the --probe setup further down -- where this unset used to sit --
-# is never reached on the loop path. The sandbox is where -C says it is; nothing
-# inherited may move the gate or the session outside it.
+# is never reached on the loop path. This is PROBE hygiene, not depth hygiene: it
+# fires only where a sandbox of this run is actually used -- a typed --probe,
+# --probe-here or --deep here, an implied --probe at the place it applies below --
+# and never for a plain (say --write) run, which has no sandbox and no reason to
+# lose the caller's own git setup (a bare-repo dotfiles tree, a hook's GIT_*).
+# The sandbox is where -C says it is; nothing inherited may move the gate or the
+# session outside it.
 if [ "$PROBE" -eq 1 ] || [ "$PROBE_HERE" -eq 1 ] || [ "$DEEP" -eq 1 ]; then
   unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
         GIT_ALTERNATE_OBJECT_DIRECTORIES
@@ -1008,7 +1141,9 @@ if [ -n "$UNTIL_DONE" ]; then
       --review-round) ;;
       # The supervisor owns the probe sandbox: one for the whole loop. Each round runs
       # in it with --probe-here, which is therefore not the caller's to pass.
-      --probe|--keep-sandbox|--deep) ;;
+      # --shallow says only WHAT depth the rounds get; the loop's own decomposition
+      # already read it off DEPTH_MODE, so there is nothing to forward.
+      --probe|--keep-sandbox|--deep|--shallow) ;;
       --probe-here)
         die "--probe-here belongs to the supervisor's own rounds; use --probe"; exit $QA_USAGE ;;
       -r|--role) _skip=2 ;;
@@ -1033,11 +1168,47 @@ if [ -n "$UNTIL_DONE" ]; then
     fi
     exit $QA_USAGE
   fi
+  # Default depth decomposes once, here: the coder rounds get V + R + N -- what
+  # --deep forwards, minus --probe, which is the loop's sandbox and only ever
+  # typed. The rounds themselves run with QWEN_DEPTH=shallow (the supervisor sets
+  # it), so nothing re-implies depth round by round. A typed token outranks the
+  # implied one: it is already in FWD, so the implied copy is skipped. (The rounds
+  # run shallow by typed flag AND environment -- see supervisor call_agent.)
+  if [ "$DEPTH_MODE" = default ]; then
+    REVIEW_ROUND=1
+    _ud_v=0; _ud_n=0
+    for _ua in ${FWD[@]+"${FWD[@]}"}; do
+      case "$_ua" in
+        --role-variant|--role-variant=*) _ud_v=1 ;;
+        # Either delegation token counts as typed: the implied push must not
+        # stack on a nudge the caller already forwarded (push replaces nudge).
+        --subagents-nudge|--subagents-push) _ud_n=1 ;;
+      esac
+    done
+    [ "$_ud_v" -eq 1 ] || FWD+=(--role-variant deep)
+    [ "$_ud_n" -eq 1 ] || FWD+=(--subagents-push)
+    unset _ud_v _ud_n _ua
+  fi
+  # The rounds run shallow (the supervisor types --shallow and sets QWEN_DEPTH, so
+  # neither the environment nor a config file can re-imply depth into a round), and
+  # a shallow round would default its per-call timeout back to 1800. Under depth the
+  # loop's rounds do the deep work: hand them the hour this run computed through
+  # QWEN_TIMEOUT -- exported here, inherited by the exec'd supervisor and by every
+  # round and audit call it makes, each of which reads it as its own default. (Not
+  # a forwarded --timeout: that lands in the supervisor's passthrough, which the
+  # loop pins to the depth switches alone, and the rounds would type a flag the
+  # caller never did.) A typed --timeout is already in FWD, where a flag beats the
+  # environment for every round; --no-timeout is forwarded as typed and gets no
+  # default; a caller-set QWEN_TIMEOUT is the value this export carries anyway.
+  if [ "$DEPTH_MODE" != shallow ] && [ "$TIMEOUT_EXPLICIT" -eq 0 ] && [ "$NO_TIMEOUT" -eq 0 ]; then
+    export QWEN_TIMEOUT="$TIMEOUT"
+  fi
   [ "$REVIEW_ROUND" -eq 1 ] && SUP_ARGS+=(--review-round)
   [ "$KEEP_SANDBOX" -eq 0 ] || [ "$PROBE" -eq 1 ] || { die "--keep-sandbox needs --probe"; exit $QA_USAGE; }
   [ "$PROBE" -eq 1 ] && SUP_ARGS+=(--probe)
   [ "$KEEP_SANDBOX" -eq 1 ] && SUP_ARGS+=(--keep-sandbox)
-  [ "$DEEP" -eq 1 ] && FWD+=(--role-variant deep --subagents-nudge)
+  SUP_ARGS+=(--depth "$DEPTH_MODE")
+  [ "$DEEP" -eq 1 ] && FWD+=(--role-variant deep --subagents-push)
   resolve_py || { die "no working Python 3.8+ found (set QWEN_PYTHON)"; exit $QA_HARNESS; }
   # The supervisor is exec'd, not sourced: it only sees EXPORTED variables. The
   # config eval above sets shell variables, so each QWEN_* the supervisor or the
@@ -1239,6 +1410,64 @@ if [ -n "$EXTRA_SYS" ]; then
 $EXTRA_SYS"; else SYSTEM="$EXTRA_SYS"; fi
 fi
 
+# ------------------------------------------------------- implied --probe
+# P is the one implied part that can only be judged once the ROLE is known (coder
+# and mechanic default to write mode; tester implies --browser). Everything that
+# makes a typed --probe refuse makes the implied one step aside instead -- the
+# implied depth must never be the reason a run dies: the cheap pre-check below
+# drops the obvious shapes, and a refusal probe.py still finds is taken as "no
+# sandbox" at create (see the --probe setup: the implied P steps aside there with
+# one note, never an exit 2). It is skipped for non-session modes too:
+# --preflight-only can run in a plain directory (no git repo), and a sandbox needs
+# one to copy -- and for a --test run: its reproduction test lives in the test
+# worktree and comes back under ## REPRO FILES, while a sandbox would delete the
+# test with itself. The probe's own refusals and setup above and below then
+# proceed on PROBING exactly as for a typed --probe.
+if [ "$DEPTH_MODE" = default ] && [ "$PROBE" -eq 0 ] && [ "$PROBE_HERE" -eq 0 ] \
+   && [ "$WRITE_MODE" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ] && [ "$TEST_MODE" -eq 0 ] \
+   && [ "$PREFLIGHT_ONLY" -eq 0 ] && [ "$BROWSER" -eq 0 ] && [ "$BG" -eq 0 ] \
+   && [ "$ALL_TOOLS" -eq 0 ] && [ "$TOOLSET_EXPLICIT" -eq 0 ] && [ "$TOOLS_EXPLICIT" -eq 0 ] \
+   && [ "$PERM_MODE_EXPLICIT" -eq 0 ] && [ "${#ADD_DIRS[@]}" -eq 0 ] && [ -z "$RESUME_ID" ]; then
+  # A sandbox must also be BUILDABLE here: it copies the git work tree holding the -C
+  # directory and lives under the probe directory, and probe.py refuses (a typed
+  # --probe dies on it) when the tree has no commit or the probe directory sits
+  # inside that tree. An implied part never refuses -- where the sandbox cannot be
+  # made, the implied P steps aside and the run goes on read-only, unsandboxed.
+  # These are the cheap shapes of those checks; probe.py keeps the fine ones, and
+  # its finer refusals now only cost the run the sandbox (step aside), never a
+  # refusal.
+  _ip_src="${PROBE_SOURCE:-${WORKDIR:-$PWD}}"
+  case "$_ip_src" in /*|[A-Za-z]:*) ;; *) _ip_src="$PWD/$_ip_src" ;; esac
+  _ip_top="$(git -C "$_ip_src" rev-parse --show-toplevel 2>/dev/null)" || _ip_top=""
+  [ -n "$_ip_top" ] && { git -C "$_ip_src" rev-parse --verify -q HEAD >/dev/null 2>&1 || _ip_top=""; }
+  if [ -n "$_ip_top" ]; then
+    _ip_t="${_ip_top%/}"
+    # the working directory is the one copied, so it must sit inside the tree
+    if [ "$_ip_src" != "$_ip_t" ] && [ "${_ip_src#"$_ip_t"/}" = "$_ip_src" ]; then
+      _ip_top=""
+    else
+      _ip_root="${QWEN_PROBE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/qwen-agent/probes}"
+      case "$_ip_root" in /*|[A-Za-z]:*) ;; *) _ip_root="$_ip_src/$_ip_root" ;; esac
+      # the probe directory inside the tree it would copy: probe.py refuses it
+      if [ "$_ip_root" = "$_ip_t" ] || [ "${_ip_root%"$_ip_t"/*}" != "$_ip_root" ]; then
+        _ip_top=""
+      fi
+    fi
+  fi
+  if [ -n "$_ip_top" ]; then
+    PROBE=1; PROBING=1; _pf="--probe"
+    # The sandbox is the plan from here, so the git hygiene of the block above
+    # applies to this run too -- taken HERE, where the implied P applies, always
+    # before probe.py create: sandbox.py's git calls inherit the environment
+    # instead of stripping it, so an inherited GIT_DIR would steer the clone.
+    # (A create that then refuses costs this run its GIT_* -- a half-steered git
+    # context is never handed on to a session; the run itself goes on fine.)
+    unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+          GIT_ALTERNATE_OBJECT_DIRECTORIES
+  fi
+  unset _ip_src _ip_top _ip_t _ip_root
+fi
+
 # ------------------------------------------------------------- --browser setup
 # Resolved after the role so -r tester can imply --browser. ONE MCP server, named
 # "playwright", is written as a config into a fresh browser run folder and passed with
@@ -1334,7 +1563,12 @@ case "$QWEN_OUTDIR" in /*|[A-Za-z]:*) ;; *) QWEN_OUTDIR="$PWD/$QWEN_OUTDIR" ;; e
 # directory itself (create() makes it; probe.py refuses one inside the tree). An
 # explicit QWEN_OUTDIR (env or config) is the caller's own choice and stays, exactly
 # like -o inside the tree stays. Same caller-side absolutizing as the line above.
+# The caller's default as it stood before a probe took it over: an implied --probe
+# that then steps aside (create refuses) restores it, so the run left standing is
+# the unsandboxed one the caller would have got under --shallow.
+_qa_outdir_kept=""
 if [ "$PROBE" -eq 1 ] && [ "$QWEN_OUTDIR_SET" -eq 0 ]; then
+  _qa_outdir_kept="$QWEN_OUTDIR"
   QWEN_OUTDIR="${QWEN_PROBE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/qwen-agent/probes}"
   case "$QWEN_OUTDIR" in /*|[A-Za-z]:*) ;; *) QWEN_OUTDIR="$PWD/$QWEN_OUTDIR" ;; esac
 fi
@@ -1434,29 +1668,56 @@ if [ "$PROBE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
   _rc=$?
   if [ "$_rc" -ne 0 ]; then
     _e="$(cat "$_errf")"; rm -f "$_errf"
-    die "--probe: $_e"
-    [ "$_rc" -eq 2 ] && exit $QA_USAGE
-    exit $QA_HARNESS
+    if [ "$_rc" -eq 2 ] && [ "$PROBE_EXPLICIT" -eq 0 ] \
+       && { [ "$DEEP" -eq 0 ] || [ "$WRITE_MODE" -eq 0 ]; }; then
+      # An IMPLIED --probe never refuses, and the pre-check above cannot see every
+      # refusal probe.py makes (a -C inside an ignored directory, a -C outside a
+      # --test-repo it is asked to copy). So create's refusal is the step-aside
+      # cue: drop the probe and its fence -- nothing beyond the permission mode and
+      # the QWEN_OUTDIR default is set from PROBING yet (the grants, the note and
+      # --restricted all come later, keyed off PROBING) -- and run on without a
+      # sandbox: the whole else branch below is the sandbox taking over, and it is
+      # skipped with it. --deep's --probe is implied in this sense too (only a
+      # typed --probe is PROBE_EXPLICIT -- the refusal-naming block above says the
+      # same) -- EXCEPT where the run writes: there the sandbox is the promise that
+      # the edits come back as a patch and the tree stays untouched, so a refused
+      # build ends the run rather than sending the writes to the user's tree. A
+      # typed --probe keeps its refusal either way. rc 8 is a broken environment,
+      # not a refusal: that dies.
+      PROBE=0; PROBING=0
+      # Undo the permission mode the PROBE fence pinned -- but only where the probe
+      # was what pinned it: a --test run fixes dontAsk itself (the elif chain above
+      # reaches its branch first), and the stepped-aside --test run must keep its
+      # fence exactly as a --shallow --test run has it.
+      if [ "$TEST_MODE" -eq 0 ]; then PERM_MODE=""; fi
+      [ -n "$_qa_outdir_kept" ] && QWEN_OUTDIR="$_qa_outdir_kept"
+      note "depth: no sandbox for this run ($_e); running without --probe"
+    else
+      die "--probe: $_e"
+      [ "$_rc" -eq 2 ] && exit $QA_USAGE
+      exit $QA_HARNESS
+    fi
+  else
+    rm -f "$_errf"
+    _out="$(printf '%s\n' "$_out" | tr -d '\r')"
+    PROBE_RUN="$(printf '%s\n' "$_out" | sed -n 1p)"
+    PROBE_SB="$(printf '%s\n' "$_out" | sed -n 2p)"
+    PROBE_CWD="$(printf '%s\n' "$_out" | sed -n 3p)"
+    PROBE_SRC="$(printf '%s\n' "$_out" | sed -n 4p)"
+    # The printed `git -C DIR apply PATCH` must carry an absolute DIR: a relative
+    # --test-repo is the caller's string and probe.py prints it as given, but by the
+    # time the patch is printed this process has cd'd into the sandbox. Still the
+    # caller's directory here (-C already applied), so that is what a relative path
+    # resolves against -- as it did for probe.py itself.
+    case "$PROBE_SRC" in ''|/*|[A-Za-z]:*) ;; *) PROBE_SRC="$PWD/$PROBE_SRC" ;; esac
+    # Registered at once: a failed preflight below must not leak the sandbox.
+    trap cleanup EXIT
+    _cd="$PROBE_CWD"; _sbu="$PROBE_SB"
+    if command -v cygpath >/dev/null 2>&1; then _cd="$(cygpath -u "$_cd")"; _sbu="$(cygpath -u "$_sbu")"; fi
+    cd -- "$_cd" || { die "--probe: cannot enter the sandbox $PROBE_CWD"; exit $QA_HARNESS; }
+    # qwen-test runs the tests of the sandbox, never of the user's tree.
+    [ "$TEST_MODE" -eq 1 ] && TEST_REPO="$_sbu"
   fi
-  rm -f "$_errf"
-  _out="$(printf '%s\n' "$_out" | tr -d '\r')"
-  PROBE_RUN="$(printf '%s\n' "$_out" | sed -n 1p)"
-  PROBE_SB="$(printf '%s\n' "$_out" | sed -n 2p)"
-  PROBE_CWD="$(printf '%s\n' "$_out" | sed -n 3p)"
-  PROBE_SRC="$(printf '%s\n' "$_out" | sed -n 4p)"
-  # The printed `git -C DIR apply PATCH` must carry an absolute DIR: a relative
-  # --test-repo is the caller's string and probe.py prints it as given, but by the
-  # time the patch is printed this process has cd'd into the sandbox. Still the
-  # caller's directory here (-C already applied), so that is what a relative path
-  # resolves against -- as it did for probe.py itself.
-  case "$PROBE_SRC" in ''|/*|[A-Za-z]:*) ;; *) PROBE_SRC="$PWD/$PROBE_SRC" ;; esac
-  # Registered at once: a failed preflight below must not leak the sandbox.
-  trap cleanup EXIT
-  _cd="$PROBE_CWD"; _sbu="$PROBE_SB"
-  if command -v cygpath >/dev/null 2>&1; then _cd="$(cygpath -u "$_cd")"; _sbu="$(cygpath -u "$_sbu")"; fi
-  cd -- "$_cd" || { die "--probe: cannot enter the sandbox $PROBE_CWD"; exit $QA_HARNESS; }
-  # qwen-test runs the tests of the sandbox, never of the user's tree.
-  [ "$TEST_MODE" -eq 1 ] && TEST_REPO="$_sbu"
   unset _errf _src _out _rc _e _cd _sbu
 fi
 if [ "$TEST_MODE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
@@ -1560,7 +1821,16 @@ if [ "$SUBAGENTS" -eq 1 ] && [ "$ALL_TOOLS" -eq 0 ]; then
 $_sub_note"; else SYSTEM="$_sub_note"; fi
   unset _sub_note
 fi
-if [ "$NUDGE" -eq 1 ]; then
+# The delegation section: PUSH REPLACES NUDGE when both are on (a caller who typed
+# --subagents-push wants the mandate, not the suggestion; --deep and the implied
+# default push, qwen-sweep batches still nudge).
+if [ "$PUSH" -eq 1 ]; then
+  _push='Delegation is part of this task, not optional. Before you go deep, split the work into independent areas (a module, a guarantee, a group of failure modes). Keep one area for yourself and hand EVERY other area to a subagent, one at a time: give it a self-contained brief with the exact paths and the questions to answer, and ask for path:line evidence and the commands it ran. Verify each subagent'"'"'s key claims yourself before relying on them (re-read the cited lines or re-run its check). Your answer has a DELEGATION section: each subagent'"'"'s area, what it found, and what you verified.'
+  if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
+
+$_push"; else SYSTEM="$_push"; fi
+  unset _push
+elif [ "$NUDGE" -eq 1 ]; then
   _nudge='Delegate more than feels necessary. Hand a subagent any piece of work that does not need what you are holding in mind: an independent probe or check, reading a large file or many files, or summarising a long log or test output. Give it a self-contained question and the exact paths it needs, and ask for path:line evidence. Verify what a subagent reports before you rely on it: re-read the lines it cites or re-run its check yourself.'
   if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
 
@@ -1954,6 +2224,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "# cwd: $PWD"
   echo "# out: ${OUT:-<stdout>}"
   [ "$PROBE" -eq 1 ] && echo "# probe: the sandbox is made at run time (QWEN_PROBE_DIR: ${QWEN_PROBE_DIR:-<default>})"
+  # The review round is the second call a depth run makes after the session ends;
+  # a dry run prints the first call's argv (delegation text and Task included -- they are
+  # part of it) and notes the round it would have made.
+  [ "$REVIEW_ROUND" -eq 1 ] && echo "# review round: one --resume call after the first"
   if [ "$INTERACTIVE" -eq 1 ]; then
     echo "# timeout: not applied (--interactive: the session ends when the person at the keyboard leaves)"
   else
@@ -2112,14 +2386,21 @@ if mode == "json":
     import os
     if os.environ.get("QA_META") == "1":
         e = os.environ
-        meta = {"switches": {"probe": e.get("QA_META_PROBE") == "1",
+        meta = {"depth": e.get("QA_META_DEPTH") or None,
+                "switches": {"probe": e.get("QA_META_PROBE") == "1",
                              "role_variant": e.get("QA_META_VARIANT") or None,
                              "review_round": e.get("QA_META_REVIEW") == "1",
                              "subagents_nudge": e.get("QA_META_NUDGE") == "1"}}
+        # The push key appears only on push runs, so records of nudge-only and
+        # switchless runs keep the exact shape they had before push existed.
+        if e.get("QA_META_PUSH") == "1":
+            meta["switches"]["subagents_push"] = True
         if e.get("QA_META_REVIEW") == "1":
             meta["review_round"] = {"status": e.get("QA_META_REVIEW_STATUS") or None,
                                     "first_session": e.get("QA_META_REVIEW_FIRST") or None,
                                     "warning": e.get("QA_META_REVIEW_WARNING") or None}
+        if e.get("QA_META_SHORT") == "1":
+            meta["short_answer_warning"] = True
         if e.get("QA_META_PROBE") == "1":
             meta["patch"] = e.get("QA_META_PATCH") or None
             meta["sandbox"] = e.get("QA_META_SANDBOX") or None
@@ -2198,17 +2479,23 @@ repro_section() {  # the '## REPRO FILES' block for the newline-separated files 
 # --json's record. Exported only when one is set, so a run without any emits Claude
 # Code's record unchanged.
 export_meta() {
-  [ -n "$ROLE_VARIANT" ] || [ "$NUDGE" -eq 1 ] || [ "$REVIEW_ROUND" -eq 1 ] || [ "$PROBING" -eq 1 ] \
-    || [ "$BROWSER" -eq 1 ] || return 0
+  # The key used to exist only to explain switches that changed the argv; with depth
+  # on by default it must also say WHICH depth ran (a bench totals records per mode),
+  # and a suspiciously short final answer must be findable in the record, not only
+  # in stderr a caller may not have kept.
+  [ -n "$ROLE_VARIANT" ] || [ "$NUDGE" -eq 1 ] || [ "$PUSH" -eq 1 ] \
+    || [ "$REVIEW_ROUND" -eq 1 ] || [ "$PROBING" -eq 1 ] \
+    || [ "$BROWSER" -eq 1 ] || [ "$DEPTH_MODE" != shallow ] || [ "$SHORT_ANSWER_WARNING" -eq 1 ] || return 0
   local kept="" browser_dir_meta=""
   [ "$KEEP_SANDBOX" -eq 1 ] && kept="$PROBE_CWD"
   browser_dir_meta="$(native_path "$BROWSER_DIR")"
-  export QA_META=1 QA_META_VARIANT="$ROLE_VARIANT" QA_META_NUDGE="$NUDGE" \
+  export QA_META=1 QA_META_VARIANT="$ROLE_VARIANT" QA_META_NUDGE="$NUDGE" QA_META_PUSH="$PUSH" \
          QA_META_REVIEW="$REVIEW_ROUND" QA_META_REVIEW_STATUS="$REVIEW_STATUS" \
          QA_META_REVIEW_FIRST="$REVIEW_FIRST" QA_META_REVIEW_WARNING="$REVIEW_WARNING" \
          QA_META_PROBE="$PROBING" QA_META_PATCH="$PROBE_PATCH" QA_META_SANDBOX="$kept" \
          QA_META_BROWSER="$BROWSER" QA_META_BROWSER_DIR="$browser_dir_meta" \
-         QA_META_BROWSER_HEADED="$HEADED" QA_META_BROWSER_EVAL="$BROWSER_EVAL"
+         QA_META_BROWSER_HEADED="$HEADED" QA_META_BROWSER_EVAL="$BROWSER_EVAL" \
+         QA_META_DEPTH="$DEPTH_MODE" QA_META_SHORT="$SHORT_ANSWER_WARNING"
 }
 
 # --probe --write: the session's edits as a patch -- FILE.patch next to -o FILE (always
@@ -2293,12 +2580,38 @@ PY
 REVIEW_STATUS=""
 REVIEW_FIRST=""
 REVIEW_WARNING=""
+# "<result_len> <num_turns>" of the last JSON result record in $1 -- the record
+# parse_raw reads. The two numbers the short-answer checks judge; no output at all
+# when the file holds no readable record.
+result_stats() {
+  "$QA_PY" - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+        txt = fh.read()
+except OSError:
+    sys.exit(0)
+for line in reversed(txt.strip().splitlines()):
+    line = line.strip()
+    if line.startswith("{"):
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        r = obj.get("result")
+        n = obj.get("num_turns")
+        sys.stdout.write("%d %d" % (len(r) if isinstance(r, str) else 0,
+                                    n if isinstance(n, int) and not isinstance(n, bool) else 0))
+        break
+PY
+}
+
 # --review-round: resume the session that just ended with REVIEW_PROMPT. $1 is the first
 # call's exit code; returns the code that stands. The first answer stands (its RAW is put
-# back) when the first call did not succeed, carried no session id, or the review call
-# itself fails.
+# back) when the first call did not succeed, carried no session id, the review call
+# itself fails, or the review comes back a stub while the first answer was a full one.
 review_round() {
-  local first="$1" rc code
+  local first="$1" rc code first_len review_len
   if [ "$first" -ne 0 ]; then REVIEW_STATUS="skipped"; return "$first"; fi
   if [ -z "${qa_session:-}" ]; then
     REVIEW_STATUS="skipped"
@@ -2308,7 +2621,11 @@ review_round() {
   fi
   REVIEW_FIRST="$qa_session"
   mv -f "$RAW" "$RAW.first"
-  CLAUDE_ARGV=("${CLAUDE_ARGV[@]:0:$CLAUDE_BASE_N}" --resume "$REVIEW_FIRST" -- "$REVIEW_PROMPT")
+  # With --subagents-push the review prompt also hands re-verification to a subagent.
+  local _rp="$REVIEW_PROMPT"
+  [ "$PUSH" -eq 1 ] && _rp="$REVIEW_PROMPT$REVIEW_PUSH_TEXT"
+  CLAUDE_ARGV=("${CLAUDE_ARGV[@]:0:$CLAUDE_BASE_N}" --resume "$REVIEW_FIRST" -- "$_rp")
+  unset _rp
   if [ -n "$TIMEOUT" ] && [ -n "$TIMEOUT_BIN" ]; then
     RUN_ARGV=("$TIMEOUT_BIN" -k 10 "$TIMEOUT" "${CLAUDE_ARGV[@]}")
   else
@@ -2318,6 +2635,19 @@ review_round() {
   run_claude; rc=$?
   classify "$rc"; code=$?
   if [ "$code" -eq 0 ]; then
+    # A review that comes back a stub while the first answer was a full one is the
+    # auto-compact failure signature, not a review: treat it as a failed round so
+    # the first answer stands, as when the review call itself fails.
+    first_len="$(result_stats "$RAW.first")"; first_len="${first_len%% *}"
+    review_len="$(result_stats "$RAW")";     review_len="${review_len%% *}"
+    if [ -n "$first_len" ] && [ "$first_len" -ge 1000 ] \
+       && [ -n "$review_len" ] && [ "$review_len" -lt 300 ]; then
+      REVIEW_STATUS="failed"
+      REVIEW_WARNING="the review answer is suspiciously short ($review_len characters against $first_len in the first); the first answer stands"
+      die "WARNING: --review-round: $REVIEW_WARNING"
+      mv -f "$RAW.first" "$RAW"
+      return "$first"
+    fi
     sum_first_usage || die "WARNING: --review-round: could not sum the first call's usage into the record"
     REVIEW_STATUS="ok"; return 0
   fi
@@ -2328,11 +2658,27 @@ review_round() {
   return "$first"
 }
 
+# The auto-compact death signature: a long session (many turns) whose final answer
+# is a stub. The answer still stands, but the person who asked must see why it may
+# not be the whole answer -- this exact line on stderr -- and --json must carry the
+# mark for benches that read the record, not the terminal.
+short_answer_guard() {
+  local stats len turns
+  stats="$(result_stats "$RAW")"
+  [ -n "$stats" ] || return 0
+  len="${stats%% *}"; turns="${stats##* }"
+  if [ "$len" -lt 300 ] && [ "$turns" -gt 20 ]; then
+    SHORT_ANSWER_WARNING=1
+    printf 'WARNING: the answer is suspiciously short for a long session (possible auto-compact failure); check it\n' >&2
+  fi
+}
+
 emit() {
   local rc code fmt
   run_claude; rc=$?
   classify "$rc"; code=$?
   if [ "$REVIEW_ROUND" -eq 1 ]; then review_round "$code"; code=$?; fi
+  short_answer_guard
   if [ "$PROBE" -eq 1 ] && [ "$WRITE_MODE" -eq 1 ] && [ -n "$PROBE_SB" ]; then
     write_probe_patch || { [ "$code" -eq 0 ] && code=$QA_HARNESS; }
   fi

@@ -737,7 +737,9 @@ def test_until_done_deep_splits_into_supervisor_and_round_switches(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     sep = argv.index("--")
     assert "--probe" in argv[:sep] and "--review-round" in argv[:sep]
-    assert argv[sep + 1:] == ["--role-variant", "deep", "--subagents-nudge"]
+    # the rounds get the delegation PUSH (--deep and the default depth push; only
+    # qwen-sweep batches keep nudging)
+    assert argv[sep + 1:] == ["--role-variant", "deep", "--subagents-push"]
 
 
 @pytest.mark.parametrize("args,needle", [
@@ -769,12 +771,15 @@ def test_deep_is_all_four_switches(tmp_path, server, fake):
     assert r.returncode == 0, r.stderr
     rec = json.loads(r.stdout)
     assert rec["qwen_agent"]["switches"] == {"probe": True, "role_variant": "deep",
-                                             "review_round": True, "subagents_nudge": True}
+                                             "review_round": True, "subagents_nudge": False,
+                                             "subagents_push": True}
     assert rec["result"] == "answer 2" and rec["qwen_agent"]["review_round"]["status"] == "ok"
     (a1, c1), (a2, c2) = calls(tmp_path)
     assert c1 == c2                                           # the review round ran in the sandbox
     p = sys_prompt(a1)
-    assert "DEEP audit" in p and "Delegate more than feels necessary." in p
+    # --deep pushes delegation now: the mandate text stands, the nudge text does not
+    assert "DEEP audit" in p and "Delegation is part of this task" in p
+    assert "Delegate more than feels necessary." not in p
     assert "throwaway copy of the project" in p and "Task" in flag(a1, "--tools").split(",")
     assert probe_runs(tmp_path) == []
 

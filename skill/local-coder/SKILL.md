@@ -41,16 +41,17 @@ Supervisor options: `--max-rounds N` (default 8), `--budget-tokens N`,
 `--budget-seconds N`, `--allow-dirty`, `--no-deviation-audit`.
 It refuses a prompt and the per-run flags (`-f`/`--prompt-file`, `--stdin`,
 `--resume`, `-w`, `-o`, `--dry-run`, `--json`) with exit 2.
-Opt-in and still being measured: `--probe` — and `--deep`, which implies it — runs
-the loop in a sandbox and returns a `patch:` instead of editing your tree; the
-other depth switches (`--review-round`, `--role-variant deep`, `--subagents-nudge`)
-deepen the rounds but edit the tree as a normal run does (`reference/coding.md`,
-"Deeper rounds").
+DEPTH IS THE DEFAULT: every coder round already gets the deep coder text, a review
+round after the checks first pass, and subagent delegation — `--probe` is NOT implied
+for a coding loop and stays typed: it runs the whole loop in a sandbox and returns a
+`patch:` instead of editing your tree. `--shallow` restores the plain loop; `--deep`
+types all four (`reference/coding.md`, "Depth: the rounds are deep by default").
 
 ## 3. Read the result
 
 The last stdout line is `report: <path>`. `report.md` has the final checklist with
-evidence, the stop reason, the decision log, the new files and the denied tool calls.
+evidence, the stop reason, the depth mode and switches used, the decision log, the new
+files and the denied tool calls.
 
 | exit | meaning | what to do |
 |---|---|---|

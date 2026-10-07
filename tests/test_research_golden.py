@@ -75,10 +75,17 @@ def _canon(path):
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
-def _part_b_key(role_text, prompt, toolset, grants, web, mcp_text, effort):
+def _part_b_key(role_text, prompt, toolset, grants, web, mcp_text, effort, deep=""):
     blob = "%s\n%s\n%s\n%s\n%s\n%s\n%s" % (role_text, prompt, toolset, grants, web, mcp_text,
                                            effort or "")
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    return hashlib.sha256((blob + deep).encode("utf-8")).hexdigest()
+
+
+# default depth on: a research role with no "deep" field is deep now, so its key carries
+# the switch list; the fan-out roles (searcher, reader, verifier) say "deep": false and
+# their keys stay byte-identical to the released ones
+DEEP = "\ndeep:review_round,subagents"
+DEEP_ROLES = {"scoper": DEEP, "synthesizer": DEEP}
 
 
 def _run(tmp_path, depth):
@@ -121,7 +128,8 @@ def test_one_round_run_folder_matches_the_released_one(tmp_path, env, capsys, de
 
 def test_one_round_cache_keys_match_the_released_ones(tmp_path, env):  # noqa: F811
     # the fence flags and the key blob are unchanged, so a run folder the released
-    # command wrote resumes with every finished unit still a cache hit
+    # command wrote resumes with every shallow unit still a cache hit; the roles that are
+    # deep by default now (DEEP_ROLES) have new keys and run again
     rc, run = _run(tmp_path, "quick")
     assert rc == 0
     agents = run / "agents"
@@ -136,7 +144,9 @@ def test_one_round_cache_keys_match_the_released_ones(tmp_path, env):  # noqa: F
         role, toolset, grants, web, mcp = fences[name.split("-")[0]]
         role_text = (rs.ROLES / ("%s.md" % role)).read_text(encoding="utf-8")
         prompt = (agents / ("%s.prompt.md" % name)).read_text(encoding="utf-8")
-        want = _part_b_key(role_text, prompt, toolset, grants, web, mcp, None)
+        # default depth on: only a role that is deep by now gains the switch suffix
+        want = _part_b_key(role_text, prompt, toolset, grants, web, mcp, None,
+                           DEEP_ROLES.get(role, ""))
         assert json.loads(rec.read_text(encoding="utf-8"))["key"] == want, name
 
 

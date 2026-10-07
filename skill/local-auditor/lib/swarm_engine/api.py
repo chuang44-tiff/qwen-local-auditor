@@ -135,7 +135,10 @@ class Workflow:
         return per_role.get(role) or self.cfg.get("effort") or self._role(role).effort or None
 
     def _deep(self, role):
-        """--deep ROLE (all switches) beats the manifest's role "deep"; a tuple of names."""
+        """--shallow ROLE forces the opt-out, --deep ROLE (all switches) forces all, and
+        otherwise the manifest's role "deep" (default: all); a tuple of names."""
+        if role in (self.cfg.get("shallow") or ()):
+            return ()
         if role in (self.cfg.get("deep") or ()):
             return manifest.DEEP_SWITCHES
         return self._role(role).deep
