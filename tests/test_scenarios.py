@@ -240,6 +240,28 @@ def test_results_no_block_all_blocked():
                    for r in res)
 
 
+def test_results_crlf_answer_is_read_like_lf():
+    # Native Python on Windows prints and writes text with CRLF: the answer qwen-agent
+    # hands over arrives that way, and its fence must still be found.
+    suite = scenarios.parse(UNIT)
+    answer = report([{"id": i, "status": "PASS"} for i in ("add", "s2", "s3")])
+    for text in (answer.replace("\n", "\r\n"), answer.replace("\n", "\r\n").encode()):
+        assert [r["status"] for r in scenarios.results(text, suite)] == ["PASS"] * 3
+
+
+def test_cli_results_reads_crlf_and_prints_lf(tmp_path):
+    good = tmp_path / "suite.md"
+    good.write_text(UNIT, encoding="utf-8", newline="\r\n")
+    ans = tmp_path / "answer.md"
+    ans.write_bytes(report([{"id": "add", "status": "PASS"}]).replace("\n", "\r\n").encode())
+    r = subprocess.run([sys.executable, posix(LIB), "results", posix(good), posix(ans),
+                        posix(tmp_path / "results.json")],
+                       capture_output=True, env=dict(os.environ, PYTHONUTF8="1"))
+    assert r.returncode == 0, r.stderr
+    assert b"\r" not in r.stdout                   # the shell reads the counts off it
+    assert r.stdout.endswith(b"PASS 1 / FAIL 0 / BLOCKED 2\n")
+
+
 def test_summary_table():
     suite = scenarios.parse(UNIT)
     res = scenarios.results(report([
@@ -302,7 +324,10 @@ def senv(tmp_path, answer=None, modes="ok", extra=None):
            "FAKE_DIR": posix(tmp_path / "calls"), "FAKE_MODES": modes}
     if answer is not None:
         f = tmp_path / ("answer-%d.txt" % next(_answer_seq))
-        f.write_text(answer, encoding="utf-8")
+        # LF exactly as given: the fake JSON-escapes \n only, and a model's answer
+        # reaches qwen-agent as one JSON string -- a raw \r from Windows' text mode
+        # would make the fake's output invalid JSON, which no real claude prints.
+        f.write_text(answer, encoding="utf-8", newline="\n")
         env["FAKE_ANSWER"] = posix(f)
     env.update(extra or {})
     return env

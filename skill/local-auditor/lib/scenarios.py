@@ -269,6 +269,9 @@ def results(answer, suite):
     by_id = None                                 # None: no block has parsed yet
     if isinstance(answer, bytes):                # qwen-agent hands bytes; cp1252 decoding
         answer = answer.decode("utf-8", "replace")  # would turn valid UTF-8 into junk
+    # CRLF answers (any text native Python on Windows printed or wrote) must fence
+    # like LF ones: the fence's `$` stops at \n, never before a \r.
+    answer = answer.replace("\r\n", "\n").replace("\r", "\n")
     for block in _FENCE.findall(answer):
         try:
             parsed = json.loads(block)
@@ -674,6 +677,10 @@ def _replay_main(cmd, args, prog, usage):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
+    # The shell reads every line printed here (the counts off the summary's last line,
+    # the prompt it hands the tester): LF on Windows too, where text mode writes CRLF.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(newline="\n")
     prog = "scenarios.py"
     usage = ("usage: %s check FILE | prompt FILE | results FILE ANSWER_FILE OUT_JSON"
              " | replay-check SUITE_FILE RESULTS_JSON REPLAY_DIR OUT_DIR"

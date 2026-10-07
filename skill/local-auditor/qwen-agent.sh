@@ -3037,7 +3037,7 @@ scenario_score() {
     || die "--scenarios: could not write $BROWSER_DIR/summary.md"
   die "$sum"
   die "results: $BROWSER_DIR/results.json"
-  line="$(printf '%s\n' "$sum" | tail -n 1)"
+  line="$(printf '%s\n' "$sum" | tail -n 1 | tr -d '\r')"   # native Python may end lines CRLF
   case "$line" in
     "PASS "*" / FAIL "*" / BLOCKED "*) : ;;
     *) die "--scenarios: could not read the counts off the summary"
