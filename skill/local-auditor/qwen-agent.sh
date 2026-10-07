@@ -540,10 +540,11 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
                        script that changed since recording is ERROR and never runs),
                        then node runs it (120 s each) and its 'RESULT <id> ...' line
                        is the verdict: PASS, FAIL (with the expectation that did not
-                       hold) or ERROR (it crashed, printed no RESULT line, or timed
-                       out). The summary table and 'PASS n / FAIL n / ERROR n' print
-                       on stderr, with the scenarios the recording kept no script
-                       for listed as NOT RECORDED; exit 0 when every kept script
+                       hold) or ERROR (it crashed, printed no RESULT line, timed
+                       out, or printed its own error as a FAIL). The summary table
+                       and 'PASS n / FAIL n / ERROR n' print on stderr, with the
+                       scenarios the recording kept no script for listed as NOT
+                       RECORDED; exit 0 when every kept script
                        PASSED, 9 when any is FAIL or ERROR or none was kept. Every model-related flag (-r, -f, a prompt,
                        --scenarios, --until-done, --interactive, --deep, a model, a
                        timeout) is refused with exit 2 — a replay asks nothing. -b
@@ -882,7 +883,7 @@ REVIEW_PUSH_TEXT=' Hand the re-verification of your three most important claims 
 # and parses, so the two must not drift: that file documents the same contract. The
 # @FOLDER@ placeholder is replaced with the run's browser folder (the one directory the
 # recording may write in) because the session knows its own evidence only by that path.
-RECORD_PROMPT="Now turn each scenario you ran into a deterministic replay script. For each scenario id write the file @FOLDER@/replay/<id>.mjs: a self-contained Node ES module that imports { chromium } from 'playwright', launches it headless, opens the page fresh, performs the scenario's steps exactly with stable selectors (roles, labels, visible text; never coordinates), checks EVERY expectation with an explicit assertion, and prints exactly one line: 'RESULT <id> PASS' or 'RESULT <id> FAIL: <the expectation that did not hold>'. Read the base URL from the environment variable QWEN_REPLAY_BASE (default: the suite's base URL). Handle dialogs explicitly. Exit 0 after printing the line; exit 1 only on a script error. Do not change anything else. Reply with the list of files written."
+RECORD_PROMPT="Now turn each scenario you ran into a deterministic replay script. For each scenario id write the file @FOLDER@/replay/<id>.mjs: a self-contained Node ES module that imports { chromium } from 'playwright', launches it headless, opens the page fresh, performs the scenario's steps exactly with stable selectors (roles, labels, visible text; never coordinates), checks EVERY expectation with an explicit assertion, and prints exactly one line: 'RESULT <id> PASS' or 'RESULT <id> FAIL: <the expectation that did not hold>'. Read the base URL from the environment variable QWEN_REPLAY_BASE (default: the suite's base URL). Handle dialogs explicitly. Exit 0 after printing the line; exit 1 only on a script error. Never catch your own errors to print FAIL: a step that cannot be performed must let the exception propagate; FAIL is only for an expectation that was checked and did not hold. Do not change anything else. Reply with the list of files written."
 
 list_roles() {
   echo "built-in: auditor, coder, mechanic, plain, tester"

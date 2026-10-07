@@ -273,6 +273,7 @@ def test_record_resumes_once_with_record_prompt(tmp_path, server, recorder, fake
                    "never coordinates", "EVERY expectation",
                    "RESULT <id> PASS", "RESULT <id> FAIL: <the expectation that did not hold>",
                    "QWEN_REPLAY_BASE", "Handle dialogs explicitly",
+                   "Never catch your own errors to print FAIL",
                    "Do not change anything else.", "list of files written"):
         assert needle in prompt, needle
 
@@ -363,6 +364,47 @@ def test_replay_check_keeps_matching_and_rejects_mismatch(tmp_path, toolchain):
                 posix(tmp_path / "out2"), env=renv(tmp_path, toolchain))
     assert r.returncode == 2
     assert "not a list" in r.stderr
+
+
+def test_replay_check_rejects_a_fail_that_is_the_scripts_own_error(tmp_path, toolchain):
+    # the model wrapped its body in a catch-all and printed its exception as FAIL: that
+    # matches a recorded FAIL by accident, so it must be rejected, not kept
+    suite = tmp_path / "suite.md"
+    suite.write_text(FIVE, encoding="utf-8")
+    results = tmp_path / "results.json"
+    results.write_text(json.dumps([
+        {"id": "a", "status": "FAIL", "notes": "exp a"},
+        {"id": "b", "status": "FAIL", "notes": "exp b"},
+    ]), encoding="utf-8")
+    src = tmp_path / "replay"
+    src.mkdir()
+    caught = "script error: locator.innerText: Timeout 30000ms exceeded."
+    (src / "a.mjs").write_text(script("a", "FAIL", caught), encoding="utf-8", newline="\n")
+    (src / "b.mjs").write_text(script("b", "FAIL", "expected 11 rows, saw 10"),
+                               encoding="utf-8", newline="\n")
+    out_dir = tmp_path / "recording"
+    r = cli_run("replay-check", posix(suite), posix(results), posix(src), posix(out_dir),
+                env=renv(tmp_path, toolchain))
+    assert r.returncode == 0, r.stdout + r.stderr
+    kept = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert [(s["id"], s["verdict"]) for s in kept["scripts"]] == [("b", "FAIL")]
+    assert kept["rejected"][0] == {
+        "id": "a", "reason": "replay said ERROR, the run recorded FAIL: "
+                             "script reported its own error as FAIL: " + caught}
+    assert not (out_dir / "a.mjs").exists()
+
+
+def test_replay_shows_error_for_a_fail_that_is_the_scripts_own_error(tmp_path, toolchain):
+    caught = "script error: locator.innerText: Timeout 30000ms exceeded."
+    rec = recording(tmp_path, "rec", [("a", "FAIL", script("a", "FAIL", caught)),
+                                      ("b", "FAIL", script("b", "FAIL",
+                                                           "expected 11 rows, saw 10"))])
+    r = cli_run("replay", posix(rec), env=renv(tmp_path, toolchain))
+    assert r.returncode == 9, r.stdout + r.stderr
+    assert ("| a | ERROR | script reported its own error as FAIL: %s |" % caught
+            in r.stdout)
+    assert "| b | FAIL | expected 11 rows, saw 10 |" in r.stdout
+    assert r.stdout.splitlines()[-1] == "PASS 0 / FAIL 1 / ERROR 1"
 
 
 # ------------------------------------------------------------------ replaying

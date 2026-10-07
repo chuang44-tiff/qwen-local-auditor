@@ -56,6 +56,7 @@ replay only a folder you recorded or have read. Its whole
 contract is one line on stdout -- 'RESULT <id> PASS' or 'RESULT <id> FAIL: <the
 expectation that did not hold>' -- exit 0 after it, exit 1 on a script error, and
 the base URL read from QWEN_REPLAY_BASE (its own default: the suite's base URL).
+A FAIL whose note is the script's own error (REPLAY_OWN_ERROR) is an ERROR.
 """
 import glob
 import hashlib
@@ -76,6 +77,17 @@ REPLAY_STATUSES = ("PASS", "FAIL", "ERROR")
 REPLAY_TIMEOUT = 120                       # wall-clock seconds per script
 # The one line a replay script must print, and nothing else that is read off it.
 REPLAY_RESULT = re.compile(r"^RESULT\s+(\S+)\s+(PASS|FAIL)(?::\s*(.*))?$")
+# A FAIL whose note is the script's own exception, not an expectation: a script that
+# catches its error and prints it as FAIL never checked anything, and its FAIL would
+# outlive the app's fix. Kept conservative -- it matches only what an uncaught error
+# looks like: the words "script error"; a JS error name with a colon ("Error:",
+# "TypeError:", "TimeoutError:"); a Playwright call prefix ("locator.click: ...",
+# "page.goto: ..."); or Playwright's "Timeout 30000ms exceeded". A note that only
+# mentions an error ("the error message did not appear") stays FAIL.
+REPLAY_OWN_ERROR = re.compile(
+    r"^(script error\b|[a-z]*error:"
+    r"|(page|locator|frame|browser|context|elementhandle|keyboard|mouse)\.\w+:)"
+    r"|\btimeout \d+\s*ms exceeded\b", re.IGNORECASE)
 # A scenario the recording kept no script for: listed by a replay, never run.
 NOT_RECORDED = "NOT RECORDED"
 REPLAY_MANIFEST = "manifest.json"
@@ -469,9 +481,18 @@ def _run_script(node, node_modules, script, base=None, timeout=REPLAY_TIMEOUT, s
         why = next((ln.strip() for ln in err.splitlines()
                     if "rror" in ln or "xecutable" in ln), "")
         return "ERROR", "no RESULT line (exit %s)%s" % (code, ": " + why[:200] if why else "")
-    if hit.group(2) == "FAIL":
-        return "FAIL", (hit.group(3) or "").strip()
-    return "PASS", ""
+    return _replay_verdict(hit.group(2), (hit.group(3) or "").strip())
+
+
+def _replay_verdict(verdict, note):
+    """(status, note) of a script's RESULT line: PASS, FAIL with its note -- or ERROR
+    when the FAIL note is the script's own error (REPLAY_OWN_ERROR), so replay-check
+    never keeps it and a replay never reports it as the app's failure."""
+    if verdict != "FAIL":
+        return "PASS", ""
+    if REPLAY_OWN_ERROR.search(note):
+        return "ERROR", "script reported its own error as FAIL: " + note
+    return "FAIL", note
 
 
 def _read_json(path, what):

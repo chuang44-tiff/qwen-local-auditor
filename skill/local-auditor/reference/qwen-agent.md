@@ -394,6 +394,7 @@ with its reason in the manifest:
 | `not run (no result recorded)` | the run reported nothing for that id |
 | `no script was written` | the record round left that scenario out |
 | `replay said PASS, the run recorded FAIL: …` | the script does not test what was tested, or the app moved under it |
+| `replay said ERROR, the run recorded FAIL: …` | the script errored — crashed, timed out, or caught its own exception and printed it as a FAIL (a note starting `script error`, `Error:`, `locator.click:`… or saying `Timeout …ms exceeded`): an error is `ERROR`, never a kept FAIL |
 
 The kept scripts are copied into `--record`'s directory with a `manifest.json`
 (`suite`, `file` — the suite file absolute, `base`, `recorded` — UTC time,
@@ -432,7 +433,8 @@ for this file. `node` then runs each one (120 s each) in a fresh temporary
 directory with `NODE_PATH` set to the playwright package's `node_modules`, and
 with `QWEN_REPLAY_BASE` set when a base was given. Its `RESULT` line is the
 verdict — `PASS`, `FAIL` with the expectation that did not hold, or `ERROR` (it
-crashed, printed no `RESULT` line, or ran out its clock) — the table and
+crashed, printed no `RESULT` line, ran out its clock, or printed its own error as a
+`FAIL`) — the table and
 `PASS n / FAIL n / ERROR n` print on **stderr**. The scenarios the recording kept no
 script for are listed as `NOT RECORDED` with their reason (and counted as `NOT
 RECORDED n` when there are any); they are not run and do not change the exit. The exit

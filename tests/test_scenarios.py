@@ -472,3 +472,43 @@ def test_qwen_agent_scenarios_background_status_names_the_failure(tmp_path, serv
     assert r.returncode == 0, r.stdout + r.stderr
     status = wait_for_status(pathlib.Path(str(out) + ".status"))
     assert "exit=9" in status and "reason=scenario_fail" in status
+
+
+# ------------------------------------------------------------------ replay verdicts
+
+@pytest.mark.parametrize("note", [
+    "script error: locator.innerText: Timeout 30000ms exceeded.",
+    "Script Error - the cart button was not found",
+    "locator.click: Timeout 30000ms exceeded.",
+    "page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:3000/",
+    "Error: strict mode violation: getByRole('button') resolved to 2 elements",
+    "TypeError: Cannot read properties of null (reading 'textContent')",
+    "TimeoutError: page.waitForSelector: Timeout 5000ms exceeded.",
+    "waiting for the total: timeout 5000ms exceeded",
+])
+def test_replay_fail_that_is_the_scripts_own_error_is_error(note):
+    # a script that catches its own exception and prints FAIL never checked the
+    # expectation: its FAIL would still be FAIL once the app is fixed
+    status, got = scenarios._replay_verdict("FAIL", note)
+    assert status == "ERROR"
+    assert got == "script reported its own error as FAIL: " + note
+
+
+@pytest.mark.parametrize("note", [
+    "expected 11 rows, saw 10",
+    "the error message 'Name is required' did not appear",
+    "the subtotal is 9.00",
+    "no error banner after an invalid email",
+    "",
+])
+def test_replay_genuine_fail_stays_fail(note):
+    assert scenarios._replay_verdict("FAIL", note) == ("FAIL", note)
+    assert scenarios._replay_verdict("PASS", "") == ("PASS", "")
+
+
+def test_record_prompt_forbids_catching_errors_into_fail():
+    sh = (pathlib.Path(__file__).resolve().parents[1] / "skill" / "local-auditor"
+          / "qwen-agent.sh").read_text(encoding="utf-8")
+    line = next(ln for ln in sh.splitlines() if ln.startswith("RECORD_PROMPT="))
+    assert "Never catch your own errors to print FAIL" in line
+    assert "let the exception propagate" in line
