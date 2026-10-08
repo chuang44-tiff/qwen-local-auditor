@@ -68,7 +68,7 @@ combined with `--test`.
 | `--strict-mcp` | adds `--strict-mcp-config`, dropping configured MCP servers (`--toolset` governs built-ins only). On by default; `--all-tools` turns it off |
 | `--mcp-config FILE` | load only the MCP servers in FILE (implies `--strict-mcp`), even with `--all-tools`; grant their tools with `-t`, e.g. `-t mcp__search__search` |
 | `--web` (`QWEN_WEB=1`) | adds `WebFetch` to the toolset and the grants, for every role and for the fixed `--test` grant list. Never `WebSearch`: a server-side tool that local servers reject with a 400 (`body.tools.0.input_schema Field required`); search needs an MCP server. With `--test` it warns that tests can be gamed by fetching upstream answers |
-| `--subagents` (`QWEN_SUBAGENTS=1`) | adds the `Task` tool so the model can hand broad reading to a subagent. Same model, same tool limits, one more concurrent request: leave it off on a small GPU |
+| `--subagents` (`QWEN_SUBAGENTS=1`) | adds the `Task` tool so the model can hand broad reading to a subagent. Same model, same tool limits, one more concurrent request: leave it off on a small GPU. Subagents run in the foreground (every run but `--interactive` sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`): one that reported after the answer would start another turn, and the reply to it would replace the answer as the result |
 | `--permission-mode M` | passed through to claude (e.g. `acceptEdits`, `plan`) |
 | `-C, --cd DIR` | chdir before running; tool access is rooted at cwd. Scope it tightly: a bounded directory is the single biggest lever on output quality |
 | `-D, --add-dir DIR` | an extra readable directory; repeatable |
@@ -518,7 +518,7 @@ blocks has been seen at both rc=0 and rc=8 (see [`limits.md`](limits.md)).
 | 4 | API error from the endpoint (status reported on stderr) |
 | 5 | timed out after `--timeout` seconds |
 | 6 | ran clean but returned no usable text |
-| 7 | a tool call was blocked by the permission system (see `--warn-denials`) |
+| 7 | a tool call was blocked by the permission system (see `--warn-denials`). On a probe run, file-tool calls blocked only because they reached outside the sandbox are a note on stderr, not exit 7 |
 | 8 | harness failure (claude or python missing, or unparseable output) |
 | 9 | `--scenarios`: at least one scripted scenario ended FAIL or BLOCKED; `--replay`: at least one recorded script ended FAIL or ERROR, or the folder kept no script |
 | 11-14 | `--until-done` outcomes; see [`coding.md`](coding.md) |

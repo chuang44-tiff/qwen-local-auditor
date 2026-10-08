@@ -33,7 +33,7 @@ d="$FAKE_DIR"
 n=$(cat "$d/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$d/n"
 printf '%s\0' "$@" > "$d/argv.$n"
 pwd -P > "$d/pwd.$n"
-env | grep -E '^QWEN_TEST_' | sort > "$d/env.$n"
+env | grep -E '^(QWEN_TEST_|CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=)' | sort > "$d/env.$n"
 mode="$(printf '%s' "${FAKE_MODES:-ok}" | cut -d, -f"$n")"
 [ -n "$mode" ] || mode=ok
 answer() {
@@ -48,6 +48,10 @@ case "$mode" in
   repro)     wt="$QWEN_TEST_WORKTREE"; command -v cygpath >/dev/null 2>&1 && wt="$(cygpath -u "$wt")"
              printf 'def test_repro():\n    assert False\n' > "$wt/test_repro.py"; answer ;;
   sleep)     sleep 30; answer ;;
+  # deny:TOOL+TOOL -- a finished run whose record lists those tools as denied.
+  deny:*)    den=""; for x in $(printf '%s' "${mode#deny:}" | tr '+' ' '); do
+               den="$den${den:+,}{\"tool_name\":\"$x\",\"tool_input\":{}}"; done
+             printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"answer %s","session_id":"sess-%s","usage":{"input_tokens":10,"output_tokens":2},"permission_denials":[%s]}\n' "$n" "$n" "$den" ;;
   # usage:OUT_TOKENS:TURNS -- a short answer after many turns, the auto-compact
   # death signature the short-answer guard watches for.
   usage:*)   o="${mode#usage:}"; out="${o%%:*}"; turns="${o##*:}"
@@ -905,3 +909,50 @@ def test_until_done_rounds_are_shallow_even_with_config_deep(tmp_path, monkeypat
         assert "--review-round" not in rec["argv"]               # R belongs to the supervisor
     assert "--role-variant" in lines[0]["argv"] and "--subagents-nudge" in lines[0]["argv"]
     assert "--role-variant" not in lines[1]["argv"]              # the audit stays the plain auditor
+
+
+# ------------------------------------------------------------- fence denials, background
+
+def test_probe_fence_denials_are_a_note_not_a_failure(tmp_path, server, fake):
+    # On a probe run Read/Write/... are granted outright: a denial of one is the
+    # sandbox confinement (a scratch file under /tmp), and the run still succeeds.
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV, FAKE_MODES="deny:Write+Read,deny:Write"))
+    assert r.returncode == 0, r.stderr
+    assert "PERMISSION DENIED" not in r.stderr
+    assert "outside the sandbox were blocked [Read,Write]" in r.stderr
+    assert "treat it as suspect" not in r.stderr
+
+
+def test_probe_other_denials_still_fail(tmp_path, server, fake):
+    # A denial of anything but a file tool keeps its exit code.
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV, FAKE_MODES="deny:Write+WebFetch"))
+    assert r.returncode == 7, r.stderr
+    assert "PERMISSION DENIED: 2 tool call(s) blocked [WebFetch,Write]" in r.stderr
+
+
+def test_shallow_file_denials_still_fail(tmp_path, server, fake):
+    # Without a probe there is no sandbox fence: a file-tool denial means something else.
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--shallow", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV, FAKE_MODES="deny:Write"))
+    assert r.returncode == 7, r.stderr
+
+
+def test_background_tasks_off_and_foreground_asked(tmp_path, server, fake):
+    # A background subagent reporting after the answer makes the model write a
+    # postscript that becomes the result: every session runs with them off.
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stderr
+    d = tmp_path / "calls"
+    for n in (1, 2):
+        assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1" in (d / ("env.%d" % n)).read_text()
+    (a1, _), (a2, _) = calls(tmp_path)
+    assert "Run each subagent in the foreground" in sys_prompt(a1)
+    assert "Wait for its result before you answer." in a2[-1]
+    assert "only inside this copy" in sys_prompt(a1)

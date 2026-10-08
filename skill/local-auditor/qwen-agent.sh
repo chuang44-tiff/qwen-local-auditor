@@ -617,6 +617,7 @@ EXIT CODES
   $QA_TIMEOUT  timed out after --timeout seconds
   $QA_EMPTY  ran clean but returned no usable text
   $QA_DENIED  a tool call was blocked by the permission system (see --warn-denials)
+           (on a probe run, file-tool calls outside the sandbox are only a note)
   $QA_HARNESS  harness failure (claude missing, or unparseable output)
   $QA_SCENARIO_FAIL  --scenarios: at least one scripted scenario ended FAIL or BLOCKED;
                      --replay: at least one recorded script ended FAIL or ERROR, or the
@@ -875,7 +876,7 @@ ROLE_EOF
 REVIEW_PROMPT='Review round: before your answer is final, try to break it. Go back over every claim you made and every change you made. For each one, look for the input, state or code path that would make it wrong, and check it: read the code again and, where you have a shell, run a probe or a test. Correct or drop anything that does not survive, and add anything you missed. List, under REVIEW, each earlier claim or change you re-checked, the check you ran, and what changed (kept, corrected, dropped). Look in particular for what you did not cover the first time: a part of the code you did not open, an input class you did not try. Then reply with your complete revised answer. It replaces your previous answer, so repeat everything that still stands, in exactly the format your previous answer had to follow.'
 # With --subagents-push the review round also delegates: appended to REVIEW_PROMPT
 # only when PUSH is on, so a nudge-only review round keeps the prompt above verbatim.
-REVIEW_PUSH_TEXT=' Hand the re-verification of your three most important claims to a subagent, and compare its result with yours.'
+REVIEW_PUSH_TEXT=' Hand the re-verification of your three most important claims to a subagent, and compare its result with yours. Wait for its result before you answer.'
 
 # The one fixed prompt of --record, sent to the session that just ran the suite. The
 # script contract it states -- one RESULT line on stdout, exit 0 after it, exit 1 on a
@@ -2067,7 +2068,7 @@ if [ "$PROBING" -eq 1 ]; then
   done
   unset _t
   TOOLS='Bash,Read,Edit,Write,MultiEdit,Glob,Grep'
-  _probe_note="You are working in a throwaway copy of the project, not in the user's files. You have a full shell: run commands with the Bash tool. Use it to check your work: run the code, write small scripts or tests, and try the failure cases."
+  _probe_note="You are working in a throwaway copy of the project, not in the user's files. You have a full shell: run commands with the Bash tool. Use it to check your work: run the code, write small scripts or tests, and try the failure cases. The file tools (Read, Write, Edit, Glob, Grep) work only inside this copy; for a scratch file outside it, such as under /tmp, use the shell."
   if [ "$WRITE_MODE" -eq 1 ]; then
     _probe_note="$_probe_note Your edits are handed to the user as a patch; nothing is applied for you."
   else
@@ -2128,7 +2129,7 @@ fi
 # --subagents-push wants the mandate, not the suggestion; --deep and the implied
 # default push, qwen-sweep batches still nudge).
 if [ "$PUSH" -eq 1 ]; then
-  _push='Delegation is part of this task, not optional. Before you go deep, split the work into independent areas (a module, a guarantee, a group of failure modes). Keep one area for yourself and hand EVERY other area to a subagent, one at a time: give it a self-contained brief with the exact paths and the questions to answer, and ask for path:line evidence and the commands it ran. Verify each subagent'"'"'s key claims yourself before relying on them (re-read the cited lines or re-run its check). Your answer has a DELEGATION section: each subagent'"'"'s area, what it found, and what you verified.'
+  _push='Delegation is part of this task, not optional. Before you go deep, split the work into independent areas (a module, a guarantee, a group of failure modes). Keep one area for yourself and hand EVERY other area to a subagent, one at a time: give it a self-contained brief with the exact paths and the questions to answer, and ask for path:line evidence and the commands it ran. Verify each subagent'"'"'s key claims yourself before relying on them (re-read the cited lines or re-run its check). Your answer has a DELEGATION section: each subagent'"'"'s area, what it found, and what you verified. Run each subagent in the foreground and wait for its result before you write your answer.'
   if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
 
 $_push"; else SYSTEM="$_push"; fi
@@ -2534,6 +2535,10 @@ CHILD_ENV=(
 # so with QWEN_EFFORT=default (no --effort) nothing is set for the child.
 [ "$EFFORT" = default ] || CHILD_ENV+=("CLAUDE_CODE_EFFORT_LEVEL=$EFFORT")
 [ -n "${QWEN_CUSTOM_HEADERS:-}" ] && CHILD_ENV+=("ANTHROPIC_CUSTOM_HEADERS=$QWEN_CUSTOM_HEADERS")
+# A headless run ends with its answer. A subagent launched in the background that
+# reports after that answer starts one more turn, and the model's reply to it (a
+# postscript) replaces the answer as the result. Subagents run in the foreground.
+[ "$INTERACTIVE" -eq 1 ] || CHILD_ENV+=("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1")
 if [ "$TEST_MODE" -eq 1 ]; then
   # The Bash tool must never cut qwen-test off before the test timeout does:
   # qwen-test itself kills the test's process group at QWEN_TEST_TIMEOUT (600
@@ -2702,6 +2707,10 @@ print("qa_dur_ms=" + q(obj.get("duration_ms")))
 print("qa_denials=" + q(len(obj.get("permission_denials") or [])))
 den = obj.get("permission_denials") or []
 print("qa_denied_tools=" + q(",".join(sorted({str(d.get("tool_name", "?")) for d in den}))))
+# File-tool denials: on a probe run these tools are granted outright, so the only
+# thing that denies them is --restricted's confinement to the sandbox.
+_ft = {"Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "NotebookEdit"}
+print("qa_denials_fence=" + q(sum(1 for d in den if str(d.get("tool_name")) in _ft)))
 u = obj.get("usage") or {}
 print("qa_in_tok=" + q(u.get("input_tokens")))
 print("qa_out_tok=" + q(u.get("output_tokens")))
@@ -2802,7 +2811,12 @@ classify() {
     return $QA_HARNESS
   fi
 
-  if [ "${qa_denials:-0}" -gt 0 ]; then
+  if [ "$PROBING" -eq 1 ] && [ "${qa_denials:-0}" -gt 0 ] \
+     && [ "${qa_denials_fence:-0}" -eq "${qa_denials:-0}" ]; then
+    # The sandbox fence doing its job (a scratch file under /tmp, a read of the real
+    # checkout): the model got an error back and carried on. Said, not failed.
+    note "fence: ${qa_denials} file-tool call(s) outside the sandbox were blocked [${qa_denied_tools:-?}]"
+  elif [ "${qa_denials:-0}" -gt 0 ]; then
     die "PERMISSION DENIED: ${qa_denials} tool call(s) blocked [${qa_denied_tools:-?}]"
     die "the result below was produced WITHOUT those tools — treat it as suspect"
     die "allowed-tools was: $TOOLS"
