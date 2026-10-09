@@ -377,3 +377,137 @@ def test_record_and_replay_disclose_that_scripts_run_as_you():
         assert "unsandboxed" in text, name
         assert "same result every time" not in text, name
     assert "Nothing reaches the network" not in ref
+
+
+def test_swarm_skill_watches_events_and_records_verdicts():
+    # step 3 watches RUN/events.jsonl with the Monitor tool instead of polling run.log, and
+    # step 4 hands the session the final say on ui-test's failures
+    t = _flat(SW_SKILL.read_text(encoding="utf-8"))
+    for needle in ("qwen-swarm: run folder:", "events.jsonl", "Monitor", "timeout_ms",
+                   "TaskStop", "re-arm", "qwen-swarm --record-verdict", "CONFIRMED",
+                   "FALSE_ALARM", "NEEDS_HUMAN", "--set confirm=local", "--set confirm=none",
+                   "fixtures: DIR", "subagent", "never on the", "trips the breaker",
+                   "confirmed failure", "false alarm on a tester FAIL"):
+        assert needle in t, needle
+    assert "While it runs, read `RUN/run.log`" not in t, "the old run.log poll is still there"
+    assert "run folder: RUN" in t and "run_end" in t and "exit code" in t
+
+
+def _watch_recipe():
+    """The Monitor command step 3 of local-swarm prints, as one bash script."""
+    import textwrap
+    lines = SW_SKILL.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, x in enumerate(lines) if "RUN=/abs/run/folder; n=N" in x)
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "done")
+    return textwrap.dedent("\n".join(lines[start:end + 1]))
+
+
+def test_swarm_skill_watch_recipe_runs(tmp_path):
+    # the recipe as printed: whole lines only, attention/unit_dropped/run_end with their
+    # line numbers, exit after run_end, and a re-arm from N sees only what came after N
+    import os
+    import shutil
+    import subprocess
+    bash = os.environ.get("TEST_BASH") or shutil.which("bash")
+    run = tmp_path / "run"
+    run.mkdir()
+    events = ['{"kind": "run_start", "t": 1}', '{"kind": "attention", "item": "s2", "t": 2}',
+              '{"kind": "unit_done", "unit": "scenario-1", "t": 3}',
+              '{"kind": "unit_dropped", "unit": "scenario-2", "t": 4}',
+              '{"kind": "run_end", "exit": 4, "t": 5}']
+    (run / "events.jsonl").write_bytes(("\n".join(events) + "\n").encode("utf-8"))
+
+    def watch(n):
+        script = _watch_recipe().replace("RUN=/abs/run/folder; n=N",
+                                         'RUN="%s"; n=%d' % (run.as_posix(), n))
+        return subprocess.run([bash, "-c", script], capture_output=True, encoding="utf-8",
+                              timeout=30).stdout.splitlines()
+
+    assert watch(0) == ["2: " + events[1], "4: " + events[3], "5: " + events[4]]
+    assert watch(4) == ["5: " + events[4]]
+
+
+def test_swarm_skill_watch_recipe_survives_a_resume(tmp_path):
+    # a --resume appends to the SAME events.jsonl: the doc's rule is that N is the line
+    # count taken before the resume starts -- armed like that the recipe prints only the
+    # resume's new lines and exits on the NEW run_end (armed at 0 it would replay the
+    # previous run's attention lines and exit on its old run_end)
+    import os
+    import shutil
+    import subprocess
+    assert "line count" in _flat(SW_SKILL.read_text(encoding="utf-8"))
+    bash = os.environ.get("TEST_BASH") or shutil.which("bash")
+    run = tmp_path / "run"
+    run.mkdir()
+    events = run / "events.jsonl"
+    old = ['{"kind": "run_start", "resumed": false, "t": 1}',
+           '{"kind": "attention", "item": "s2", "t": 2}',
+           '{"kind": "run_end", "exit": 4, "t": 3}']
+    new = ['{"kind": "run_start", "resumed": true, "t": 4}',
+           '{"kind": "attention", "item": "s1", "t": 5}',
+           '{"kind": "run_end", "exit": 0, "t": 6}']
+    events.write_text("\n".join(old) + "\n", encoding="utf-8")
+    n = len(old)                                          # the line count, BEFORE the resume
+    with events.open("a", encoding="utf-8") as fh:        # ... and then the resume runs
+        fh.write("\n".join(new) + "\n")
+
+    def watch(start):
+        script = _watch_recipe().replace("RUN=/abs/run/folder; n=N",
+                                         'RUN="%s"; n=%d' % (run.as_posix(), start))
+        return subprocess.run([bash, "-c", script], capture_output=True, encoding="utf-8",
+                              timeout=30).stdout.splitlines()
+
+    assert watch(n) == ["5: " + new[1], "6: " + new[2]]   # only the resume's events
+    assert watch(0)[:2] == ["2: " + old[1], "3: " + old[2]]   # armed at 0 the PREVIOUS
+    # run's attention line is replayed to the session as if it had just happened: the trap
+    # the line-count rule avoids
+
+
+def test_docs_state_the_build_time_rules():
+    # the rules this build settled, where a session will read them: swarm.md, and one
+    # line each in the local-swarm SKILL.md
+    t = _flat(SW_REF.read_text(encoding="utf-8"))
+    for needle in ("advisory", "points outside", "non-secret", "saved but not applied"):
+        assert needle in t, needle
+    s = _flat(SW_SKILL.read_text(encoding="utf-8"))
+    for needle in ("advisory", "non-secret", "saved but not applied", "fail only that row"):
+        assert needle in s, needle
+
+
+def test_swarm_reference_covers_claude_check_events_and_verdicts():
+    t = _flat(SW_REF.read_text(encoding="utf-8"))
+    for needle in ("wf.claude_check", "`ok`", "`failed`", "`unavailable`", "`over_cap`",
+                   "`deadline`", "RUN/claude/calls.jsonl", "claude_calls", "claude_cost_usd",
+                   "QWEN_EXEC_RETRY_BACKOFF", "wf.event", "RUN/events.jsonl", "`run_start`",
+                   "`unit_done`", "`unit_dropped`", "`claude_call`", "`run_end`", "`attention`",
+                   "qwen-swarm: run folder:", "RUN/.lock", "run is live", "--record-verdict",
+                   "RUN/verdicts/<ID>.json", "apply_verdicts", "render(final, rows)",
+                   "exit_for", "notice(cfg)", "`browser-probe`", "stage=DIR", "repair=TEXT",
+                   "unit_ids=True", "confirm_model", "confirm_max", "CONFIRMED", "FALSE_ALARM",
+                   "NEEDS_HUMAN", "fixtures: DIR", "200 MB", "--set confirm=local",
+                   "--set confirm=none", "leave this machine", "## False alarms",
+                   "Session verdicts", "no result block after repair",
+                   "anything that can write the run folder", "confirmer unavailable:",
+                   "confirm=claude:", "`scored`", "`verdict`", "needs human",
+                   "confirmed failure", "false alarm on a tester FAIL",
+                   "No confirm pass ran", "not on `run_end.exit`", "connection error",
+                   "(a verdict does not clear a drop)"):
+        assert needle in t, needle
+
+
+def test_advisor_section_names_the_ui_test_exception():
+    ref = (REF / "qwen-agent.md").read_text(encoding="utf-8")
+    advisor = ref[ref.index("## Advisor"):ref.index("## Model, context and effort")]
+    for needle in ("ui-test", "on by default", "--set confirm=local", "--set confirm=none"):
+        assert needle in advisor, needle
+    assert "`fixtures: <dir>`" in ref
+
+
+def test_coder_docs_need_the_test_command_only_for_test_checks():
+    line = "QWEN_TEST_CMD is needed only when the checklist has `test` checks"
+    for p in (REF / "coding.md", ROOT / "skill" / "local-coder" / "SKILL.md"):
+        t = _flat(p.read_text(encoding="utf-8"))
+        assert line in t, p.name
+        assert "--test-no-cmd" in t, p.name
+        # the precise condition: no `test` check AND no command configured
+        assert "no check is a `test` check and QWEN_TEST_CMD is unset" in t, p.name

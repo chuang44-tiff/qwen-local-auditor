@@ -131,6 +131,9 @@ built-in defaults.
 | `QWEN_CUSTOM_HEADERS` | | passed to claude as `ANTHROPIC_CUSTOM_HEADERS` (gateways) |
 | `QWEN_PYTHON` | first of `python3`, `python` that runs | Python 3.8+ for result parsing, probed by execution |
 | `QWEN_CLAUDE_BIN` | `claude` | the Claude Code executable |
+| `QWEN_EXEC_RETRY_BACKOFF` | `10 30` | seconds before each retry when `claude` is missing at startup or could not be executed (exit 126/127), typically an update replacing it; one retry per number, empty for none |
+| `QWEN_CLAUDE_PROBE` | *(on)* | `off` skips the pre-call availability probe in `wf.claude_check` (`claude auth status` + one HTTPS HEAD, ~0.2 s, no tokens): for tests, or a network the probe gets wrong |
+| `QWEN_CLAUDE_PROBE_URL` | `https://api.anthropic.com/` | where the probe's HTTPS HEAD goes; any HTTP answer counts as reachable |
 | `QWEN_ROLE_DIR` | | your own roles as `NAME.md` or `NAME.txt`, outside the clone |
 | `QWEN_OUTDIR` | the current directory | where `-w` puts generated output files. A `--probe --write` patch with no `-o` goes here only when you set it; unset, it goes to the probe directory |
 | `QWEN_PROBE_DIR` | `$XDG_CACHE_HOME/qwen-agent/probes` (else `~/.cache/qwen-agent/probes`) | where `--probe` sandboxes, and the default patch, live; relative to the caller's directory; may not be inside the tree being copied |
@@ -199,7 +202,8 @@ searches through.
 | `several models are served` | set `QWEN_MODEL` (or pass `-m`) |
 | `the server does not report a context window` | set `QWEN_CTX` |
 | exit 2 `effort '…' is not accepted` | your `QWEN_EFFORT_ALLOWED` list refused it; pick a listed level |
-| exit 8 `claude binary not found` / `no working Python 3.8+` | install Claude Code / Python, or set `QWEN_CLAUDE_BIN` / `QWEN_PYTHON` |
+| exit 8 `claude binary not found` / `no working Python 3.8+` | install Claude Code / Python, or set `QWEN_CLAUDE_BIN` / `QWEN_PYTHON`; a claude that is only briefly absent (an update) is waited for first, see `QWEN_EXEC_RETRY_BACKOFF` |
+| exit 8 `claude binary could not be executed (exit N)` | `claude` was not executable on every try, usually an update replacing it; rerun when the update is done (a swarm: `--resume RUN_DIR` reruns only the dropped agents) |
 | API error 400 mid-run | often an effort level the chat template rejects: set `QWEN_EFFORT_ALLOWED`, or `QWEN_EFFORT=default` |
 | `qwen-sweep` exit 9, `nothing to audit` | the glob matched nothing, the ref is wrong, or every item was withheld; see `needs-human.txt` |
 | a sweep batch keeps failing | read that batch's `stderr.txt`; the last lines are also printed in the sweep output |
