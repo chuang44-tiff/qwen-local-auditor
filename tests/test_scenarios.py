@@ -512,3 +512,74 @@ def test_record_prompt_forbids_catching_errors_into_fail():
     line = next(ln for ln in sh.splitlines() if ln.startswith("RECORD_PROMPT="))
     assert "Never catch your own errors to print FAIL" in line
     assert "let the exception propagate" in line
+
+
+# ------------------------------------------------------------------ fixtures
+
+def test_parse_captures_the_fixtures_line_raw_and_only_when_present():
+    with_line = CART.replace("base: http://localhost:3000/cart\n",
+                             "base: http://localhost:3000/cart\nfixtures: ../files/up loads\n")
+    suite = scenarios.parse(with_line)
+    assert suite["fixtures"] == "../files/up loads"          # raw: parse has no file to resolve by
+    assert suite["base"] == "http://localhost:3000/cart"     # base: still read beside it
+    assert "fixtures" not in scenarios.parse(CART)           # absent: no key at all
+    # before base:, too -- any order in the suite header
+    first = CART.replace("# Suite: Cart page\n", "# Suite: Cart page\nfixtures: files\n")
+    assert scenarios.parse(first)["fixtures"] == "files"
+    assert scenarios.parse(first)["base"] == "http://localhost:3000/cart"
+    # inside a scenario it is free text, not the suite's line
+    inner = CART.replace("id: add-item\n", "id: add-item\nfixtures: nope\n")
+    assert "fixtures" not in scenarios.parse(inner)
+
+
+def test_prompt_without_fixtures_is_unchanged(tmp_path):
+    plain = scenarios.prompt(scenarios.parse(CART))
+    with_line = scenarios.parse(CART.replace("base: http://localhost:3000/cart\n",
+                                             "base: http://localhost:3000/cart\nfixtures: f\n"))
+    assert scenarios.prompt(with_line) == plain              # the key alone adds nothing
+    assert scenarios.prompt(with_line, fixtures=[]) == plain
+    # single-agent qwen-agent --scenarios: the CLI prompt of a suite with the line is the same
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    a.write_text(CART, encoding="utf-8")
+    b.write_text(CART.replace("base: http://localhost:3000/cart\n",
+                              "base: http://localhost:3000/cart\nfixtures: f\n"), encoding="utf-8")
+    ra, rb = cli_run("prompt", posix(a)), cli_run("prompt", posix(b))
+    assert ra.returncode == rb.returncode == 0
+    assert ra.stdout == rb.stdout
+
+
+def test_prompt_names_each_fixture_by_its_native_absolute_path(tmp_path):
+    staged = tmp_path / "agents" / "scenario-1" / "fixtures"
+    files = [("photo.png", str(staged / "photo.png")),
+             ("docs/a b.csv", os.path.join(str(staged), "docs", "a b.csv"))]
+    text = scenarios.prompt(scenarios.parse(CART), fixtures=files)
+    lines = text.splitlines()
+    head = lines.index("Files for uploads:")
+    assert lines[head + 1:head + 4] == ["- photo.png at %s" % files[0][1],
+                                        "- docs/a b.csv at %s" % files[1][1],
+                                        "Pass that absolute path to browser_file_upload."]
+    assert os.path.isabs(files[1][1]) and os.sep in files[1][1]   # the host's own form
+    assert head < lines.index("Scenario add-item: add an item")  # before the scenarios
+    assert text.endswith(SPEC_CONTRACT + "\n")
+
+
+# ------------------------------------------------------------------ strict results
+
+def test_results_strict_raises_no_result_for_exactly_the_two_unreported_cases():
+    suite = scenarios.parse(UNIT)
+    assert issubclass(scenarios.NoResult, ValueError)     # what earns a swarm unit its repair
+    with pytest.raises(scenarios.NoResult) as e:
+        scenarios.results("I opened every page and everything looked fine.", suite, strict=True)
+    assert str(e.value) == "no result block"
+    with pytest.raises(scenarios.NoResult) as e:
+        scenarios.results(report([{"id": "add", "status": "PASS"},
+                                  {"id": "s3", "status": "PASS"}]), suite, strict=True)
+    assert str(e.value) == "no result reported for s2"
+    # a report for every id is scored as before -- an invalid status included
+    full = report([{"id": "add", "status": "PASS"}, {"id": "s2", "status": "MAYBE"},
+                   {"id": "s3", "status": "FAIL", "failed_expectations": ["exp three"]}])
+    assert scenarios.results(full, suite, strict=True) == scenarios.results(full, suite)
+    assert [r["status"] for r in scenarios.results(full, suite, strict=True)] == \
+        ["PASS", "BLOCKED", "FAIL"]
+    # and the default is unchanged: no block at all is still every scenario BLOCKED
+    assert all(r["notes"] == "no result block" for r in scenarios.results("prose", suite))

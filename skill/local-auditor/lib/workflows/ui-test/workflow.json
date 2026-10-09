@@ -1,14 +1,18 @@
 {
  "name": "ui-test",
- "description": "A scripted UI suite as a swarm: one browser agent per scenario, every answer scored against the suite, one report",
+ "description": "A scripted UI suite as a swarm: one browser agent per scenario, every answer scored against the suite, every FAIL/BLOCKED re-checked, one report",
  "goal": "a name for the suite run (the scenario file is --set scenarios=PATH)",
  "target": "none",
  "roles": {
-  "tester": {"file": "roles/tester.md", "fence": "browser", "deep": false}
+  "tester": {"file": "roles/tester.md", "fence": "browser", "deep": false},
+  "confirmer": {"file": "roles/confirmer.md", "fence": "browser-probe", "deep": false}
  },
- "knobs": {"scenarios": "str", "base": "str"},
+ "knobs": {"scenarios": "str", "base": "str", "fixtures": "str", "confirm": "str",
+           "confirm_model": "str", "confirm_max": "int"},
  "presets": {
-  "quick": {"scenarios": "", "base": "", "budget": 900, "retries": 1, "rounds": 1}
+  "quick": {"scenarios": "", "base": "", "fixtures": "", "confirm": "claude",
+            "confirm_model": "opus", "confirm_max": 10,
+            "budget": 900, "retries": 1, "rounds": 1}
  },
  "default_depth": "quick"
 }

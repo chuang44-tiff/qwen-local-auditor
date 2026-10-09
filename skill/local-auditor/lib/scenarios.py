@@ -4,6 +4,12 @@ A scenario file is Markdown (UTF-8):
 
     # Suite: <name>                      (required, first heading)
     base: <url>                          (optional; relative "open" targets resolve here)
+    fixtures: <dir>                      (optional; files a scenario may upload. Captured
+                                          raw: the swarm's ui-test resolves it against
+                                          the suite file's folder and stages it; a single
+                                          qwen-agent --scenarios run ignores it -- run it
+                                          from a folder holding the files instead, since
+                                          the browser may upload from its cwd)
 
     ## Scenario: <title>                 (one or more)
     id: <id>                             (optional; default s1, s2, ... in file order;
@@ -19,11 +25,16 @@ error names the line it comes from ("line N: ...") and is a ScenarioError.
 The module is the single contract between qwen-agent --scenarios and the tester:
 
   parse(text)                 -> {"suite", "base", "scenarios": [{"id","title",
-                                          "steps","expect"}]}
-  prompt(suite)               -> the task text handed to the tester (every scenario
-                                          with its steps and expectations, then the
+                                          "steps","expect"}]}, plus "fixtures" (the raw
+                                          line) only when the file has that line
+  prompt(suite, fixtures=None) -> the task text handed to the tester (every scenario
+                                          with its steps and expectations, the files it
+                                          may upload when `fixtures` names any, then the
                                           reporting contract)
-  results(answer, suite)      -> one result dict per scenario id, in file order
+  results(answer, suite, strict=False)
+                              -> one result dict per scenario id, in file order;
+                                          strict=True raises NoResult instead of
+                                          scoring a missing report BLOCKED
   summary(results)            -> the Markdown table plus the PASS/FAIL/BLOCKED line
 
 CLI:
@@ -97,6 +108,7 @@ _SUITE_HEAD = re.compile(r"^#\s+Suite:\s*(.*\S)\s*$")
 _SCENARIO_HEAD = re.compile(r"^##\s+Scenario:\s*(.*\S)\s*$")
 _HEAD = re.compile(r"^#+\s")
 _BASE = re.compile(r"^base:\s*(.*\S)\s*$")
+_FIXTURES = re.compile(r"^fixtures:\s*(.*\S)\s*$")
 _ID = re.compile(r"^id:\s*(.*?)\s*$")
 _STEPS = re.compile(r"^steps:\s*$")
 _EXPECT = re.compile(r"^expect:\s*$")
@@ -112,6 +124,14 @@ class ScenarioError(Exception):
 
     The message always names its origin ("line N: ..." for a file); qwen-agent
     prints it verbatim, so it must read as the whole explanation."""
+
+
+class NoResult(ValueError):
+    """results(..., strict=True): the answer carries no report for a scenario -- no
+    fenced json block parsed at all, or the last one has no entry for its id. A
+    ValueError, so a swarm unit's parse raising it earns the unit its repair round; its
+    message is the reason the repair text quotes ("no result block", "no result reported
+    for s2")."""
 
 
 class ReplayError(Exception):
@@ -165,7 +185,7 @@ def parse(text):
         break
     if suite is None:
         raise ScenarioError("line 1: no '# Suite: <name>' heading")
-    base = None
+    base = fixtures = None
     scenarios = []                               # each: id/title/steps/expect + their lines
     cur = None
 
@@ -192,6 +212,11 @@ def parse(text):
                 m = _BASE.match(stripped)
                 if m:
                     base = m.group(1)
+                    continue
+            if fixtures is None:
+                m = _FIXTURES.match(stripped)
+                if m:
+                    fixtures = m.group(1)        # raw: parse has no file path to resolve it by
             continue                             # suite-header free text: ignored
         m = _ID.match(stripped)
         if m:
@@ -230,10 +255,13 @@ def parse(text):
                 blamed = scenarios[j] if scenarios[j]["explicit"] else scenarios[i]
                 raise ScenarioError("line %d: duplicate scenario id %r"
                                     % (blamed["id_line"], scenarios[j]["id"]))
-    return {"suite": suite, "base": base,
-            "scenarios": [{"id": sc["id"], "title": sc["title"],
-                           "steps": sc["steps"], "expect": sc["expect"]}
-                          for sc in scenarios]}
+    out = {"suite": suite, "base": base,
+           "scenarios": [{"id": sc["id"], "title": sc["title"],
+                          "steps": sc["steps"], "expect": sc["expect"]}
+                         for sc in scenarios]}
+    if fixtures is not None:
+        out["fixtures"] = fixtures               # only when present: no line, no key
+    return out
 
 
 def _check_scenario(sc):
@@ -248,12 +276,21 @@ def _check_scenario(sc):
                             % (sc["title_line"], sc["title"]))
 
 
-def prompt(suite):
-    """The task text handed to the tester: the suite, then every scenario with its
-    id, steps and expectations, then the reporting contract verbatim."""
+def prompt(suite, fixtures=None):
+    """The task text handed to the tester: the suite, the files it may upload, then every
+    scenario with its id, steps and expectations, then the reporting contract verbatim.
+
+    `fixtures` is [(name, path)]: the name a suite's steps use for a file (its path
+    inside the fixtures folder, "/"-separated) and the native absolute path of the copy
+    staged for this tester -- the one kind of path Playwright's upload accepts. None or []
+    adds nothing, so a prompt without fixtures is byte-for-byte the one it always was."""
     lines = ["Suite: %s" % suite["suite"]]
     if suite.get("base"):
         lines.append("Base URL: %s" % suite["base"])
+    if fixtures:
+        lines += ["", "Files for uploads:"]
+        lines += ["- %s at %s" % (name, path) for name, path in fixtures]
+        lines.append("Pass that absolute path to browser_file_upload.")
     for sc in suite["scenarios"]:
         lines += ["", "Scenario %s: %s" % (sc["id"], sc["title"]), "Steps:"]
         lines += ["%d. %s" % (n, step) for n, step in enumerate(sc["steps"], 1)]
@@ -269,7 +306,7 @@ def _results_list(block):
     return block if isinstance(block, list) else []
 
 
-def results(answer, suite):
+def results(answer, suite, strict=False):
     """One result dict per scenario id, in file order.
 
     The LAST fenced json block of the answer is the report, parsed or empty -- a
@@ -277,7 +314,12 @@ def results(answer, suite):
     simply went unreported ("no result reported"). Only no fenced json block at
     all means every scenario is BLOCKED with "no result block". Entries whose id
     is not in the suite are ignored; the LAST entry for an id wins. A status
-    outside PASS/FAIL/BLOCKED becomes BLOCKED with a note saying what it was."""
+    outside PASS/FAIL/BLOCKED becomes BLOCKED with a note saying what it was.
+
+    strict=True raises NoResult for exactly the two unreported cases instead of
+    scoring them BLOCKED -- no block at all, or a scenario with no entry -- so a
+    caller that can ask again (the swarm's repair round) does; an invalid status is
+    still a report and is still scored BLOCKED."""
     by_id = None                                 # None: no block has parsed yet
     if isinstance(answer, bytes):                # qwen-agent hands bytes; cp1252 decoding
         answer = answer.decode("utf-8", "replace")  # would turn valid UTF-8 into junk
@@ -294,12 +336,16 @@ def results(answer, suite):
             if isinstance(entry, dict) and isinstance(entry.get("id"), str):
                 by_id[entry["id"]] = entry
     if by_id is None:                            # nothing parsed: there was no report
+        if strict:
+            raise NoResult("no result block")
         return [{"id": sc["id"], "status": "BLOCKED", "notes": "no result block"}
                 for sc in suite["scenarios"]]
     out = []
     for sc in suite["scenarios"]:
         entry = by_id.get(sc["id"])
         if entry is None:
+            if strict:
+                raise NoResult("no result reported for %s" % sc["id"])
             out.append({"id": sc["id"], "status": "BLOCKED", "notes": "no result reported"})
             continue
         raw = entry.get("status")
