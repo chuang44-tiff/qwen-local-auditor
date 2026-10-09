@@ -69,6 +69,7 @@ combined with `--test`.
 | `--mcp-config FILE` | load only the MCP servers in FILE (implies `--strict-mcp`), even with `--all-tools`; grant their tools with `-t`, e.g. `-t mcp__search__search` |
 | `--web` (`QWEN_WEB=1`) | adds `WebFetch` to the toolset and the grants, for every role and for the fixed `--test` grant list. Never `WebSearch`: a server-side tool that local servers reject with a 400 (`body.tools.0.input_schema Field required`); search needs an MCP server. With `--test` it warns that tests can be gamed by fetching upstream answers |
 | `--subagents` (`QWEN_SUBAGENTS=1`) | adds the `Task` tool so the model can hand broad reading to a subagent. Same model, same tool limits, one more concurrent request: leave it off on a small GPU. Subagents run in the foreground (every run but `--interactive` sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`): one that reported after the answer would start another turn, and the reply to it would replace the answer as the result |
+| `--advisor MODEL` | ask a Claude model for advice through your claude login (see Advisor); off by default |
 | `--permission-mode M` | passed through to claude (e.g. `acceptEdits`, `plan`) |
 | `-C, --cd DIR` | chdir before running; tool access is rooted at cwd. Scope it tightly: a bounded directory is the single biggest lever on output quality |
 | `-D, --add-dir DIR` | an extra readable directory; repeatable |
@@ -472,6 +473,28 @@ That is the signal to record again (`--scenarios FILE --record DIR`), not to edi
 the script by hand: an edited script fails its sha256 and `--replay` will not run
 it. The replay names which scenario to re-check; only a model can say what the new
 right answer is.
+
+## Advisor (`--advisor MODEL`)
+
+The session gets one more tool, `ask`: it sends one self-contained question, the evidence,
+and up to 5 files (40 KB each, 120 KB in all, inside the working directory) to a Claude
+model through **your own `claude` login**, and gets advice back as a tool result. Each call
+is one `claude -p` run with no tools, no settings, no hooks and one turn, so one call is one
+request to that model, at Anthropic's default effort. The Qwen session keeps doing the work;
+the advisor never edits or runs anything.
+
+- Off unless you type `--advisor MODEL`. No environment variable or config line turns it on, so sweeps, swarms and `--until-done` (which refuses it) never send code out on their own.
+- `QWEN_ADVISOR_MAX_CALLS` (default 4) is shared by the first answer, the review round and
+  subagents. `QWEN_ADVISOR_TIMEOUT` (default 600 s) applies per call.
+- A missing login, no network, a usage limit, a timeout or a spent budget come back as
+  `ADVISOR UNAVAILABLE: ...` and the session carries on; the exit code is unchanged.
+- Every question and answer is appended to `advisor-<stamp>-<pid>.md` in `QWEN_OUTDIR` when you set it, else in `~/.cache/qwen-agent/advisor/` (never the tree under audit).
+  `--json` adds `qwen_agent.advisor` = `{model, budget, calls, answered, seconds, cost_usd,
+  unavailable, log}`.
+- **Privacy:** questions and attached files leave this machine. The startup line says so
+  even with `-q`. Only the `claude` login is used: no `ANTHROPIC_*` variable reaches the
+  advisor, so Bedrock, Vertex and API-key-only setups get "unavailable".
+- Not with `--interactive` (a person is there to ask).
 
 ## Model, context and effort
 

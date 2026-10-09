@@ -126,6 +126,11 @@ case "${QWEN_SUBAGENTS:-}" in 1) SUBAGENTS=1 ;; esac
 BROWSER=0           # --browser : a real browser through the Playwright MCP server (role tester implies it)
 HEADED=0            # --headed      : --browser with a visible window (implies --browser)
 BROWSER_EVAL=0      # --browser-eval: add mcp__playwright__browser_evaluate (implies --browser)
+ADVISOR=""          # --advisor MODEL: a Claude model the session may ask (off when empty; the typed flag only)
+ADVISOR_FLAG=""     # the typed --advisor value ("off" is accepted and means none)
+ADVISOR_DIR=""      # the run's private advisor state (call counter, lock, calls.jsonl)
+ADVISOR_MCP=""      # its one-server MCP config, passed as one more --mcp-config
+ADVISOR_LOG=""      # QWEN_OUTDIR/advisor-<stamp>-<pid>.md: every question and answer
 BROWSER_DIR=""      # the browser run folder: made just before claude starts, kept after
                     # the run -- it is the evidence
 BROWSER_ROOT=""     # its parent (QWEN_BROWSER_DIR or the cache dir), resolved against the
@@ -501,6 +506,11 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
                        (one request WITH its response body). Both off by
                        default -- and hidden from the model's tools until asked
                        for. Implies --browser.
+      --advisor MODEL  Let the session ask a Claude model (opus, sonnet, or an id) for
+                       advice through your own claude login: one tool, ask, with no tools
+                       of its own. Typed flag only (no env var); not with --until-done. At most
+                       QWEN_ADVISOR_MAX_CALLS calls (4) per run, QWEN_ADVISOR_TIMEOUT
+                       seconds (600) each. Questions and attached files leave this machine.
       --scenarios FILE Scripted UI suite for the tester: implies --browser and
                        -r tester. The file (format: reference/qwen-agent.md,
                        "Scripted UI suites") is validated FIRST -- a parse error
@@ -1001,6 +1011,9 @@ while [ $# -gt 0 ]; do
     --browser)            BROWSER=1; shift ;;
     --headed)             HEADED=1; BROWSER=1; shift ;;
     --browser-eval)       BROWSER_EVAL=1; BROWSER=1; shift ;;
+    --advisor)            need_arg "$1" $(($#-1))
+                          [ -n "$2" ] || { die "--advisor needs a model (opus, sonnet, a model id, or off)"; exit $QA_USAGE; }
+                          ADVISOR_FLAG="$2"; shift 2 ;;
     --scenarios)          need_arg "$1" $(($#-1))
                           # The same empty-value trap as --mcp-config: an empty
                           # path would survive every later [ -n "$SCENARIOS" ] as
@@ -1089,6 +1102,13 @@ if [ "$SHALLOW" -eq 1 ] && [ "$DEEP" -eq 1 ]; then
   die "for all of it by name (drop --deep) -- pick one"
   exit $QA_USAGE
 fi
+# Only the typed flag turns the advisor on (v1): no env var or config line can, so no
+# sweep, swarm or --until-done child, and no shell profile, sends code out unasked.
+ADVISOR="$ADVISOR_FLAG"
+[ "$ADVISOR" = off ] && ADVISOR=""
+case "$ADVISOR" in
+  *[!A-Za-z0-9._:-]*) die "--advisor: not a model name: $ADVISOR"; exit $QA_USAGE ;;
+esac
 if   [ "$SHALLOW" -eq 1 ];       then DEPTH_MODE="shallow"   # the flag wins over the env
 elif [ "$DEEP" -eq 1 ];          then DEPTH_MODE="deep"
 elif [ "$DEPTH_ENV" = shallow ]; then DEPTH_MODE="shallow"
@@ -1172,6 +1192,7 @@ if [ "$INTERACTIVE" -eq 1 ]; then
       # Same reason: it only steers the headless fence (a strict MCP load an
       # interactive session never gets), so it would be silently dropped.
       --mcp-config|--mcp-config=*)       _ia_refuse "--mcp-config" ;;
+      --advisor|--advisor=*)             _ia_refuse "--advisor" ;;
       # --browser writes its own MCP config and grants its tools as a headless run
       # does; an interactive session passes neither, so the browser would not come.
       --browser|--browser=*)             _ia_refuse "--browser" ;;
@@ -1362,6 +1383,8 @@ fi
 if [ -n "$UNTIL_DONE" ]; then
   _ud_refuse() { die "--until-done takes its prompt from TASK and owns -f/--resume/-o/--json per round; drop $1"; exit $QA_USAGE; }
   [ "$PROMPT_SET" -eq 0 ] || _ud_refuse "the prompt"
+  # every round is its own qwen-agent with its own advisor budget: not in v1
+  [ -n "$ADVISOR" ] && { die "--until-done cannot be combined with --advisor (each round would get its own budget); drop --advisor"; exit $QA_USAGE; }
   FWD=()
   _skip=0
   for a in ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}; do
@@ -1878,6 +1901,7 @@ fi
 
 # shellcheck disable=SC2329  # invoked via trap
 cleanup() {
+  [ -n "${ADVISOR_DIR:-}" ] && rm -rf "$ADVISOR_DIR"
   [ -n "${TMPD:-}" ] && rm -rf "$TMPD"
   [ -n "${TEST_WT:-}" ] && skill_py testrun.py --cleanup "$(native_path "$TEST_REPO")" "$(native_path "$TEST_WT")" >/dev/null 2>&1
   if [ -n "${PROBE_RUN:-}" ] && [ "$KEEP_SANDBOX" -eq 0 ]; then
@@ -2448,6 +2472,64 @@ PY
   die "browser: screenshots and page snapshots in $(native_path "$BROWSER_DIR")"
 fi
 
+# ------------------------------------------------------------- --advisor setup
+# One more MCP server, qla_advisor, whose `ask` tool runs a clean `claude -p` on the
+# person's own claude login (lib/advisor_mcp.py). Its state dir is private and shared by
+# every session of this run (first answer, review round, subagents), so the budget is too.
+if [ -n "$ADVISOR" ] && [ "$INTERACTIVE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+  ADVISOR_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qwen-advisor.XXXXXXXX")" || { die "--advisor: mktemp failed"; exit $QA_HARNESS; }
+  trap cleanup EXIT
+  ADVISOR_MCP="$ADVISOR_DIR/advisor.json"
+  # The log never lands in the tree under audit: QWEN_OUTDIR when the caller set it,
+  # else the cache (QWEN_OUTDIR otherwise defaults to the caller's cwd, often the repo).
+  if [ "$QWEN_OUTDIR_SET" -eq 1 ]; then _adv_logdir="$QWEN_OUTDIR"
+  else _adv_logdir="${XDG_CACHE_HOME:-$HOME/.cache}/qwen-agent/advisor"; fi
+  mkdir -p "$_adv_logdir" 2>/dev/null || { die "--advisor: cannot create the log folder $_adv_logdir"; exit $QA_HARNESS; }
+  ADVISOR_LOG="$_adv_logdir/advisor-$(date -u +%Y%m%dT%H%M%SZ)-$$.md"
+  # A bare name is resolved here: on Windows, CreateProcess finds neither claude.cmd nor a
+  # POSIX path, so the server gets the native spelling of a real file.
+  _adv_bin="${QWEN_ADVISOR_CLAUDE:-$CLAUDE_BIN}"
+  _adv_res="$(command -v -- "$_adv_bin" 2>/dev/null)" && [ -n "$_adv_res" ] && _adv_bin="$_adv_res"
+  case "$_adv_bin" in /*|[A-Za-z]:*) _adv_bin="$(native_path "$_adv_bin")" ;; esac
+  # A caller's --mcp-config that defines qla_advisor itself would leave two servers by one name.
+  if [ -n "$MCP_CONFIG" ] && [ "$BROWSER" -eq 0 ] && "$QA_PY" - "$(native_path "$MCP_CONFIG")" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and "qla_advisor" in (d.get("mcpServers") or {}) else 1)
+PY
+  then
+    die "--advisor: your --mcp-config already defines a server named qla_advisor; rename it"; exit $QA_USAGE
+  fi
+  _adv_max="${QWEN_ADVISOR_MAX_CALLS:-4}"; _adv_to="${QWEN_ADVISOR_TIMEOUT:-600}"
+  case "$_adv_max$_adv_to" in *[!0-9]*) die "QWEN_ADVISOR_MAX_CALLS and QWEN_ADVISOR_TIMEOUT must be whole numbers"; exit $QA_USAGE ;; esac
+  if ! MSYS2_ARG_CONV_EXCL='*' "$QA_PY" - "$(native_path "$ADVISOR_MCP")" "$(native_path "$QA_PY")" \
+       "$(native_path "$SKILL_DIR/lib/advisor_mcp.py")" "$ADVISOR" "$(native_path "$ADVISOR_DIR")" \
+       "$_adv_max" "$_adv_to" "$(native_path "$ADVISOR_LOG")" "$_adv_bin" <<'PY'
+import json, sys
+out, py, mod, model, state, mx, to, log, claude = sys.argv[1:10]
+env = {"QA_ADVISOR_MODEL": model, "QA_ADVISOR_STATE": state, "QA_ADVISOR_MAX_CALLS": mx,
+       "QA_ADVISOR_TIMEOUT": to, "QA_ADVISOR_LOG": log, "QA_ADVISOR_CLAUDE": claude,
+       "PYTHONIOENCODING": "utf-8"}
+with open(out, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump({"mcpServers": {"qla_advisor": {"command": py, "args": [mod], "env": env}}}, fh, indent=2)
+    fh.write("\n")
+PY
+  then
+    die "--advisor: could not write the MCP config: $ADVISOR_MCP"; exit $QA_HARNESS
+  fi
+  TOOLS="${TOOLS:+$TOOLS,}mcp__qla_advisor__ask"
+  _adv_note="You can ask a stronger model for advice with the \`ask\` tool (at most $_adv_max times this run). Ask when you face a decision you cannot settle with a probe: contradictory evidence, a claim you are about to drop or keep but are unsure of, or a design choice with real trade-offs. Do not ask it to find bugs for you or to read the codebase: it sees only what you send. Send one self-contained question, the evidence, and the 1-3 files that matter. Treat its answer as advice: verify any claim it makes before you rely on it. Your answer has an ADVISOR section listing each question, the advice, and what you did with it."
+  if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
+
+$_adv_note"; else SYSTEM="$_adv_note"; fi
+  # die, not note: -q must not hide that code leaves this machine.
+  die "advisor: $ADVISOR via your claude login. Questions and up to 120 KB of attached files per call leave this machine; at most $_adv_max calls this run (log: $(native_path "$ADVISOR_LOG"))"
+  unset _adv_note _adv_to _adv_bin _adv_res _adv_logdir
+fi
+
 # --------------------------------------------------- build the claude argv
 if [ "$INTERACTIVE" -eq 1 ]; then
   # No -p/--print, and none of the flags a headless run needs a fence for: no
@@ -2494,6 +2576,7 @@ else
       CLAUDE_ARGV+=(--mcp-config "$(native_path "$MCP_CONFIG")")
     fi
   fi
+  [ -n "$ADVISOR_MCP" ] && CLAUDE_ARGV+=(--mcp-config "$(native_path "$ADVISOR_MCP")")
   [ "$STRICT_MCP" -eq 1 ] && CLAUDE_ARGV+=(--strict-mcp-config)
   [ -n "$SYSTEM" ]    && CLAUDE_ARGV+=(--append-system-prompt "$SYSTEM")
   [ -n "$PERM_MODE" ] && CLAUDE_ARGV+=(--permission-mode "$PERM_MODE")
@@ -2749,6 +2832,22 @@ if mode == "json":
         # switchless runs keep the exact shape they had before push existed.
         if e.get("QA_META_PUSH") == "1":
             meta["switches"]["subagents_push"] = True
+        if e.get("QA_META_ADVISOR") and e.get("QA_META_ADVISOR_DIR"):
+            recs = []
+            try:
+                with open(os.path.join(e["QA_META_ADVISOR_DIR"], "calls.jsonl"), encoding="utf-8") as fh:
+                    recs = [json.loads(l) for l in fh if l.strip()]
+            except (OSError, ValueError):
+                pass
+            meta["advisor"] = {
+                "model": e["QA_META_ADVISOR"],
+                "budget": int(e.get("QA_META_ADVISOR_MAX") or 4),
+                "calls": len(recs),
+                "answered": sum(1 for r in recs if r.get("unavailable") is None),
+                "seconds": round(sum(r.get("seconds") or 0 for r in recs), 1),
+                "cost_usd": round(sum(r.get("cost_usd") or 0 for r in recs), 4) or None,
+                "unavailable": [r["unavailable"] for r in recs if r.get("unavailable")],
+                "log": e.get("QA_META_ADVISOR_LOG") or None}
         if e.get("QA_META_REVIEW") == "1":
             meta["review_round"] = {"status": e.get("QA_META_REVIEW_STATUS") or None,
                                     "first_session": e.get("QA_META_REVIEW_FIRST") or None,
@@ -2854,7 +2953,7 @@ export_meta() {
   [ -n "$ROLE_VARIANT" ] || [ "$NUDGE" -eq 1 ] || [ "$PUSH" -eq 1 ] \
     || [ "$REVIEW_ROUND" -eq 1 ] || [ "$PROBING" -eq 1 ] \
     || [ "$BROWSER" -eq 1 ] || [ "$DEPTH_MODE" != shallow ] || [ "$SHORT_ANSWER_WARNING" -eq 1 ] \
-    || [ -n "$SCENARIOS" ] || return 0
+    || [ -n "$SCENARIOS" ] || [ -n "$ADVISOR_MCP" ] || return 0
   local kept="" browser_dir_meta=""
   [ "$KEEP_SANDBOX" -eq 1 ] && kept="$PROBE_CWD"
   browser_dir_meta="$(native_path "$BROWSER_DIR")"
@@ -2867,7 +2966,9 @@ export_meta() {
          QA_META_DEPTH="$DEPTH_MODE" QA_META_SHORT="$SHORT_ANSWER_WARNING" \
          QA_META_SCEN_FILE="$SCENARIOS_GIVEN" QA_META_SCEN_RESULTS="$SCEN_RESULTS" \
          QA_META_SCEN_PASS="$SCEN_PASS" QA_META_SCEN_FAIL="$SCEN_FAIL" \
-         QA_META_SCEN_BLOCKED="$SCEN_BLOCKED"
+         QA_META_SCEN_BLOCKED="$SCEN_BLOCKED" \
+         QA_META_ADVISOR="$ADVISOR" QA_META_ADVISOR_DIR="$ADVISOR_DIR" \
+         QA_META_ADVISOR_LOG="$ADVISOR_LOG" QA_META_ADVISOR_MAX="${_adv_max:-}"
 }
 
 # --probe --write: the session's edits as a patch -- FILE.patch next to -o FILE (always
@@ -2999,6 +3100,7 @@ review_round() {
   # With --subagents-push the review prompt also hands re-verification to a subagent.
   local _rp="$REVIEW_PROMPT"
   [ "$PUSH" -eq 1 ] && _rp="$REVIEW_PROMPT$REVIEW_PUSH_TEXT"
+  [ -n "$ADVISOR_MCP" ] && _rp="$_rp If one claim still hinges on a judgment call, you may ask the advisor about it with the ask tool."
   CLAUDE_ARGV=("${CLAUDE_ARGV[@]:0:$CLAUDE_BASE_N}" --resume "$REVIEW_FIRST" -- "$_rp")
   unset _rp
   if [ -n "$TIMEOUT" ] && [ -n "$TIMEOUT_BIN" ]; then

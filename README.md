@@ -161,6 +161,11 @@ session's API key, provider routing or model overrides, so a prompt cannot silen
 a cloud provider. The measured failure modes, and how to read a verdict:
 [reference/limits.md](skill/local-auditor/reference/limits.md).
 
+**Optional cloud advisor.** Everything runs locally by default. `qwen-agent --advisor opus`
+lets a session ask a Claude model for advice on a hard decision through your own `claude`
+login, with at most 4 calls per run. Questions and the files the session attaches leave your
+machine; nothing else changes and the session never depends on it.
+
 ## Benchmark
 
 One local model (Qwen3.8-Flash-Next on vLLM, one workstation GPU) driving Claude Code on

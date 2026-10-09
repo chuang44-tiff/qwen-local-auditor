@@ -32,6 +32,15 @@ if [ "${1:-}" = --help ]; then echo "  --restricted  Restricted mode"; exit 0; f
 d="$FAKE_DIR"
 n=$(cat "$d/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$d/n"
 printf '%s\0' "$@" > "$d/argv.$n"
+for _a in "$@"; do case "$_a" in *.json) [ -f "$_a" ] && cp "$_a" "$d/cfg.$n.$(basename "$_a")" ;; esac; done
+# advcall:K -- act like a session that made K advisor calls (writes the server's records)
+case "$(printf '%s' "${FAKE_MODES:-}" | cut -d, -f"$n")" in advcall)
+  for _a in "$@"; do case "$_a" in *advisor.json)
+    st="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["mcpServers"]["qla_advisor"]["env"]["QA_ADVISOR_STATE"])' "$_a")"
+    printf '%s\n' '{"n": 1, "model": "claude-opus-test", "seconds": 4.5, "cost_usd": 0.1, "unavailable": null}' \
+                  '{"n": 2, "model": "opus", "seconds": 1.0, "cost_usd": null, "unavailable": "no answer within 600s"}' >> "$st/calls.jsonl" ;;
+  esac; done ;;
+esac
 pwd -P > "$d/pwd.$n"
 env | grep -E '^(QWEN_TEST_|CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=)' | sort > "$d/env.$n"
 mode="$(printf '%s' "${FAKE_MODES:-ok}" | cut -d, -f"$n")"
@@ -48,6 +57,7 @@ case "$mode" in
   repro)     wt="$QWEN_TEST_WORKTREE"; command -v cygpath >/dev/null 2>&1 && wt="$(cygpath -u "$wt")"
              printf 'def test_repro():\n    assert False\n' > "$wt/test_repro.py"; answer ;;
   sleep)     sleep 30; answer ;;
+  advcall)   answer ;;
   # deny:TOOL+TOOL -- a finished run whose record lists those tools as denied.
   deny:*)    den=""; for x in $(printf '%s' "${mode#deny:}" | tr '+' ' '); do
                den="$den${den:+,}{\"tool_name\":\"$x\",\"tool_input\":{}}"; done
