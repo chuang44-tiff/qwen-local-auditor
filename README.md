@@ -26,6 +26,7 @@ and how to use them, so "have the local model review this" is enough.
   `/v1/messages`. vLLM does, and also lists models at `/v1/models`, which the tools use to
   pick the model and read its context window.
 - bash (Linux, macOS, or Git Bash on Windows), Python 3.8+ (stdlib only), curl, git.
+- Pillow (`pip install pillow`) for `--desktop` only (screenshots).
 - tmux for `qwen-cc`. A search backend (SearXNG or a Brave key) is needed only by research
   (`qwen-deep-research`, or a `qwen-swarm` workflow whose roles have a `search` or `web`
   fence). Nothing else asks for one, and no other fence adds a search or fetch tool; a swarm
@@ -91,7 +92,9 @@ runs are your repository's code running as you. `--browser` (also `--headed`,
 `--browser-eval`, `--scenarios`, `-r tester`) is a real browser that opens whatever URL it
 is told to; `--web` adds `WebFetch` and nothing else. `--record` and `--replay` run
 model-written JavaScript with node, as you, unsandboxed: replay only folders you recorded
-or have read. Research goes online on purpose. A swarm never writes its `--target`; its
+or have read. `--desktop APP` drives one native application (Windows, macOS, Linux X11)
+with real mouse and keyboard input on your desktop, unsandboxed; its Bash is fenced to one
+command, `qla-desktop`. Research goes online on purpose. A swarm never writes its `--target`; its
 `sandbox` role works in a throwaway clone, again a copy and not a jail. The fence at a
 glance, and the measured failure modes: [reference/limits.md](skill/local-auditor/reference/limits.md).
 

@@ -517,6 +517,82 @@ the advisor never edits or runs anything.
   advisor, so Bedrock, Vertex and API-key-only setups get "unavailable".
 - Not with `--interactive` (a person is there to ask).
 
+## Desktop applications (`--desktop APP`)
+
+`--desktop APP` lets a run drive one native application with real mouse and keyboard input:
+open files through its dialogs, read its windows, save its output. It grew out of a field
+trial on Windows (issue #2): Qwen opened a design in an optical-design program, ran two
+analyses, transcribed them correctly and saved their text, in about 9 minutes against 4 to 6
+for a Claude Haiku agent, at no per-token cost. One trial, one model.
+
+The run gets Bash, granted for ONE command, `qla-desktop` (`lib/desktop.py`); qwen-agent's
+default grants of read-only shell commands are dropped. qwen-agent writes the command as a
+small wrapper into the run folder's `bin/`, made read-only (555) and put first on the
+session's `PATH`; the wrapper fixes the application and the folder (`--lock`), so no call
+can point it at another program. Only the folder's `shots/` subfolder -- where screenshots
+and `desktop-state.json` land -- joins the directories the session is given: a `--write`
+run can edit what it is given, and the command its Bash grant runs must not be among it.
+Every call prints one JSON line with `ok`.
+
+What the fence held in a live test (Claude Code, `-p`): writing a file by redirection,
+`qla-desktop ... && touch FILE`, an env-variable prefix and `$(...)` were all denied, and
+`--app` was refused by the driver. Claude Code itself still auto-allows its built-in
+read-only commands (`id`, `head`, `ls` inside the working directories), so `qla-desktop
+windows; id` ran: the fence is one command plus Claude Code's read-only set.
+
+| Command | Does |
+|---|---|
+| `windows` | the application's windows: id, title, rect on screen |
+| `shot NAME [WIN] [grid]` | screenshot of the window in front (a dialog when one is open), long side at most 1280 px |
+| `crop NAME X Y W H [ZOOM] [grid]` | part of the window, enlarged up to 4 times: how small icons get hit |
+| `click`, `dclick`, `rclick X Y` | clicks, in window pixels (0,0 is the window's corner) |
+| `hover X Y`, `drag X1 Y1 X2 Y2`, `scroll X Y N` | the rest of the mouse |
+| `type TEXT`, `key ctrl s` | text and key chords |
+| `resize W H [X Y]`, `restore` | set the window size; `restore` puts back the size before the first resize |
+| `wait SECONDS` | let a dialog or a file open |
+
+`grid` draws labelled window coordinates over the image. The system note tells the session to
+resize a large window to 1280x800 rather than maximize it (smaller screenshots, faster turns,
+1:1 coordinates), to shoot before and after every action, to crop with a grid before clicking
+a small target, to say "unreadable" rather than guess, and to restore the size at the end.
+`windows` lists a window only when it is on screen: a minimised window cannot be driven, so
+restore it first. On X11 with a window manager, and on macOS, popup and menu-bar menus are
+not listed as windows: use keyboard shortcuts for menus there.
+
+What the driver checks:
+- The application must be running: `check` runs before claude starts, and a run with no
+  window to drive exits 2.
+- Before any input it brings the application to the front; when it cannot, nothing is sent.
+- A click outside the window, or whose cursor read-back does not match, is not sent; on
+  X11 and Windows a point covered by another application's window is refused too (macOS
+  has no API for who owns a point, so there no such check is made).
+- Chords that close, quit or destroy are refused: alt+F4, cmd+Q, cmd+W, ctrl+P and cmd+P
+  (printing), on Linux ctrl+Q (quits GTK/Qt applications), on Windows and Linux
+  shift+Delete (permanent delete in file managers), on macOS cmd+Backspace (move to Trash
+  in Finder). ctrl+W is deliberately *not* refused: closing the application's own tabs is
+  legitimate work. A click on a toolbar Print *button* cannot be told apart from any other
+  click: in the trial the model hit one while looking for Save. Use `--desktop` only where
+  a stray click is cheap.
+
+Platforms: Linux on X11, tested live (an application under Xvfb included, also from a
+Wayland user's shell); Windows (ctypes, physical pixels on mixed-DPI screens), not yet run in
+this form; macOS (System Events and Quartz; allow the terminal under Privacy & Security,
+Accessibility and Screen Recording), not yet run on a real Mac. XWayland, the X server of a
+Wayland session, is refused: it lets no program read or click another's windows. Screenshots
+need Pillow (`pip install pillow`; 9.2 or later on macOS).
+
+- **Unsandboxed.** The input is real and goes to whatever the application does with it. Run it
+  on a machine nobody is using: input sent while a person types goes to the wrong place.
+- The fence fixes which program runs, not what it does inside the application.
+- Screenshots and `desktop-state.json` stay in the run folder's `shots/`, under
+  `QWEN_DESKTOP_DIR` (default `~/.cache/qwen-agent/desktop/`); the startup line prints it,
+  even with `-q`. The wrapper sits in the `bin/` beside it, outside every folder the
+  session is given.
+- The toolset is the run's own (read-only, or `--write`) plus that Bash. `--toolset`,
+  `--all-tools`, `--probe` (and the probe of the default depth, which brings a full shell),
+  `--browser`/`-r tester`, `--test`, `--until-done` and `--interactive` are refused, and so
+  are `--permission-mode`, `--mcp-config` and a `-t` list with an entry granting Bash.
+
 ## Model, context and effort
 
 | flag | env | meaning |

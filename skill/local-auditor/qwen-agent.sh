@@ -133,6 +133,9 @@ ADVISOR_MCP=""      # its one-server MCP config, passed as one more --mcp-config
 ADVISOR_LOG=""      # QWEN_OUTDIR/advisor-<stamp>-<pid>.md: every question and answer
 ADVISOR_STATE=""    # --advisor-state DIR: the supervisor's state dir shared by every round (internal)
 ADVISOR_DIR_OWN=0   # 1 only when this run mktemp'd ADVISOR_DIR itself; only then may cleanup remove it
+DESKTOP=""          # --desktop APP: drive one desktop application through qla-desktop (lib/desktop.py)
+DESKTOP_ROOT=""     # where desktop run folders go (QWEN_DESKTOP_DIR), absolute before the -C chdir
+DESKTOP_DIR=""      # this run's folder: screenshots, the saved window size, bin/qla-desktop
 BROWSER_DIR=""      # the browser run folder: made just before claude starts, kept after
                     # the run -- it is the evidence
 BROWSER_ROOT=""     # its parent (QWEN_BROWSER_DIR or the cache dir), resolved against the
@@ -569,6 +572,21 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
                        and -q are accepted: -b URL is the base the scripts open.
                        Needs node on PATH and the playwright package.
 
+DESKTOP  (opt-in: drive one desktop application with real mouse and keyboard input)
+      --desktop APP    Give the run Bash for ONE command, qla-desktop (lib/desktop.py),
+                       beside Claude Code's own read-only commands (id, head, ...):
+                       screenshots, crops with a coordinate grid, clicks, typing, keys,
+                       scrolling, dragging, and resizing the window, all limited to
+                       the windows of the process APP (notepad.exe, gedit, TextEdit),
+                       which must be running. Windows, macOS and Linux X11 (XWayland
+                       is refused); needs Pillow. Closing the application and
+                       printing are refused. The toolset is the run's (read-only, or
+                       --write) plus Bash; --toolset, --all-tools, --browser, --test,
+                       --until-done and --interactive are refused (exit 2). Screenshots
+                       go to a run folder kept after the run (env QWEN_DESKTOP_DIR).
+                       Unsandboxed: the input is real and goes to the real desktop,
+                       so run it where nobody is using the machine.
+
 ENVIRONMENT  (also settable in the config file; flags win)
   QWEN_BASE_URL, QWEN_MODEL, QWEN_CTX, QWEN_AUTOCOMPACT, QWEN_EFFORT, QWEN_TIMEOUT
                        Defaults for the flags above.
@@ -600,6 +618,9 @@ ENVIRONMENT  (also settable in the config file; flags win)
                        relative to the caller's directory (like QWEN_OUTDIR).
                        Default: \$XDG_CACHE_HOME/qwen-agent/browser (else
                        ~/.cache/qwen-agent/browser).
+  QWEN_DESKTOP_DIR     Where --desktop run folders go; relative to the caller's
+                       directory like QWEN_BROWSER_DIR. Default:
+                       \$XDG_CACHE_HOME/qwen-agent/desktop (else ~/.cache/...).
   QWEN_PLAYWRIGHT_MCP  Replaces the browser MCP server command --browser writes
                        into its config (default 'npx -y --prefer-offline
                        @playwright/mcp@0.0.83'; on Git Bash the built-in default
@@ -1019,6 +1040,9 @@ while [ $# -gt 0 ]; do
     --browser)            BROWSER=1; shift ;;
     --headed)             HEADED=1; BROWSER=1; shift ;;
     --browser-eval)       BROWSER_EVAL=1; BROWSER=1; shift ;;
+    --desktop)            need_arg "$1" $(($#-1))
+                          [ -n "$2" ] || { die "--desktop needs the application's process name (notepad.exe, gedit, TextEdit)"; exit $QA_USAGE; }
+                          DESKTOP="$2"; shift 2 ;;
     --advisor)            need_arg "$1" $(($#-1))
                           [ -n "$2" ] || { die "--advisor needs a model (opus, sonnet, a model id, or off)"; exit $QA_USAGE; }
                           ADVISOR_FLAG="$2"; shift 2 ;;
@@ -1214,6 +1238,8 @@ if [ "$INTERACTIVE" -eq 1 ]; then
       --browser|--browser=*)             _ia_refuse "--browser" ;;
       --headed|--headed=*)               _ia_refuse "--headed" ;;
       --browser-eval|--browser-eval=*)   _ia_refuse "--browser-eval" ;;
+      # Same: the one-command Bash grant is a headless fence an interactive run never gets.
+      --desktop|--desktop=*)             _ia_refuse "--desktop" ;;
     esac
   done
   unset _a
@@ -1250,6 +1276,47 @@ if [ "$BROWSER" -eq 1 ]; then
   [ -z "$UNTIL_DONE" ] || {
     die "--browser cannot be combined with --until-done: the loop's rounds are headless coder runs without a browser"
     exit $QA_USAGE; }
+fi
+
+# ---------------------------------------------------------- --desktop refusals
+# --desktop sets the toolset itself: the run's read tools (or --write's) plus Bash,
+# granted for the one qla-desktop command. A caller's toolset would be a second claim
+# on it, and --all-tools would leave no fence at all. Before the until-done block,
+# which execs the supervisor. The browser check repeats in the setup below, after
+# role resolution, where -r tester or --scenarios may have turned the browser on.
+if [ -n "$DESKTOP" ]; then
+  case "$DESKTOP" in
+    *[!A-Za-z0-9._+\ -]*) die "--desktop: not a process name: $DESKTOP"; exit $QA_USAGE ;;
+  esac
+  _dt_refuse() { die "--desktop cannot be combined with $1: $2"; exit $QA_USAGE; }
+  [ "$BROWSER" -eq 0 ]          || _dt_refuse "--browser" "a run drives a browser or one desktop application, not both"
+  [ -z "$UNTIL_DONE" ]          || _dt_refuse "--until-done" "the loop's rounds are headless coder runs"
+  [ "$TOOLSET_EXPLICIT" -eq 0 ] || _dt_refuse "--toolset/--read-only" "--desktop sets the toolset itself (add --write to let the run edit files)"
+  [ "$ALL_TOOLS" -eq 0 ]        || _dt_refuse "--all-tools" "--desktop exists to fence Bash to one command"
+  [ "$TEST_MODE" -eq 0 ]        || _dt_refuse "--test" "--test sets the toolset itself"
+  # A probe's sandbox comes with a full shell, which is exactly what the fence takes
+  # away; the implied --probe of the default depth steps aside for --desktop instead.
+  [ "$PROBE" -eq 0 ] && [ "$PROBE_HERE" -eq 0 ] \
+    || _dt_refuse "--probe/--probe-here" "a probe gives the session a full shell, and --desktop's Bash is fenced to one command"
+  # A -t entry granting Bash -- bare or with a rule -- would sit beside (or replace)
+  # the one-command grant and void the fence; every other -t entry stays allowed.
+  if [ "$TOOLS_EXPLICIT" -eq 1 ]; then
+    IFS=, read -r -a _dt_ts <<< "$TOOLS"
+    for _dt_t in ${_dt_ts[@]+"${_dt_ts[@]}"}; do
+      case "$_dt_t" in
+        Bash|Bash\(*) _dt_refuse "-t Bash..." "Bash is fenced to the one command qla-desktop: a Bash grant in -t voids the fence" ;;
+      esac
+    done
+    unset _dt_t _dt_ts
+  fi
+  # A caller's permission mode could answer the fence's own denials away, and a caller's
+  # MCP servers would run with the run's Bash: both leave no fence to speak of.
+  [ "$PERM_MODE_EXPLICIT" -eq 0 ] \
+    || _dt_refuse "--permission-mode" "--desktop fixes how permissions are answered (the Bash grant is the one command, and --write only adds the edit tools)"
+  [ -z "$MCP_CONFIG" ] || _dt_refuse "--mcp-config" "--desktop's Bash is fenced to one command: caller-supplied MCP servers would run beside it"
+  DESKTOP_ROOT="${QWEN_DESKTOP_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/qwen-agent/desktop}"
+  case "$DESKTOP_ROOT" in /*|[A-Za-z]:*) ;; *) DESKTOP_ROOT="$PWD/$DESKTOP_ROOT" ;; esac
+  unset -f _dt_refuse
 fi
 
 # -------------------------------------------------------- --scenarios refusals
@@ -1797,7 +1864,7 @@ physical_dir() {
 # proceed on PROBING exactly as for a typed --probe.
 if [ "$DEPTH_MODE" = default ] && [ "$PROBE" -eq 0 ] && [ "$PROBE_HERE" -eq 0 ] \
    && [ "$WRITE_MODE" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ] && [ "$TEST_MODE" -eq 0 ] \
-   && [ "$PREFLIGHT_ONLY" -eq 0 ] && [ "$BROWSER" -eq 0 ] && [ "$BG" -eq 0 ] \
+   && [ "$PREFLIGHT_ONLY" -eq 0 ] && [ "$BROWSER" -eq 0 ] && [ -z "$DESKTOP" ] && [ "$BG" -eq 0 ] \
    && [ "$ALL_TOOLS" -eq 0 ] && [ "$TOOLSET_EXPLICIT" -eq 0 ] && [ "$TOOLS_EXPLICIT" -eq 0 ] \
    && [ "$PERM_MODE_EXPLICIT" -eq 0 ] && [ "${#ADD_DIRS[@]}" -eq 0 ] && [ -z "$RESUME_ID" ]; then
   # A sandbox must also be BUILDABLE here: it copies the git work tree holding the -C
@@ -2525,6 +2592,92 @@ PY
   ADD_DIRS+=("$BROWSER_DIR")
   # die, not note: -q must not hide where the evidence of a browser run lands.
   die "browser: screenshots and page snapshots in $(native_path "$BROWSER_DIR")"
+fi
+
+# ------------------------------------------------------------- --desktop setup
+# The run gets Bash, granted for ONE command: qla-desktop, a wrapper in the run
+# folder's bin/ (put first on PATH) that runs lib/desktop.py with the application and
+# the folder fixed (--lock: no call can point it elsewhere). The wrapper and its bin/
+# are chmod 555, and only the run folder's shots/ subfolder joins --add-dir: a
+# --write run can edit the directories the session is given, and the command its Bash
+# grant runs must not be one of them. The grant names the bare command, so neither
+# the interpreter's spelling (python or python3) nor a path with spaces can make the
+# session's calls miss it; inside the wrapper the interpreter is an absolute path and
+# every path the native one (Git Bash converts nothing for a native program: the
+# CHILD_ENV the session's Bash inherits), while the wrapper's own place on PATH stays
+# POSIX, which is what bash reads. Other Bash is denied as every ungranted
+# tool is in -p mode, except the read-only commands Claude Code itself auto-allows. The folder is made here, after every refusal
+# and the preflight, like the browser folder, and kept: the screenshots are the
+# evidence. The application must already be running: the wrapper's `check` runs
+# before claude starts (exit 2 and no folder when it fails). --dry-run makes nothing.
+if [ -n "$DESKTOP" ]; then
+  [ "$BROWSER" -eq 0 ] || {
+    die "--desktop cannot be combined with --browser (-r tester and --scenarios imply it): a run drives a browser or one desktop application"
+    exit $QA_USAGE; }
+  if [ "$DRY_RUN" -eq 1 ]; then
+    DESKTOP_DIR='<desktop run folder>'
+  else
+    mkdir -p -- "$DESKTOP_ROOT" \
+      || { die "--desktop: cannot create the run folder root: $DESKTOP_ROOT"; exit $QA_HARNESS; }
+    DESKTOP_DIR="$(mktemp -d "$DESKTOP_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")" \
+      || { die "--desktop: could not create a run folder under $DESKTOP_ROOT"; exit $QA_HARNESS; }
+    if ! {
+      mkdir -p -- "$DESKTOP_DIR/bin" "$DESKTOP_DIR/shots" && {
+        printf '#!/usr/bin/env bash\n# qwen-agent --desktop: the one command this run may run in Bash.\n'
+        _dt_py="$(command -v "$QA_PY" 2>/dev/null || printf '%s' "$QA_PY")"
+        printf 'exec %q %q --app %q --dir %q --lock "$@"\n' \
+          "$(native_path "$_dt_py")" "$(native_path "${QWEN_DESKTOP_DRIVER:-$SKILL_DIR/lib/desktop.py}")" \
+          "$DESKTOP" "$(native_path "$DESKTOP_DIR/shots")"
+      } > "$DESKTOP_DIR/bin/qla-desktop" \
+      && chmod 555 "$DESKTOP_DIR/bin/qla-desktop" "$DESKTOP_DIR/bin"
+    }; then
+      die "--desktop: could not write $DESKTOP_DIR/bin/qla-desktop"
+      exit $QA_HARNESS
+    fi
+    if ! _dt_out="$("$DESKTOP_DIR/bin/qla-desktop" check 2>&1)"; then
+      chmod -R u+w -- "$DESKTOP_DIR" 2>/dev/null       # rm cannot empty a 555 bin/ as it stands
+      rm -rf -- "$DESKTOP_DIR"
+      die "--desktop: $_dt_out"
+      exit $QA_USAGE
+    fi
+    # bash splits PATH on ':', so a drive-letter DESKTOP_DIR (C:/... under Git Bash)
+    # would put two bogus entries ahead of every real folder and the session's Bash
+    # could not find qla-desktop: what joins PATH is the cygpath -u form, as the
+    # --advisor-state code above does; what native programs read stays native_path.
+    _dt_bin="$DESKTOP_DIR/bin"
+    command -v cygpath >/dev/null 2>&1 && _dt_bin="$(cygpath -u "$_dt_bin")"
+    export PATH="$_dt_bin:$PATH"
+    ADD_DIRS+=("$DESKTOP_DIR/shots")   # screenshots readable; bin/ deliberately is not
+  fi
+  TOOLSET="${TOOLSET:+$TOOLSET,}Bash"
+  # The default grants name a few read-only commands (ls, cat, grep, ...), inert while
+  # a run has no Bash. Here they would take effect, so they go: the one command left is
+  # qla-desktop. A -t list of the caller's is kept as typed.
+  if [ "$TOOLS_EXPLICIT" -eq 0 ]; then
+    _dt_keep=""
+    IFS=, read -r -a _dt_grants <<< "$TOOLS"
+    for _dt_g in ${_dt_grants[@]+"${_dt_grants[@]}"}; do
+      case "$_dt_g" in Bash\(*) ;; *) _dt_keep="${_dt_keep:+$_dt_keep,}$_dt_g" ;; esac
+    done
+    TOOLS="$_dt_keep"
+    unset _dt_keep _dt_grants _dt_g
+  fi
+  TOOLS="${TOOLS:+$TOOLS,}Bash(qla-desktop:*)"
+  _dt_shots="$DESKTOP_DIR/shots"
+  [ "$DRY_RUN" -eq 1 ] || _dt_shots="$(native_path "$DESKTOP_DIR/shots")"
+  _dt_note="You are driving the desktop application '$DESKTOP' with the qla-desktop command: the one command you may run in Bash (qla-desktop --help lists every command). Each call prints one JSON line. ok false means it failed or was refused and nothing was sent: read its error. Screenshots are saved in $_dt_shots; open each one with Read.
+How to work:
+- Start with qla-desktop windows. If the window is larger than 1280x800, run qla-desktop resize 1280 800 first, and never maximize it: a smaller window gives smaller screenshots and faster turns, and its coordinates stay 1:1. Run qla-desktop restore when you are done.
+- Before each action take qla-desktop shot NAME and look at it; after the action take another and check the effect. ok true only means the input was sent.
+- Coordinates are window pixels as in the shot (multiply by its scale when that is not 1). For a small target (a toolbar icon, a checkbox, a tab) first run qla-desktop crop NAME X Y W H 3 grid around it and read the position off the grid labels. Do not guess.
+- After opening a file, a menu or a dialog, run qla-desktop wait 2 and shoot again: a dialog is a window of its own, and the next shot shows it.
+- When you cannot read a value, say it is unreadable rather than guess. Do not close the application and do not print."
+  if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
+
+$_dt_note"; else SYSTEM="$_dt_note"; fi
+  # die, not note: -q must not hide that this run sends real input to the desktop.
+  [ "$DRY_RUN" -eq 1 ] || die "desktop: real mouse and keyboard input to '$DESKTOP' (unsandboxed: it acts on this machine's desktop); screenshots in $_dt_shots"
+  unset _dt_out _dt_note _dt_shots _dt_py _dt_bin
 fi
 
 # ------------------------------------------------------------- --advisor setup
