@@ -2665,19 +2665,26 @@ if [ -n "$DESKTOP" ]; then
   TOOLS="${TOOLS:+$TOOLS,}Bash(qla-desktop:*)"
   _dt_shots="$DESKTOP_DIR/shots"
   [ "$DRY_RUN" -eq 1 ] || _dt_shots="$(native_path "$DESKTOP_DIR/shots")"
+  # the last bullet's second half is the truth about writing files for THIS run
+  _dt_write_note="you cannot write files unless the run was started with --write"
+  if [ "$WRITE_MODE" -eq 1 ]; then
+    _dt_write_note="you may also write files in the working directory"
+  fi
   _dt_note="You are driving the desktop application '$DESKTOP' with the qla-desktop command: the one command you may run in Bash (qla-desktop --help lists every command). Each call prints one JSON line. ok false means it failed or was refused and nothing was sent: read its error. Screenshots are saved in $_dt_shots; open each one with Read.
 How to work:
 - Start with qla-desktop windows. If the window is larger than 1280x800, run qla-desktop resize 1280 800 first, and never maximize it: a smaller window gives smaller screenshots and faster turns, and its coordinates stay 1:1. Run qla-desktop restore when you are done.
-- Before each action take qla-desktop shot NAME and look at it; after the action take another and check the effect. ok true only means the input was sent.
+- Before each action take qla-desktop shot NAME and look at it; after the action take another and check the effect. ok true only means the input was sent. Use one reused name for working shots and crops (for example work and zoom), and a descriptive name only for the shots the task asks you to keep.
+- After the first scroll, compare the next shot with the one before: if the content moved the opposite way from the direction the result reports, the app inverts scrolling -- use the opposite sign for the rest of the run and say so in the answer. Scroll in small steps: on macOS, 3 steps are about 2 lines of text.
 - Coordinates are window pixels as in the shot (multiply by its scale when that is not 1). For a small target (a toolbar icon, a checkbox, a tab) first run qla-desktop crop NAME X Y W H 3 grid around it and read the position off the grid labels. Do not guess.
 - After opening a file, a menu or a dialog, run qla-desktop wait 2 and shoot again: a dialog is a window of its own, and the next shot shows it.
-- When you cannot read a value, say it is unreadable rather than guess. Do not close the application and do not print."
+- When you cannot read a value, say it is unreadable rather than guess. Do not close the application and do not print.
+- Put every transcription, value and finding in your final answer, which is the run's result; $_dt_write_note."
   if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
 
 $_dt_note"; else SYSTEM="$_dt_note"; fi
   # die, not note: -q must not hide that this run sends real input to the desktop.
   [ "$DRY_RUN" -eq 1 ] || die "desktop: real mouse and keyboard input to '$DESKTOP' (unsandboxed: it acts on this machine's desktop); screenshots in $_dt_shots"
-  unset _dt_out _dt_note _dt_shots _dt_py _dt_bin
+  unset _dt_out _dt_note _dt_shots _dt_write_note _dt_py _dt_bin
 fi
 
 # ------------------------------------------------------------- --advisor setup

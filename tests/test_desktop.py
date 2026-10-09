@@ -443,6 +443,38 @@ def test_macos_scroll_error_names_10_13():
     assert "macOS 10.13" in str(e.value)
 
 
+def test_macos_scroll_sign_matches_the_real_mac_probe():
+    # the real-Mac probe (TextEdit, a 200-line document, 2026-10-09): the old sign posted
+    # wheel1 = -n, and a positive N moved the top line from 30 to 28 -- the view went UP,
+    # with natural scrolling on and off alike (the setting does not touch synthetic wheel
+    # events). Quartz's wheel1 > 0 scrolls the content down, so n goes through unchanged.
+    be = MacTestBackend()
+    be.q.CGEventCreateScrollWheelEvent2 = lambda src, loc, unit, w1, w2, w3: ("scroll", w1)
+    be.scroll(3)
+    be.scroll(-3)
+    assert [e for e in be.ev if e[0] == "scroll"] == [("scroll", 3), ("scroll", -3)]
+    rc, out = call(be, "scroll", "290", "300", "3", platform="darwin")   # the same through the command
+    assert rc == 0 and out["steps"] == 3 and out["direction"] == "down", out
+    assert [e for e in be.ev if e[0] == "scroll"][-1] == ("scroll", 3)
+
+
+def test_scroll_result_states_the_direction():
+    be = FakeBackend()
+    rc, out = call(be, "scroll", "10", "10", "3")
+    assert rc == 0 and out["steps"] == 3 and out["direction"] == "down", out
+    assert not any("natural" in k for k in out), out           # the old setting report is gone
+    rc, out = call(be, "scroll", "10", "10", "-4")
+    assert rc == 0 and out["steps"] == -4 and out["direction"] == "up", out
+    assert out["note"] == ("positive N shows content further down; if the next shot moved "
+                           "the other way, use the opposite sign for the rest of the run"), out
+    for steps, way in (("50", "down"), ("-50", "up")):         # the bounds report it too
+        rc, out = call(be, "scroll", "10", "10", steps)
+        assert rc == 0 and out["direction"] == way, (steps, out)
+    for steps in ("0", "-51"):                                 # a refused N says nothing
+        rc, out = call(be, "scroll", "10", "10", steps)
+        assert rc == 1 and "direction" not in out, (steps, out)
+
+
 def test_macos_check_refuses_pillow_older_than_9_2(monkeypatch):
     PIL = pytest.importorskip("PIL")
     be = MacTestBackend()

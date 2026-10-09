@@ -309,7 +309,9 @@ class Desktop:
         self.be.scroll(n)
         self._fresh()
         time.sleep(0.3)
-        return dict(window=w["id"], steps=n)
+        return dict(window=w["id"], steps=n, direction="down" if n > 0 else "up",
+                    note="positive N shows content further down; if the next shot moved the "
+                         "other way, use the opposite sign for the rest of the run")
 
     def type(self, *words):
         if not words:
@@ -1163,7 +1165,8 @@ class MacBackend:
             raise Fail("scrolling needs macOS 10.13 or later")
         f.restype, f.argtypes = ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
                                                   ctypes.c_int32, ctypes.c_int32, ctypes.c_int32]
-        self._post(f(None, 1, 1, -n, 0, 0))             # line units; positive n = down
+        # line units; positive n is down: Quartz's wheel1 > 0 scrolls the content down
+        self._post(f(None, 1, 1, n, 0, 0))
 
     def _kc(self, k):
         if k not in self.KC:

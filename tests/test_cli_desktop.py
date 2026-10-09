@@ -233,6 +233,47 @@ def test_write_adds_the_edit_tools_not_more_shell(tmp_path, server, fake, driver
     assert [g for g in flag(argv, "--allowed-tools").split(",") if g.startswith("Bash")] == ["Bash(qla-desktop:*)"]
 
 
+def test_note_asks_for_reused_working_shot_names(tmp_path, server, fake, driver):
+    r = go(tmp_path, ["--desktop", "gedit", "hi"], server, fake, extra=env(tmp_path, driver))
+    assert r.returncode == 0, r.stderr
+    note = sys_prompt(calls(tmp_path)[0][0])
+    shots = [ln for ln in note.splitlines()
+             if ln.startswith("- Before each action take qla-desktop shot NAME")]
+    assert len(shots) == 1                                             # the sentence rides on that bullet
+    assert "Use one reused name for working shots and crops (for example work and zoom)" in shots[0]
+    assert "a descriptive name only for the shots the task asks you to keep" in shots[0]
+
+
+def test_note_tells_the_agent_to_check_the_first_scroll(tmp_path, server, fake, driver):
+    r = go(tmp_path, ["--desktop", "gedit", "hi"], server, fake, extra=env(tmp_path, driver))
+    assert r.returncode == 0, r.stderr
+    note = sys_prompt(calls(tmp_path)[0][0])
+    bullets = [ln for ln in note.splitlines() if ln.startswith("- ") and "scroll" in ln.lower()]
+    assert len(bullets) == 1, bullets                                    # one bullet carries the rule
+    b = bullets[0]
+    assert "After the first scroll" in b and "compare the next shot with the one before" in b
+    assert "moved the opposite way from the direction" in b and "inverts scrolling" in b
+    assert "use the opposite sign for the rest of the run" in b
+    assert "say so in the answer" in b
+    assert "Scroll in small steps" in b and "3 steps are about 2 lines" in b
+
+
+def test_note_says_where_results_go(tmp_path, server, fake, driver):
+    r = go(tmp_path, ["--desktop", "gedit", "hi"], server, fake, extra=env(tmp_path, driver))
+    assert r.returncode == 0, r.stderr
+    note = sys_prompt(calls(tmp_path)[0][0])
+    assert note.splitlines()[-1] == (
+        "- Put every transcription, value and finding in your final answer, which is the run's result; "
+        "you cannot write files unless the run was started with --write.")
+    r = go(tmp_path, ["--write", "--desktop", "gedit", "hi"], server, fake, extra=env(tmp_path, driver))
+    assert r.returncode == 0, r.stderr
+    note = sys_prompt(calls(tmp_path)[1][0])
+    assert note.splitlines()[-1].startswith(
+        "- Put every transcription, value and finding in your final answer, which is the run's result; ")
+    assert note.splitlines()[-1].endswith("you may also write files in the working directory.")
+    assert "you cannot write files unless" not in note                 # a --write run is told the other half
+
+
 def test_default_depth_brings_no_probe_shell(tmp_path, server, fake, driver):
     repo = test_cli_deep.dirty_repo(tmp_path)
     r = go(tmp_path, ["--desktop", "gedit", "-C", posix(repo), "hi"], server, fake,

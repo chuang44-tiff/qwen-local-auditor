@@ -574,12 +574,18 @@ What the driver checks:
   click: in the trial the model hit one while looking for Save. Use `--desktop` only where
   a stray click is cheap.
 
-Platforms: Linux on X11, tested live (an application under Xvfb included, also from a
-Wayland user's shell); Windows (ctypes, physical pixels on mixed-DPI screens), not yet run in
-this form; macOS (System Events and Quartz; allow the terminal under Privacy & Security,
-Accessibility and Screen Recording), not yet run on a real Mac. XWayland, the X server of a
-Wayland session, is refused: it lets no program read or click another's windows. Screenshots
-need Pillow (`pip install pillow`; 9.2 or later on macOS).
+Platforms: all three have been run on real applications. Windows (ctypes, physical pixels on
+mixed-DPI screens): an optical-design program ran the full capture task, with no wrong-window
+action. macOS (System Events and Quartz; allow the terminal under Privacy & Security,
+Accessibility and Screen Recording): scroll and drag included. Linux on X11: Xvfb included,
+also from a Wayland user's shell. Positive N scrolls down on every platform: macOS's sign was
+corrected after a real-Mac test, and natural scrolling does not affect it. The agent checks the
+first scroll and corrects itself, which covers apps that invert scrolling. The note asks for one
+reused name for working shots and crops, descriptive names only for the shots the task asks to
+keep, and every transcription, value and finding in the final answer, which is the run's result.
+XWayland, the X server of a Wayland session, is refused: it lets no program read or click
+another's windows.
+Screenshots need Pillow (`pip install pillow`; 9.2 or later on macOS).
 
 - **Unsandboxed.** The input is real and goes to whatever the application does with it. Run it
   on a machine nobody is using: input sent while a person types goes to the wrong place.
