@@ -280,6 +280,11 @@ The file is Markdown:
 - `# Suite: <name>` — required, the first heading;
 - `base: <url>` — optional, before the first scenario; relative "Open" targets
   in steps resolve against it (it only means something before the first scenario);
+- `fixtures: <dir>` — optional, before the first scenario: the folder of files the
+  scenarios upload. `qwen-swarm ui-test` copies it for every tester and puts each file's
+  absolute path in the prompt ([swarm.md](swarm.md#the-ui-test-workflow)). A single
+  `qwen-agent --scenarios` run ignores the line: the browser accepts uploads from its
+  working directory, so run it with the files there and name each by its path;
 - `## Scenario: <title>` — one or more;
 - `id: <id>` — optional per scenario; the default is `s1`, `s2`, … in file
   order; ids match `[A-Za-z0-9_-]+` and must be unique;
@@ -492,7 +497,13 @@ is one `claude -p` run with no tools, no settings, no hooks and one turn, so one
 request to that model, at Anthropic's default effort. The Qwen session keeps doing the work;
 the advisor never edits or runs anything.
 
-- Off unless you type `--advisor MODEL`. No environment variable or config line turns it on, so sweeps and swarms never send code out on their own.
+- Off unless you type `--advisor MODEL`. No environment variable or config line turns it on, so sweeps and swarms never send code out through it.
+- One named exception elsewhere: the `ui-test` swarm workflow's confirm pass is on by default
+  (a saved `--set` knob, not a typed flag). It asks Claude through the same login to re-check
+  each FAIL/BLOCKED scenario, with the scenario, the tester's report and screenshots and a
+  browser on the app, and says so when the run starts. `--set confirm=local` keeps the
+  check on the local model, `--set confirm=none` turns it off
+  ([swarm.md](swarm.md#the-ui-test-workflow)).
 - `--until-done` turns the advisor on for its coder rounds only when you type `--advisor MODEL` on the `--until-done` command itself: every round of the loop then gets the advisor
   through ONE budget shared by the whole run (the loop makes one state directory and hands it to each round with the internal `--advisor-state DIR`), and its deviation audit
   never gets it.

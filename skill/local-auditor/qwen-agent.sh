@@ -95,6 +95,8 @@ TIMEOUT_EXPLICIT=0                       # --timeout typed, or QWEN_TIMEOUT (env
 [ -n "${QWEN_TIMEOUT:-}" ] && TIMEOUT_EXPLICIT=1
 TIMEOUT_BIN=""                           # resolved below (env QWEN_TIMEOUT_BIN; 'none' = built-in watchdog)
 CLAUDE_BIN="${QWEN_CLAUDE_BIN:-claude}"
+EXEC_RETRY_BACKOFF="${QWEN_EXEC_RETRY_BACKOFF-10 30}"   # seconds before each retry of a claude that is missing or could not be executed
+case "$EXEC_RETRY_BACKOFF" in *[!0-9\ ]*) EXEC_RETRY_BACKOFF="10 30" ;; esac
 SETTING_SOURCES="${QWEN_SETTING_SOURCES:-}"
 QA_PY=""                                 # resolved below (env QWEN_PYTHON to pin it)
 ROLE_DIR="${QWEN_ROLE_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/qwen-agent/roles}"
@@ -179,6 +181,8 @@ PERM_MODE_EXPLICIT=0  # --permission-mode given by the caller (refused with --te
 RESUME_ID=""
 INTERACTIVE=0       # --interactive : hand the keyboard to a person: exec claude with no -p and no fence
 TEST_MODE=0         # --test : grant qwen-test, give the run a throwaway worktree
+TEST_NO_CMD=0       # --test-no-cmd : --test's fence without qwen-test (internal: --until-done
+                    #                 with no `test` check in the checklist)
 TEST_REPO=""        # --test-repo : the repo whose tests run (default: the -C dir)
 TEST_WT=""
 ROLE_VARIANT=""     # --role-variant NAME : the NAME variant of the built-in -r role (auditor/coder: deep)
@@ -308,6 +312,10 @@ EXECUTION  (the DEFAULT never writes your tree — mutation must be asked for; s
                        --permission-mode. The
                        tests run the repo's code as you: use it only on code
                        you would run.
+      --test-no-cmd    Internal: used by --until-done when the checklist has no
+                       test check and QWEN_TEST_CMD is unset. --test's fence
+                       (--restricted, dontAsk, the same refusals) without
+                       qwen-test: no Bash, no worktree, no QWEN_TEST_CMD needed.
       --test-repo DIR  Repo whose tests run (default: the -C directory).
       --all-tools      No toolset restriction at all: every built-in, including
                        Bash and Write, plus any configured MCP servers. This is
@@ -382,7 +390,9 @@ OUTPUT
 UNTIL DONE  (a coding task with a checklist, checked by the harness)
       --until-done TASK  Work on TASK (a task file with '- [ ] text -- check: ...'
                        items) until every check passes. Each round resumes the
-                       same session with what still fails. Implies -r coder --test.
+                       same session with what still fails. Implies -r coder --test
+                       (--test-no-cmd when no check is a test check and
+                       QWEN_TEST_CMD is unset).
       --max-rounds N   Default 8.
       --budget-tokens N / --budget-seconds N   Stop early when spent.
       --allow-dirty    Start even with uncommitted changes.
@@ -612,6 +622,10 @@ ENVIRONMENT  (also settable in the config file; flags win)
   QWEN_PYTHON          Interpreter for result parsing: Python 3.8+, probed by
                        running it.
   QWEN_CLAUDE_BIN      The claude executable. Default: claude.
+  QWEN_EXEC_RETRY_BACKOFF  Seconds to wait before each retry when claude is
+                       missing at startup or could not be executed (exit 126/127:
+                       it was being replaced by an update). Default: '10 30'
+                       (two retries).
   QWEN_TIMEOUT_BIN     A GNU timeout to use, or 'none' for the built-in watchdog.
   QWEN_ROLE_DIR        Extra roles as NAME.md or NAME.txt.
   QWEN_BROWSER_DIR     Where --browser run folders go; a relative value is
@@ -787,12 +801,22 @@ You are operating as a CODE AUDITOR. Rules:
 ROLE_EOF
       ;;
     coder)
+      # The heredoc is split in two around the qwen-test bullet: under --test-no-cmd
+      # the run has no shell and no qwen-test -- a role still promising the command
+      # would contradict the fence note appended for it. With TEST_NO_CMD=0 (every
+      # other run) the bytes printed are exactly the ones the old single heredoc had.
       cat <<'ROLE_EOF'
 You are a CODER working to a written task with a checklist. Rules:
 - The harness, not you, decides when you are done: it runs every checklist
   check itself after you stop. Do not claim an item is done; make its check pass.
-- Run tests with `qwen-test [SELECTOR]` (a test id/path or -k EXPR). It is the
-  only shell command you have. Read its first line: TEST <id> PASSED|FAILED|...
+ROLE_EOF
+      if [ "$TEST_NO_CMD" -eq 0 ]; then
+        # shellcheck disable=SC2016  # the backticks are literal prompt text
+        printf '%s\n' \
+          '- Run tests with `qwen-test [SELECTOR]` (a test id/path or -k EXPR). It is the' \
+          '  only shell command you have. Read its first line: TEST <id> PASSED|FAILED|...'
+      fi
+      cat <<'ROLE_EOF'
 - Change only what the task needs. Preserve surrounding style.
 - When you deliberately depart from the spec, end your reply with one block per
   departure, exactly:
@@ -1027,6 +1051,7 @@ while [ $# -gt 0 ]; do
     --shallow)            SHALLOW=1; shift ;;
     --interactive)        INTERACTIVE=1; shift ;;
     --test)               TEST_MODE=1; shift ;;
+    --test-no-cmd)        TEST_MODE=1; TEST_NO_CMD=1; shift ;;
     --test-repo)          need_arg "$1" $(($#-1)); TEST_REPO="$2"; shift 2 ;;
     --all-tools|--unrestricted) ALL_TOOLS=1; shift ;;
     --strict-mcp)         STRICT_MCP=1; STRICT_MCP_EXPLICIT=1; shift ;;
@@ -1195,6 +1220,7 @@ if [ "$INTERACTIVE" -eq 1 ]; then
       --stdin)                           _ia_refuse "--stdin" ;;
       --until-done|--until-done=*)       _ia_refuse "--until-done" ;;
       --test|--test=*)                   _ia_refuse "--test" ;;
+      --test-no-cmd)                     _ia_refuse "--test-no-cmd" ;;
       --write)                           _ia_refuse "--write" ;;
       --all-tools|--all-tools=*|--unrestricted) _ia_refuse "$_a" ;;
       --toolset|--toolset=*)             _ia_refuse "$_a" ;;
@@ -1531,7 +1557,7 @@ if [ -n "$UNTIL_DONE" ]; then
       --probe-here)
         die "--probe-here belongs to the supervisor's own rounds; use --probe"; exit $QA_USAGE ;;
       -r|--role) _skip=2 ;;
-      --role=coder|--test) ;;
+      --role=coder|--test|--test-no-cmd) ;;
       --role=*) die "--until-done always runs the coder role (got $a)"; exit $QA_USAGE ;;
       --until-done|-C|--cd|--max-rounds|--budget-tokens|--budget-seconds) _skip=1 ;;
       --until-done=*|--cd=*|--max-rounds=*|--budget-tokens=*|--budget-seconds=*) ;;
@@ -1801,6 +1827,16 @@ if [ "$PREFLIGHT_ONLY" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ]; then
 fi
 
 if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
+  # An auto-update removes claude and recreates it: wait out the gap before giving up.
+  for _d in $EXEC_RETRY_BACKOFF; do
+    die "claude not found: $CLAUDE_BIN; retrying in ${_d}s"
+    sleep "$_d"
+    hash -r 2>/dev/null
+    command -v "$CLAUDE_BIN" >/dev/null 2>&1 && break
+  done
+  unset _d
+fi
+if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
   die "claude binary not found: $CLAUDE_BIN (set QWEN_CLAUDE_BIN)"
   exit $QA_HARNESS
 fi
@@ -2051,10 +2087,13 @@ if [ "$TEST_MODE" -eq 1 ]; then
   [ "$TOOLS_EXPLICIT" -eq 1 ] && { die "--test cannot be combined with -t/--tools: --test grants qwen-test only and an explicit grant list replaces that (e.g. Bash(*) would be an unrestricted shell); drop -t/--tools"; exit $QA_USAGE; }
   # Whitespace-only counts as unset (like qwen-sweep's guard): it survives an
   # -n test but splits into nothing, and every qwen-test in the run would die.
-  case "${QWEN_TEST_CMD:-}" in
-    *[![:space:]]*) ;;
-    *) die "--test needs a test command: set QWEN_TEST_CMD in $QA_CONFIG"; exit $QA_USAGE ;;
-  esac
+  # --test-no-cmd is this fence without qwen-test, so it needs no command at all.
+  if [ "$TEST_NO_CMD" -eq 0 ]; then
+    case "${QWEN_TEST_CMD:-}" in
+      *[![:space:]]*) ;;
+      *) die "--test needs a test command: set QWEN_TEST_CMD in $QA_CONFIG"; exit $QA_USAGE ;;
+    esac
+  fi
   # --restricted is what makes the fence independent of the user's and the repo's
   # Claude settings (it ignores their settings files and confines the file tools
   # to the working directories). An older claude without it cannot be fenced.
@@ -2066,6 +2105,10 @@ if [ "$TEST_MODE" -eq 1 ]; then
   # --test run; appended after the role text and any -s text.
   # shellcheck disable=SC2016  # the backticks are literal prompt text, not command substitution
   _fence_note='Your only shell command is `qwen-test [SELECTOR]`, run with the Bash tool (it is a command, not a tool). Every other Bash command is denied and wastes a turn. Instead of cat/head/tail use Read; instead of grep/rg use Grep; instead of find/ls use Glob. You cannot run git, python, pip, env or which. To check a change, run its test with qwen-test.'
+  # --test-no-cmd has no shell at all. Nothing this run reads may name a command it
+  # does not have: the coder role already drops its qwen-test bullet for this flag
+  # (see builtin_role), and the note states the same without naming one either.
+  [ "$TEST_NO_CMD" -eq 1 ] && _fence_note='This run has no shell and no test command: the checklist has no test check, and the harness runs every check itself after you stop. Use Read, Grep and Glob for files.'
   if [ "$PROBING" -eq 1 ]; then :      # a probe run has a whole shell: the probe note says so
   elif [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
 
@@ -2171,7 +2214,7 @@ if [ "$PROBE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
   fi
   unset _errf _src _out _rc _e _cd _sbu
 fi
-if [ "$TEST_MODE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+if [ "$TEST_MODE" -eq 1 ] && [ "$TEST_NO_CMD" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   _errf="$(err_file)" || exit $QA_HARNESS
   TEST_WT="$(skill_py testrun.py --prepare "$(native_path "$TEST_REPO")" 2>"$_errf")" || {
     _e="$(cat "$_errf")"; rm -f "$_errf"
@@ -2181,7 +2224,15 @@ if [ "$TEST_MODE" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
   # Registered NOW, not at the runner: a failed preflight below must not leak the worktree.
   trap cleanup EXIT
 fi
-if [ "$TEST_MODE" -eq 1 ]; then
+if [ "$TEST_MODE" -eq 1 ] && [ "$TEST_NO_CMD" -eq 1 ]; then
+  # The fence without its one command: no Bash in the toolset, and grants for the
+  # file tools alone (a coder's edits too). There is no worktree, so a read-only
+  # run gains nothing and prints no warning.
+  if [ "$TOOLS_EXPLICIT" -eq 0 ]; then
+    TOOLS='Read,Glob,Grep'
+    [ "$WRITE_MODE" -eq 1 ] && TOOLS="$TOOLS,Edit,Write,MultiEdit"
+  fi
+elif [ "$TEST_MODE" -eq 1 ]; then
   if [ "$TOOLSET_EXPLICIT" -eq 0 ]; then
     case ",$TOOLSET," in *,Bash,*) ;; *) TOOLSET="$TOOLSET,Bash" ;; esac
   fi
@@ -2221,7 +2272,7 @@ if [ "$PROBING" -eq 1 ]; then
     _probe_note="$_probe_note Files you create here are thrown away when the session ends."
   fi
   # shellcheck disable=SC2016  # the backticks are literal prompt text
-  [ "$TEST_MODE" -eq 1 ] && _probe_note="$_probe_note"' The configured tests also run with `qwen-test [SELECTOR]`.'
+  [ "$TEST_MODE" -eq 1 ] && [ "$TEST_NO_CMD" -eq 0 ] && _probe_note="$_probe_note"' The configured tests also run with `qwen-test [SELECTOR]`.'
   if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
 
 $_probe_note"; else SYSTEM="$_probe_note"; fi
@@ -2520,70 +2571,29 @@ if [ "$BROWSER" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
     || { die "--browser: cannot create the run folder root: $BROWSER_ROOT"; exit $QA_HARNESS; }
   BROWSER_DIR="$(mktemp -d "$BROWSER_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")" \
     || { die "--browser: could not create a run folder under $BROWSER_ROOT"; exit $QA_HARNESS; }
-  # The server command line. QWEN_PLAYWRIGHT_MCP replaces the whole
-  # `npx -y --prefer-offline @playwright/mcp@0.0.83` part (and the Git Bash `cmd /c`
-  # form of it): split on whitespace, the first word the command, the rest its
-  # leading args (before the browser switches). Pathname expansion is OFF across the
-  # split -- "node /x/*.js" names a literal file and must reach the config as one
-  # word even when files match the pattern.
-  _pw="${QWEN_PLAYWRIGHT_MCP:-}"
-  case "$_pw" in
-    *[![:space:]]*) ;;
-    # Native Windows Claude Code cannot spawn `npx` directly as a stdio MCP server
-    # (it is npx.cmd, and without the wrapper the connection just closes). cygpath
-    # on PATH is what says Git Bash: there the server is started through cmd /c.
-    *) if command -v cygpath >/dev/null 2>&1; then
-         _pw="cmd /c npx -y --prefer-offline @playwright/mcp@0.0.83"
-       else
-         _pw="npx -y --prefer-offline @playwright/mcp@0.0.83"
-       fi ;;
-  esac
-  PW_CMD=""
-  PW_ARGS=()
-  set -f
-  # shellcheck disable=SC2086  # deliberate word split: the value is a whole command line
-  for _w in $_pw; do
-    if [ -z "$PW_CMD" ]; then PW_CMD="$_w"; else PW_ARGS+=("$_w"); fi
-  done
-  set +f
-  unset _pw _w
-  [ "$HEADED" -eq 1 ] || PW_ARGS+=("--headless")
+  # The server entry comes from lib/browser_mcp.py, the one place that knows the
+  # Playwright command (QWEN_PLAYWRIGHT_MCP, else npx -- through `cmd /c` on Git Bash,
+  # where native Claude Code cannot spawn npx.cmd), the browser switches and the
+  # --headed display variables; qwen-swarm's wf.claude_check builds the same entry.
   # --output-dir takes the NATIVE spelling: claude starts the server natively, and on
-  # Git Bash a POSIX /c/... path would not mean anything to it.
-  PW_ARGS+=("--isolated" "--output-dir" "$(native_path "$BROWSER_DIR")"
-            "--image-responses" "allow" "--viewport-size" "1280,900")
+  # Git Bash a POSIX /c/... path would not mean anything to it. The module runs as a
+  # file (skill_py), never `-m lib.browser_mcp`: the caller's directory may hold a lib/ of its own.
+  # The override reaches it through the environment, kept out of MSYS path conversion
+  # (MSYS2_ENV_CONV_EXCL), and the argv verbatim (MSYS2_ARG_CONV_EXCL), so a value like
+  # "node /x/cli.js" lands in the JSON unconverted, exactly as before.
   MCP_CONFIG="$BROWSER_DIR/mcp.json"
-  # The argv is handed over verbatim (MSYS2_ARG_CONV_EXCL, the same guard the child
-  # gets): an override like "node /x/cli.js" must reach the JSON unconverted.
-  if ! MSYS2_ARG_CONV_EXCL='*' "$QA_PY" - "$(native_path "$MCP_CONFIG")" "$HEADED" \
-       "$PW_CMD" ${PW_ARGS[@]+"${PW_ARGS[@]}"} <<'PY'
-import json, os, sys
-out, headed, cmd = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
-server = {"command": cmd, "args": sys.argv[4:]}
-if headed:
-    # The browser needs the caller's session: copy what qwen-agent has -- the X
-    # display when there is one, else the Wayland socket (which lives under
-    # XDG_RUNTIME_DIR, so the server needs that too). No empty DISPLAY key on a
-    # Wayland session: it would only send the server looking for an X display.
-    env = {}
-    if os.environ.get("DISPLAY"):
-        env["DISPLAY"] = os.environ["DISPLAY"]
-        if os.environ.get("XAUTHORITY"):
-            env["XAUTHORITY"] = os.environ["XAUTHORITY"]
-    elif os.environ.get("WAYLAND_DISPLAY"):
-        env["WAYLAND_DISPLAY"] = os.environ["WAYLAND_DISPLAY"]
-        if os.environ.get("XDG_RUNTIME_DIR"):
-            env["XDG_RUNTIME_DIR"] = os.environ["XDG_RUNTIME_DIR"]
-    server["env"] = env
-with open(out, "w", encoding="utf-8", newline="\n") as fh:
-    json.dump({"mcpServers": {"playwright": server}}, fh, indent=2)
-    fh.write("\n")
-PY
-  then
+  _hd=()
+  [ "$HEADED" -eq 1 ] && _hd=(--headed)
+  if ! QWEN_PLAYWRIGHT_MCP="${QWEN_PLAYWRIGHT_MCP:-}" MSYS2_ENV_CONV_EXCL='QWEN_PLAYWRIGHT_MCP' \
+       MSYS2_ARG_CONV_EXCL='*' skill_py browser_mcp.py \
+       --output-dir "$(native_path "$BROWSER_DIR")" ${_hd[@]+"${_hd[@]}"} > "$MCP_CONFIG"; then
+    # The '>' redirect created the file before the writer ran: a failed writer leaves
+    # no partial mcp.json behind for anyone to load.
+    rm -f "$MCP_CONFIG"
     die "--browser: could not write the MCP config: $MCP_CONFIG"
     exit $QA_HARNESS
   fi
-  unset PW_CMD PW_ARGS
+  unset _hd
   # The session must be able to Read its own evidence (a screenshot saved by
   # filename, the snapshot files): the folder joins the extra readable dirs. It is
   # added HERE, not up in the --browser setup, precisely because the --probe
@@ -2848,7 +2858,7 @@ CHILD_ENV=(
 # reports after that answer starts one more turn, and the model's reply to it (a
 # postscript) replaces the answer as the result. Subagents run in the foreground.
 [ "$INTERACTIVE" -eq 1 ] || CHILD_ENV+=("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1")
-if [ "$TEST_MODE" -eq 1 ]; then
+if [ "$TEST_MODE" -eq 1 ] && [ "$TEST_NO_CMD" -eq 0 ]; then
   # The Bash tool must never cut qwen-test off before the test timeout does:
   # qwen-test itself kills the test's process group at QWEN_TEST_TIMEOUT (600
   # default), and gets a 60s margin on top for the worktree sync and teardown.
@@ -2941,7 +2951,7 @@ ERRF="$TMPD/stderr.txt"
 # endpoint. Filtered so real errors stand out.
 NOISE='claude\.ai connectors|unrecognized_model|no stdin data received'
 
-run_claude() {
+run_claude_once() {
   local rc wpid=""
   # env is scoped to this subprocess only; the parent session keeps its own auth.
   # The `env -u` list drops the PARENT Claude Code session's control channel:
@@ -2976,6 +2986,38 @@ run_claude() {
     wait "$wpid" 2>/dev/null
   fi
   [ -f "$TMPD/timed_out" ] && rc=124
+  return $rc
+}
+
+# Exit 126 (found, not executable) or 127 (not found) with no output means claude
+# never ran: an update was replacing the binary while this run started it. GNU
+# timeout and env return the same two codes for the same reason. Nothing was
+# consumed (stdin is /dev/null) and $RAW is rewritten by the next attempt, so
+# asking again is safe; QWEN_EXEC_RETRY_BACKOFF says how often and how long to
+# wait. Before each retry the name is looked up on PATH again (`hash -r`: bash
+# would otherwise answer from its cache of where claude used to be) and written
+# into claude's own slot of both argvs -- RUN_ARGV may carry `timeout -k 10 T`
+# in front of it, which is exactly the difference in length. An absolute
+# QWEN_CLAUDE_BIN is checked as-is. Any other exit, an empty answer included, is
+# claude's own and is never retried.
+run_claude() {
+  local rc d p
+  run_claude_once; rc=$?
+  for d in $EXEC_RETRY_BACKOFF; do
+    case "$rc" in 126|127) ;; *) break ;; esac
+    [ -s "$RAW" ] && break
+    die "claude could not be executed (exit $rc); retrying in ${d}s"
+    sleep "$d" &
+    CPID=$!
+    wait "$CPID"
+    CPID=""
+    hash -r 2>/dev/null
+    p="$(command -v "$CLAUDE_BIN" 2>/dev/null)" || p=""
+    [ -n "$p" ] || p="$CLAUDE_BIN"
+    CLAUDE_ARGV[0]="$p"
+    RUN_ARGV[$(( ${#RUN_ARGV[@]} - ${#CLAUDE_ARGV[@]} ))]="$p"
+    run_claude_once; rc=$?
+  done
   return $rc
 }
 
@@ -3110,6 +3152,13 @@ classify() {
   if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
     die "TIMEOUT after ${TIMEOUT}s — no result. Raise --timeout or shrink the task."
     return $QA_TIMEOUT
+  fi
+
+  if { [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; } && [ ! -s "$RAW" ]; then
+    # run_claude already retried; the binary is still not there to run.
+    die "HARNESS FAILURE: claude binary could not be executed (exit $rc) — it may have been replaced by an update; rerun (swarm: --resume RUN_DIR)"
+    grep -vE "$NOISE" "$ERRF" | sed 's/^/  claude-stderr: /' >&2
+    return $QA_HARNESS
   fi
 
   local ev; ev="$(parse_raw | tr -d '\r')"
@@ -3535,7 +3584,14 @@ emit() {
   # put a bare newline on stdout, so `r=$(qwen-agent ...)` would get whitespace
   # not "". With --json the record is always emitted: it carries the session id,
   # which a caller needs to resume a round that edited files but ended silent.
-  if [ -s "$RAW" ] && { [ "$code" -ne "$QA_EMPTY" ] || [ "$fmt" = json ]; }; then
+  # Exception: a timed-out call that outlived the kill and answered anyway. Its
+  # payload on stdout/-o would report a timeout as a result to every caller that
+  # trusts them, so it goes where model output and error text already go --
+  # stderr, which -w collects into FILE.err -- as evidence, never as the answer.
+  if [ "$code" -eq "$QA_TIMEOUT" ] && [ -s "$RAW" ]; then
+    die "TIMEOUT: claude answered after the deadline — its payload follows as evidence, not as the result:"
+    extract "$fmt" >&2
+  elif [ -s "$RAW" ] && { [ "$code" -ne "$QA_EMPTY" ] || [ "$fmt" = json ]; }; then
     if [ -n "$OUT" ]; then
       if extract "$fmt" >"$OUT"; then
         [ "$code" -eq 0 ] && note "wrote $OUT"

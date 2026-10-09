@@ -338,6 +338,23 @@ def test_denials_add_fence_line_to_feedback(env):
     assert "Not done" in text and "Bash calls were denied" not in text
 
 
+def test_denied_bash_feedback_without_a_test_command(env, monkeypatch):
+    # A no-cmd run (--test-no-cmd rounds): the denied-Bash feedback must not point at
+    # a qwen-test the run was never given -- there is no shell for it to run in.
+    repo, task, tmp = env
+    monkeypatch.delenv("QWEN_TEST_CMD")
+    _cmd_only(task)
+    script(tmp, [{"result": "a", "denied": ["Bash", "Bash"]},
+                 {"result": "b", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task) == 0
+    c = calls(tmp)
+    p2 = open(c[1][c[1].index("-f") + 1], encoding="utf-8").read()
+    assert "Not done" in p2
+    assert p2.rstrip().endswith("2 Bash calls were denied last round. No shell is available "
+                                "this run; use Read, Grep and Glob.")
+    assert "Only qwen-test runs" not in p2
+
+
 def test_state_dir_inside_repo_is_usage(env, monkeypatch):
     repo, task, tmp = env
     monkeypatch.setenv("QWEN_AGENT_STATE", str(repo / "state"))
@@ -1341,3 +1358,72 @@ def test_advisor_dir_removed_on_keyboard_interrupt(env, monkeypatch):
     text = _report_text(tmp)
     assert "stop: interrupted (exit 130)" in text
     assert "## Advisor" in text and "calls: 1" in text and "cost_usd: 0.5" in text
+
+
+def _cmd_only(task):
+    task.write_text("# Goal\nMake the value good.\n\n"
+                    "- [ ] value is good -- check: cmd %s check.py\n" % PY.replace("\\", "/"))
+
+
+def test_cmd_only_checklist_runs_without_a_test_command(env, monkeypatch):
+    # Issue #1 item 4: with no `test` check and no QWEN_TEST_CMD the rounds run
+    # --test-no-cmd (--test would refuse to start), and no prompt promises qwen-test
+    repo, task, tmp = env
+    monkeypatch.delenv("QWEN_TEST_CMD")
+    _cmd_only(task)
+    script(tmp, [{"result": "a"}, {"result": "b", "write": {"value.txt": "good\n"}},
+                 {"result": "reviewed"}])
+    assert sup(repo, task, "--review-round") == 0
+    c = calls(tmp)
+    assert len(c) == 3
+    for argv in c:
+        assert "--test-no-cmd" in argv and "--test" not in argv
+    assert "qwen-test" not in _prompt_of(c[0]) and "You have no shell" in _prompt_of(c[0])
+    assert _prompt_of(c[2]).startswith("Review round") and "qwen-test" not in _prompt_of(c[2])
+
+
+def test_cmd_only_checklist_keeps_qwen_test_when_a_command_is_set(env):
+    # QWEN_TEST_CMD configured: the coder keeps qwen-test to check its own work
+    repo, task, tmp = env
+    _cmd_only(task)
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}, {"result": "reviewed"}])
+    assert sup(repo, task, "--review-round") == 0
+    c = calls(tmp)
+    assert "--test" in c[0] and "--test-no-cmd" not in c[0]
+    assert "`qwen-test [SELECTOR]`; it is your only shell command" in _prompt_of(c[0])
+    assert "(`qwen-test [SELECTOR]`)" in _prompt_of(c[1])
+
+
+def test_advisor_and_test_no_cmd_together(env, monkeypatch):
+    # --advisor and --test-no-cmd compose: every coder round runs the commandless
+    # fence AND carries the run's one advisor (model + one shared state dir, so one
+    # budget for the whole run); the read-only deviation audit carries neither flag.
+    repo, task, tmp = env
+    monkeypatch.delenv("QWEN_TEST_CMD")
+    _cmd_only(task)
+    script(tmp, [{"result": "a"},
+                 {"result": "fixed", "write": {"value.txt": "good\n"}},
+                 {"result": "NO CONTRADICTIONS"}])
+    assert supervisor.main(["--task", str(task), "--repo", str(repo), "--agent", PY,
+                            "--agent", FAKE, "--advisor", "opus"]) == 0
+    c = calls(tmp)
+    coder = [a for a in c if a[a.index("-r") + 1] == "coder"]
+    audit = [a for a in c if a[a.index("-r") + 1] == "auditor"]
+    assert len(coder) == 2 and len(audit) == 1
+    dirs = set()
+    for argv in coder:
+        assert "--test-no-cmd" in argv and "--test" not in argv
+        assert argv.count("--advisor") == 1 and argv[argv.index("--advisor") + 1] == "opus"
+        dirs.add(argv[argv.index("--advisor-state") + 1])
+    assert len(dirs) == 1                               # one advisor budget for the run
+    assert "--advisor" not in audit[0] and "--advisor-state" not in audit[0]
+    assert "--test-no-cmd" not in audit[0] and "--test" not in audit[0]
+
+
+def test_test_checks_without_a_test_command_still_exit_2(env, monkeypatch, capsys):
+    repo, task, tmp = env
+    monkeypatch.delenv("QWEN_TEST_CMD")
+    script(tmp, [{"result": "never"}])
+    assert sup(repo, task) == 2
+    assert "the checklist has test checks but QWEN_TEST_CMD is not set" in capsys.readouterr().err
+    assert not (tmp / "record.jsonl").exists()            # no round ran

@@ -109,7 +109,12 @@ edits across many files, give one item per file.
 ### What the loop does
 
 It always runs the `coder` role with `--test`, resumes one session each round with what
-still fails, and decides "done" itself by running the checks; the model never does. The
+still fails, and decides "done" itself by running the checks; the model never does. When no
+check is a `test` check and QWEN_TEST_CMD is unset, the rounds get the internal
+`--test-no-cmd` instead: the same fence without the `qwen-test` shell and without a test
+worktree (with QWEN_TEST_CMD set, `--test` is kept even for a cmd-only checklist). So
+QWEN_TEST_CMD is needed only when the checklist has `test` checks (one with it unset is
+still exit 2). The
 coder records every deliberate departure from the spec as a `## DEVIATION` block (SPEC,
 DID, WHY, EVIDENCE) in a decision log; a departure without one keeps the task open. When
 every check passes, a read-only deviation audit compares the spec with the diff

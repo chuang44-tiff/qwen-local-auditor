@@ -12,6 +12,7 @@ import subprocess
 
 import pytest
 
+import test_cli
 import test_cli_deep
 from test_cli import _git_repo, flag, posix, run, same_path
 from test_cli_deep import calls, go, sys_prompt
@@ -339,6 +340,21 @@ def test_no_browser_folder_on_early_failure(tmp_path, server, fake):
     assert "browser: screenshots" not in r.stderr
 
 
+def test_broken_browser_mcp_is_exit_8_and_leaves_no_config(tmp_path, server, fake, monkeypatch):
+    # the '>' redirect creates mcp.json BEFORE browser_mcp.py runs: a writer that dies
+    # must not leave the half-written file for anyone to load -- the run removes it and
+    # exits 8. The corruption lands on a copy of the skill tree, never on the repo file.
+    skill = tmp_path / "skill"
+    shutil.copytree(test_cli.AGENT.parent, skill)
+    (skill / "lib" / "browser_mcp.py").write_text("this is not python(\n", encoding="utf-8")
+    monkeypatch.setattr(test_cli, "AGENT", skill / "qwen-agent.sh")
+    r = go(tmp_path, ["--browser", "hi"], server, fake, extra=bdir(tmp_path))
+    assert r.returncode == 8, r.stdout + r.stderr
+    assert "could not write the MCP config" in r.stderr
+    assert calls(tmp_path) == []                            # claude never ran
+    assert list((tmp_path / "browser").rglob("mcp.json")) == []   # no partial config
+
+
 # ------------------------------------------------------------------ the role
 
 def test_tester_role_implies_browser_and_has_its_text(tmp_path, server, fake):
@@ -491,3 +507,24 @@ def test_browser_json_record(tmp_path, server, fake):
 def test_existing_role_texts_unchanged(tmp_path, server, fake):
     # the sha256 pins of test_cli_deep, run as that test runs them
     test_cli_deep.test_existing_role_texts_are_unchanged(tmp_path, server, fake)
+
+
+# ------------------------------------------------------------------ one source
+
+@pytest.mark.parametrize("headed", [False, True])
+def test_mcp_json_is_browser_mcp_text_byte_for_byte(tmp_path, server, fake, headed):
+    # Golden: the file qwen-agent writes is exactly lib/browser_mcp's text for the
+    # output dir it chose -- the module is the one source of the server entry, and
+    # its output equals what the inline heredoc wrote before it existed.
+    from lib import browser_mcp
+    extra = dict(bdir(tmp_path), QWEN_PLAYWRIGHT_MCP="node /x/cli.js")
+    if headed:
+        extra.update(DISPLAY=":9", XAUTHORITY="")
+    r = go(tmp_path, ["--headed" if headed else "--browser", "hi"], server, fake, extra=extra)
+    assert r.returncode == 0, r.stderr
+    argv, _ = calls(tmp_path)[0]
+    cfg, entry = mcp_entry(argv)
+    want = browser_mcp.text(browser_mcp.build(
+        out_dir(entry), headed=headed,
+        env={"QWEN_PLAYWRIGHT_MCP": "node /x/cli.js", "DISPLAY": ":9", "PATH": ""}))
+    assert pathlib.Path(cfg).read_bytes() == want.encode("utf-8")

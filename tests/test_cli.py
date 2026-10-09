@@ -42,9 +42,17 @@ case "${FAKE_MODE:-ok}" in
   empty)   printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"","session_id":"fake-session-1"}' ;;
   denied)  printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"partial","permission_denials":[{"tool_name":"Bash"}]}' ;;
   garbage) printf 'this is not json\n' ;;
+  # Survives SIGTERM (trap '' TERM is inherited by the exec'd sleep, so even a
+  # GNU timeout that signals the whole group cannot cut this short) and prints
+  # a valid answer after every test deadline has passed.
+  ignoreterm) trap '' TERM; sleep 6; printf '%s\n' "$ok" ;;
   repro)   wt="$QWEN_TEST_WORKTREE"; command -v cygpath >/dev/null 2>&1 && wt="$(cygpath -u "$wt")"
            printf 'def test_repro():\n    assert False\n' > "$wt/test_repro.py"; printf '%s\n' "$ok" ;;
-  sleep)   sleep 20; printf '%s\n' "$ok" ;;
+  # Long enough that no clock perturbation lets it answer before a deadline. The
+  # job is always killed at the --timeout deadline (GNU timeout or the built-in
+  # watchdog), so the sleep length is irrelevant to the tests' duration -- it
+  # only has to sit past every deadline the suite cuts a run at.
+  sleep)   sleep 600; printf '%s\n' "$ok" ;;
 esac
 '''
 
@@ -376,6 +384,29 @@ def test_the_wall_clock_timeout_fires(tmp_path, server, fake, timeout_bin):
     r = run(tmp_path, ["--timeout", "2", "hi"], server, fake, extra=extra)
     assert r.returncode == 5, r.stderr
     assert time.time() - t0 < 18, "the timeout did not cut the run short"
+
+
+@pytest.mark.parametrize("timeout_bin", ["", "none"], ids=["gnu-timeout-if-present", "watchdog"])
+@pytest.mark.parametrize("detached", [False, True], ids=["foreground", "detached"])
+def test_a_timed_out_run_is_never_a_success(tmp_path, server, fake, timeout_bin, detached):
+    # A claude that ignores SIGTERM and prints a valid answer after the deadline:
+    # classify checks rc 124/137 before any JSON is parsed, so even that answer
+    # arriving whole can never turn a timed-out run into a success.
+    extra = {"FAKE_MODE": "ignoreterm"}
+    if timeout_bin:
+        extra["QWEN_TIMEOUT_BIN"] = timeout_bin
+    if not detached:
+        r = run(tmp_path, ["--timeout", "3", "hi"], server, fake, extra=extra)
+        assert r.returncode == 5, r.stderr
+        assert r.stdout == ""
+        assert "TIMEOUT" in r.stderr
+    else:
+        out = tmp_path / "late.md"
+        r = run(tmp_path, ["-w", "--timeout", "3", "-o", posix(out), "hi"], server, fake, extra=extra)
+        assert r.returncode == 0, r.stderr
+        st = wait_for_status(pathlib.Path(str(out) + ".status"))
+        assert "exit=5" in st and "reason=timeout" in st, st
+        assert "fake answer" not in (out.read_text(encoding="utf-8") if out.exists() else "")
 
 
 # ------------------------------------------------------------------ output
@@ -1342,3 +1373,256 @@ def test_interactive_dry_run(tmp_path, fake):
     assert posix(printed).rstrip("/") != posix(tmp_path).rstrip("/")
     assert "# timeout: not applied" in r.stdout
     assert not (tmp_path / "record.txt").exists()       # nothing was run
+
+
+# ------------------------------------------------------------------ claude replaced mid-run
+
+FAKE_FLAKY = r'''#!/usr/bin/env bash
+# claude while an update is replacing it: the first $FAKE_FLAKY_N real calls exit
+# $FAKE_FLAKY_RC with no output (what exec failing looks like from outside), then the
+# ordinary fake answers. --help is the capability probe and is never counted.
+if [ "${1:-}" = --help ]; then exec "$FAKE_REAL" "$@"; fi
+n=$(cat "$FAKE_FLAKY_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_FLAKY_COUNT"
+if [ "$n" -le "${FAKE_FLAKY_N:-1}" ]; then
+  # FAKE_FLAKY_OUT: a claude that DID run and printed something before exiting 126/127
+  [ -n "${FAKE_FLAKY_OUT:-}" ] && printf '%s\n' "$FAKE_FLAKY_OUT"
+  echo "flaky: cannot execute" >&2; exit "${FAKE_FLAKY_RC:-126}"
+fi
+exec "$FAKE_REAL" "$@"
+'''
+
+
+def _flaky(tmp_path, fake, name="fake-flaky"):
+    p = tmp_path / name
+    p.write_text(FAKE_FLAKY, encoding="utf-8", newline="\n")
+    p.chmod(0o755)
+    return p
+
+
+def _flaky_env(tmp_path, fake, n, rc, **more):
+    env = {"FAKE_REAL": posix(fake), "FAKE_FLAKY_COUNT": posix(tmp_path / "flaky.n"),
+           "FAKE_FLAKY_N": str(n), "FAKE_FLAKY_RC": str(rc), "QWEN_EXEC_RETRY_BACKOFF": "0 0"}
+    env.update(more)
+    return env
+
+
+def _flaky_calls(tmp_path):
+    return int((tmp_path / "flaky.n").read_text().strip())
+
+
+@pytest.mark.parametrize("rc", [126, 127])
+def test_claude_that_cannot_be_executed_is_retried(tmp_path, server, fake, rc):
+    r = run(tmp_path, ["hi"], server, _flaky(tmp_path, fake), extra=_flaky_env(tmp_path, fake, 1, rc))
+    assert r.returncode == 0, r.stderr
+    assert "fake answer" in r.stdout
+    assert r.stderr.count("claude could not be executed (exit %d); retrying in 0s" % rc) == 1
+    assert _flaky_calls(tmp_path) == 2
+
+
+def test_claude_that_never_becomes_executable_is_a_harness_failure(tmp_path, server, fake):
+    r = run(tmp_path, ["hi"], server, _flaky(tmp_path, fake), extra=_flaky_env(tmp_path, fake, 3, 126))
+    assert r.returncode == 8, r.stderr
+    assert r.stderr.count("retrying in 0s") == 2                # two retries, then the verdict
+    assert ("HARNESS FAILURE: claude binary could not be executed (exit 126) — it may have been "
+            "replaced by an update; rerun (swarm: --resume RUN_DIR)") in r.stderr
+    assert "could not parse claude output" not in r.stderr
+    assert _flaky_calls(tmp_path) == 3
+
+
+def test_other_exit_codes_are_not_retried(tmp_path, server, fake):
+    # exit 1 with no output is claude's own failure, not a failed exec: asked once
+    r = run(tmp_path, ["hi"], server, _flaky(tmp_path, fake), extra=_flaky_env(tmp_path, fake, 1, 1))
+    assert r.returncode == 8, r.stderr
+    assert "retrying" not in r.stderr and "could not parse claude output (empty)" in r.stderr
+    assert _flaky_calls(tmp_path) == 1
+
+
+@pytest.mark.parametrize("timeout_bin", ["", "none"], ids=["gnu-timeout", "watchdog"])
+def test_retry_re_resolves_a_bare_claude_on_path(tmp_path, server, fake, timeout_bin):
+    # QWEN_CLAUDE_BIN=claude is looked up on PATH again before the retry, and the
+    # result lands on claude's own slot of the argv -- after `timeout -k 10 T` when
+    # GNU timeout wraps it: a wrong slot would hand claude timeout's arguments.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _flaky(bindir, fake, name="claude")
+    extra = _flaky_env(tmp_path, fake, 1, 127, QWEN_CLAUDE_BIN="claude",
+                       PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+    if timeout_bin:
+        extra["QWEN_TIMEOUT_BIN"] = timeout_bin
+    r = run(tmp_path, ["hi"], server, extra=extra)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr.count("claude could not be executed (exit 127); retrying in 0s") == 1
+    argv, _ = record(tmp_path)
+    assert argv[0] == "-p" and flag(argv, "--model") == "local-model"
+
+# ------------------------------------------------------------------ claude missing at startup
+
+FAKE_SLEEP = r'''#!/usr/bin/env bash
+# Stands in for the backoff wait: the first call "finishes the update" by putting the
+# claude-late shim where the name resolves, then really sleeps (0 seconds in these tests).
+if [ ! -e "$FAKE_LATE_DIR/claude-late" ] && [ -z "${FAKE_NEVER:-}" ]; then
+  cp "$FAKE_REAL" "$FAKE_LATE_DIR/claude-late" && chmod 755 "$FAKE_LATE_DIR/claude-late"
+fi
+echo x >> "$FAKE_SLEEP_LOG"
+exec /bin/sleep "$@"
+'''
+
+
+def _late_claude(tmp_path, fake, never=False):
+    # a name no machine has on PATH already (a real claude there would answer first)
+    bindir = tmp_path / "late-bin"
+    bindir.mkdir()
+    sl = bindir / "sleep"
+    sl.write_text(FAKE_SLEEP, encoding="utf-8", newline="\n")
+    sl.chmod(0o755)
+    extra = {"FAKE_REAL": posix(fake), "FAKE_LATE_DIR": posix(bindir),
+             "FAKE_SLEEP_LOG": posix(tmp_path / "sleeps.log"), "QWEN_CLAUDE_BIN": "claude-late",
+             "QWEN_EXEC_RETRY_BACKOFF": "0 0",
+             "PATH": str(bindir) + os.pathsep + os.environ["PATH"]}
+    if never:
+        extra["FAKE_NEVER"] = "1"
+    return extra
+
+
+def test_claude_absent_at_startup_is_waited_for(tmp_path, server, fake):
+    # an auto-update removes and recreates claude: absent at the first check, back after
+    # the first backoff (the fake sleep puts it there, so no real timing is involved)
+    r = run(tmp_path, ["hi"], server, extra=_late_claude(tmp_path, fake))
+    assert r.returncode == 0, r.stderr
+    assert "fake answer" in r.stdout
+    assert r.stderr.count("claude not found: claude-late; retrying in 0s") == 1
+    assert (tmp_path / "sleeps.log").read_text().count("x") == 1    # one wait, not two
+
+
+def test_claude_absent_at_startup_and_after_every_retry_is_exit_8(tmp_path, server, fake):
+    r = run(tmp_path, ["hi"], server, extra=_late_claude(tmp_path, fake, never=True))
+    assert r.returncode == 8, r.stderr
+    assert r.stderr.count("retrying in 0s") == 2
+    assert "claude binary not found: claude-late (set QWEN_CLAUDE_BIN)" in r.stderr
+    assert (tmp_path / "sleeps.log").read_text().count("x") == 2
+
+# ------------------------------------------------------------------ --test-no-cmd
+
+def test_test_no_cmd_keeps_the_fence_without_qwen_test(tmp_path, fake):
+    # --until-done's rounds when the checklist has no `test` check: --test's fence
+    # (--restricted, dontAsk) with no test command and no Bash
+    r = run(tmp_path, ["--dry-run", "--test-no-cmd", "-r", "coder", "hi"], fake=fake)
+    assert r.returncode == 0, r.stderr
+    argv = _dry_argv(r)
+    assert "--restricted" in argv and flag(argv, "--permission-mode") == "dontAsk"
+    assert "Bash" not in flag(argv, "--tools").split(",")
+    grants = flag(argv, "--allowed-tools").split(",")
+    assert not [g for g in grants if g.startswith("Bash")]
+    assert "Edit" in grants and "Write" in grants and "MultiEdit" in grants
+    assert "QWEN_TEST_CMD=" not in r.stdout and "QWEN_TEST_WORKTREE=" not in r.stdout
+
+
+def test_test_no_cmd_read_only_run_has_no_bash_warning(tmp_path, fake):
+    r = run(tmp_path, ["--dry-run", "--test-no-cmd", "hi"], fake=fake)
+    assert r.returncode == 0, r.stderr
+    argv = _dry_argv(r)
+    assert "--restricted" in argv and flag(argv, "--permission-mode") == "dontAsk"
+    assert "Bash" not in flag(argv, "--tools").split(",")
+    assert "gains Bash" not in r.stderr                  # it gains nothing
+
+
+def test_test_no_cmd_says_there_is_no_shell(tmp_path, server):
+    # the qwen-test fence note would promise a command the run does not have; under
+    # --test-no-cmd the coder role drops its own qwen-test bullet too, so nothing the
+    # model reads -- role text or note -- names a command this run does not have
+    repo = _git_repo(tmp_path / "repo")
+    p = _sys_prompt(tmp_path, server, ["--test-no-cmd", "-r", "coder", "-C", posix(repo), "hi"])
+    assert "Your only shell command" not in p
+    assert "This run has no shell and no test command" in p
+    assert 0 <= p.index("CODER") < p.index("This run has no shell")
+    assert "qwen-test" not in p
+
+
+def test_coder_role_text_unchanged_with_a_test_command(tmp_path, server):
+    # the qwen-test bullet is dropped only for --test-no-cmd: a plain --test coder
+    # keeps the role text byte for byte, fence note included
+    repo = _git_repo(tmp_path / "repo")
+    p = _sys_prompt(tmp_path, server, ["--test", "-r", "coder", "-C", posix(repo), "hi"])
+    assert "Run tests with `qwen-test" in p
+    assert ("- Run tests with `qwen-test [SELECTOR]` (a test id/path or -k EXPR). It is the\n"
+            "  only shell command you have. Read its first line: TEST <id> PASSED|FAILED|...\n") in p
+
+
+def test_test_no_cmd_run_makes_no_worktree(tmp_path, server, fake):
+    repo = _git_repo(tmp_path / "repo")
+    r = run(tmp_path, ["--test-no-cmd", "-r", "coder", "-C", posix(repo), "hi"], server, fake,
+            extra={"QWEN_TEST_WORKTREES": posix(tmp_path / "wts")})
+    assert r.returncode == 0, r.stderr
+    argv, env = record(tmp_path)
+    assert "--restricted" in argv and flag(argv, "--permission-mode") == "dontAsk"
+    assert "QWEN_TEST_CMD" not in env and "QWEN_TEST_WORKTREE" not in env
+    assert not (tmp_path / "wts").exists()               # --test makes its worktree root here
+
+
+@pytest.mark.parametrize("args,needle", [
+    (["--all-tools"], "--all-tools"),
+    (["--toolset", "Read"], "--toolset"),
+    (["-t", "Bash(*)"], "--tools"),
+    (["--permission-mode", "plan"], "--permission-mode"),
+    (["--read-only"], "--read-only"),
+], ids=["all-tools", "toolset", "tools", "permission-mode", "read-only"])
+def test_test_no_cmd_keeps_the_test_refusals(tmp_path, fake, args, needle):
+    r = run(tmp_path, ["--dry-run", "--test-no-cmd", *args, "hi"], fake=fake)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert needle in r.stderr
+
+
+def test_test_no_cmd_is_listed_as_internal_and_refused_interactively(tmp_path, fake):
+    h = run(tmp_path, ["--help"])
+    assert re.search(r"^\s+--test-no-cmd\s+Internal: used by --until-done", h.stdout, re.M)
+    r = run(tmp_path, ["--interactive", "--dry-run", "--test-no-cmd"], fake=fake)
+    assert r.returncode == 2 and "--test-no-cmd" in r.stderr
+
+
+def test_until_done_with_cmd_checks_only_needs_no_test_cmd(tmp_path, server):
+    # Issue #1 item 4: a checklist of `cmd` checks runs with QWEN_TEST_CMD unset; every
+    # round keeps the fence and gets no shell and no worktree
+    fake2 = tmp_path / "fake2"
+    fake2.write_text(FAKE_SCRIPTED, encoding="utf-8", newline="\n"); fake2.chmod(0o755)
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "value.txt").write_text("bad")
+    (repo / "check.py").write_text("import sys\nsys.exit(0 if open('value.txt').read()=='good' else 1)\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "v"], check=True, capture_output=True)
+    py = posix(shutil.which("python3") or shutil.which("python"))
+    task = tmp_path / "task.md"
+    task.write_text("- [ ] value good -- check: cmd %s check.py\n" % py)
+    r = run(tmp_path, ["--until-done", posix(task), "-C", posix(repo), "--no-deviation-audit"], server, fake2,
+            extra={"QWEN_AGENT_STATE": posix(tmp_path / "state"),
+                   "QWEN_TEST_WORKTREES": posix(tmp_path / "wts"),
+                   "QWEN_SUPERVISOR_BACKOFF": "0"}, timeout=180)
+    assert r.returncode == 0, r.stdout + r.stderr
+    first = [ln[4:] for ln in (tmp_path / "record.txt").read_text().split("---\n")[0].splitlines()
+             if ln.startswith("ARG:")]
+    assert "--restricted" in first and flag(first, "--permission-mode") == "dontAsk"
+    assert "Bash" not in flag(first, "--tools").split(",")
+
+
+def test_empty_backoff_means_no_retry(tmp_path, server, fake):
+    # set but empty is "no retries" (${VAR-...}), not "use the default"
+    r = run(tmp_path, ["hi"], server, _flaky(tmp_path, fake),
+            extra=_flaky_env(tmp_path, fake, 1, 126, QWEN_EXEC_RETRY_BACKOFF=""))
+    assert r.returncode == 8, r.stderr
+    assert "retrying" not in r.stderr
+    assert "HARNESS FAILURE: claude binary could not be executed (exit 126)" in r.stderr
+    assert _flaky_calls(tmp_path) == 1
+
+
+def test_empty_backoff_does_not_wait_for_a_missing_claude(tmp_path, server):
+    r = run(tmp_path, ["hi"], server, extra={"QWEN_CLAUDE_BIN": "no-such-claude-xyz",
+                                             "QWEN_EXEC_RETRY_BACKOFF": ""})
+    assert r.returncode == 8 and "retrying" not in r.stderr
+    assert "claude binary not found: no-such-claude-xyz" in r.stderr
+
+
+def test_exit_127_after_output_is_not_retried(tmp_path, server, fake):
+    # output means claude ran: re-running it could repeat what it did, so no retry
+    r = run(tmp_path, ["hi"], server, _flaky(tmp_path, fake),
+            extra=_flaky_env(tmp_path, fake, 1, 127, FAKE_FLAKY_OUT="partial output"))
+    assert "retrying" not in r.stderr
+    assert _flaky_calls(tmp_path) == 1

@@ -34,7 +34,7 @@ FIRST = """You are working on the task below until every checklist item's check 
 
 The harness, not you, decides when you are done. After you stop it runs every
 check itself; if anything still fails it resumes this session and tells you what.
-- Run tests with `qwen-test [SELECTOR]`; it is your only shell command.
+{shell}
 - You cannot tick or edit checklist items. If you believe an item is wrong, say so
   in a DEVIATION block and leave it.
 - Record every deliberate departure from the spec as a DEVIATION block (format in
@@ -59,10 +59,18 @@ Fix these, or record a DEVIATION block for anything you changed on purpose. Cont
 REVIEW_ROUND = """Review round: every check passes. Before the task is final, try to break your change.
 Go back over each thing you changed and each checklist item. For each one, look for the
 input, state or code path that would make it wrong -- empty, huge or odd inputs, paths with
-spaces, non-UTF-8 bytes, platform differences, an interrupted or resumed run -- and check it
-with a test (`qwen-test [SELECTOR]`) or by reading the code again. Fix what fails. The
+spaces, non-UTF-8 bytes, platform differences, an interrupted or resumed run -- and
+{check_it}. Fix what fails. The
 harness runs every check again after this round. Reply as before: a DEVIATION block for
 each deliberate departure, then the files you changed."""
+
+# The round's shell, as FIRST and REVIEW_ROUND state it: qwen-test when a test command is
+# configured, none under --test-no-cmd (no `test` check and no QWEN_TEST_CMD).
+SHELL_TEST = "- Run tests with `qwen-test [SELECTOR]`; it is your only shell command."
+SHELL_NONE = ("- You have no shell: no test command is configured. Use Read, Grep and Glob "
+              "for files; the harness runs every check itself after you stop.")
+CHECK_TEST = "check it with a test (`qwen-test [SELECTOR]`) or by reading the code again"
+CHECK_NONE = "check it by reading the code again"
 
 
 def state_root():
@@ -111,7 +119,7 @@ def _backoff():
 
 
 def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", test=True,
-               probe_here=False, advisor=None):
+               probe_here=False, test_cmd=True, advisor=None):
     # --shallow goes on the command line, not only into the environment below:
     # qwen-agent reads its config file AFTER the environment, so a QWEN_DEPTH=deep
     # sitting in the config would otherwise re-imply depth (a review round, a
@@ -120,7 +128,9 @@ def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", tes
     # tokens in the passthrough; nothing else may add to that.
     argv = list(agent) + ["--shallow", "--json", "--warn-denials", "-q", "-r", role]
     if test:
-        argv.append("--test")
+        # No test command (the checklist has no `test` check and QWEN_TEST_CMD is unset):
+        # the same fence without qwen-test, since --test refuses to start without one.
+        argv.append("--test" if test_cmd else "--test-no-cmd")
     if probe_here:
         argv.append("--probe-here")     # repo is the run's probe sandbox: a whole shell there
     argv += ["-C", repo, "-f", prompt_path]
@@ -544,6 +554,8 @@ def _run(o):
     if any(i.kind == "test" for i in task.items) and not test_cmd.strip():
         print("until-done: the checklist has test checks but QWEN_TEST_CMD is not set", file=sys.stderr)
         return EXIT_USAGE
+    # Past the check above, no command means no `test` check: the rounds run --test-no-cmd.
+    has_cmd = bool(test_cmd.strip())
     try:
         timeout = int(os.environ.get("QWEN_TEST_TIMEOUT") or testrun.DEFAULT_TIMEOUT)
         _backoff()
@@ -718,11 +730,13 @@ def _run(o):
         reason, code = "round limit reached", EXIT_PARTIAL
         for rounds in range(1, o.max_rounds + 1):
             prompt = feedback if (feedback and session) else FIRST.format(
-                task=task_text, log=decisions.render(decisions.load(log_path)))
+                task=task_text, log=decisions.render(decisions.load(log_path)),
+                shell=SHELL_TEST if has_cmd else SHELL_NONE)
             ppath = os.path.join(run_dir, "round-%d.prompt.md" % rounds)
             _write(ppath, prompt)
             sig_before = _tree_sig(repo)
             r = call_agent(o.agent, repo, ppath, session, o.passthrough, probe_here=o.probe,
+                           test_cmd=has_cmd,
                            # every coder round -- and the review round, which is a round --
                            # asks the same advisor through the same state dir
                            advisor=advisor_info())
@@ -819,7 +833,8 @@ def _run(o):
                             # One more round in the same session; the checks (and the audit)
                             # run again after it, and it counts toward --max-rounds.
                             notes.append("review round: round %d" % (rounds + 1))
-                            prev, feedback = None, REVIEW_ROUND
+                            prev, feedback = None, REVIEW_ROUND.format(
+                                check_it=CHECK_TEST if has_cmd else CHECK_NONE)
                             continue
                         notes.append("review round skipped: the checks passed with no round or "
                                      "budget left for it")
@@ -861,9 +876,14 @@ def _run(o):
             if r["denied"]:
                 # Repeat the fence where the model will read it: the denials it
                 # just hit were attempts at commands that can never run. This
-                # round's count only -- the running total would be noise.
-                feedback += ("\n%d Bash calls were denied last round. Only qwen-test runs;"
-                             " use Read, Grep and Glob for files." % len(r["denied"]))
+                # round's count only -- the running total would be noise. A round
+                # that ran without a test command has no shell at all, and must not
+                # be pointed at a qwen-test it was never given.
+                fence = ("Only qwen-test runs; use Read, Grep and Glob for files."
+                         if has_cmd else
+                         "No shell is available this run; use Read, Grep and Glob.")
+                feedback += ("\n%d Bash calls were denied last round. %s"
+                             % (len(r["denied"]), fence))
         patch = finish_probe()
         path = _report(run_dir, reason=reason, code=code, rounds=rounds, session=session,
                        tokens=tokens, results=results, log=log, start=start, repo=repo,

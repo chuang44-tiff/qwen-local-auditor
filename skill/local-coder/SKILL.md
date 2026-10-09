@@ -34,8 +34,9 @@ For batch edits across many files, give one item per file.
 qwen-agent --until-done task.md -C <repo>            # commit first, or add --allow-dirty
 ```
 
-It always runs as `-r coder --test`, and needs `QWEN_TEST_CMD` in
-`~/.config/qwen-agent/config` for `test` checks. A `test` selector is a test id or
+It runs as `-r coder --test` (`--test-no-cmd`, the same fence with no shell, when no check is
+a `test` check and QWEN_TEST_CMD is unset). QWEN_TEST_CMD is needed only when the checklist
+has `test` checks; set it in `~/.config/qwen-agent/config`. A `test` selector is a test id or
 path, or `-k EXPR`: no options, no absolute paths, no `..`.
 Supervisor options: `--max-rounds N` (default 8), `--budget-tokens N`,
 `--budget-seconds N`, `--allow-dirty`, `--no-deviation-audit`.
