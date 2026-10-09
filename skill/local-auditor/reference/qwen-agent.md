@@ -483,9 +483,13 @@ is one `claude -p` run with no tools, no settings, no hooks and one turn, so one
 request to that model, at Anthropic's default effort. The Qwen session keeps doing the work;
 the advisor never edits or runs anything.
 
-- Off unless you type `--advisor MODEL`. No environment variable or config line turns it on, so sweeps, swarms and `--until-done` (which refuses it) never send code out on their own.
+- Off unless you type `--advisor MODEL`. No environment variable or config line turns it on, so sweeps and swarms never send code out on their own.
+- `--until-done` turns the advisor on for its coder rounds only when you type `--advisor MODEL` on the `--until-done` command itself: every round of the loop then gets the advisor
+  through ONE budget shared by the whole run (the loop makes one state directory and hands it to each round with the internal `--advisor-state DIR`), and its deviation audit
+  never gets it.
 - `QWEN_ADVISOR_MAX_CALLS` (default 4) is shared by the first answer, the review round and
-  subagents. `QWEN_ADVISOR_TIMEOUT` (default 600 s) applies per call.
+  subagents — and, under `--until-done`, by every round and review round of the loop.
+  `QWEN_ADVISOR_TIMEOUT` (default 600 s) applies per call.
 - A missing login, no network, a usage limit, a timeout or a spent budget come back as
   `ADVISOR UNAVAILABLE: ...` and the session carries on; the exit code is unchanged.
 - Every question and answer is appended to `advisor-<stamp>-<pid>.md` in `QWEN_OUTDIR` when you set it, else in `~/.cache/qwen-agent/advisor/` (never the tree under audit).

@@ -4,14 +4,28 @@ network, no real model. The fake is a POSIX script, so the exec tests skip on Wi
 import io
 import json
 import os
+import subprocess
 import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skill", "local-auditor"))
+LIB = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skill", "local-auditor"))
+sys.path.insert(0, LIB)
 from lib import advisor_mcp as am  # noqa: E402
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="fake claude is a POSIX script")
+
+# One ask() from a process of its own, for the budget's process-level half.
+RUN_ASK = r'''import os, sys
+sys.path.insert(0, os.environ["QA_LIB"])
+from lib import advisor_mcp as am
+try:
+    print("OK " + am.ask(sys.argv[1], "", None, os.environ, os.getcwd()))
+    sys.exit(0)
+except Exception as e:
+    print("%s: %s" % (type(e).__name__, e))
+    sys.exit(3)
+'''
 
 FAKE = r'''#!/usr/bin/env python3
 import json, os, sys, time
@@ -103,6 +117,32 @@ def test_budget_is_shared_across_servers(adv):
     with pytest.raises(am.Unavailable, match="budget of 2 advisor calls"):
         am.ask("q3", "", None, adv["env"], str(adv["root"]))
     assert len(list(adv["calls"].glob("argv.*"))) == 2        # the third never ran claude
+
+
+def ask_in_process(adv, question):
+    """One ask() run by a separate python process against adv's state dir: the only
+    thing the two runs can share is that directory, which is the point."""
+    runner = adv["tmp"] / "run-ask.py"
+    runner.write_text(RUN_ASK, encoding="utf-8")
+    p = subprocess.run([sys.executable, str(runner), question], env=dict(adv["env"], QA_LIB=LIB),
+                       cwd=str(adv["root"]), capture_output=True, text=True, timeout=60)
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
+@posix_only
+def test_budget_is_shared_across_processes(adv):
+    # The budget of a run is not per server process: --until-done gives every coder round
+    # its own advisor server, all pointed at ONE state dir, so the cap has to survive the
+    # process that made the first call.
+    adv["env"]["QA_ADVISOR_MAX_CALLS"] = "1"
+    rc, out = ask_in_process(adv, "q1")
+    assert rc == 0 and out.startswith("OK ADVICE (") and "call 1 of 1" in out
+    rc, out = ask_in_process(adv, "q2")
+    assert rc == 3
+    assert "Unavailable: the budget of 1 advisor calls for this run is spent" in out
+    assert (adv["state"] / "count").read_text() == "1"       # the second call spent nothing
+    assert len(records(adv["state"])) == 1                   # and never reached claude
+    assert not list(adv["calls"].glob("argv.2"))
 
 
 @posix_only

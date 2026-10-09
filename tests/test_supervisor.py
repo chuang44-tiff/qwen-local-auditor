@@ -1217,3 +1217,127 @@ def test_probe_make_failure_cleans_up(env, monkeypatch):
     assert not (run_dir / supervisor.probe.RUN_MARKER).exists()
     assert (run_dir / "report.md").is_file()
     assert "error:" in (run_dir / "report.md").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- --advisor
+
+def test_advisor_rounds_share_one_state_dir(env, capsys):
+    # ONE state dir for the whole loop, so ONE QWEN_ADVISOR_MAX_CALLS budget: a round
+    # that made its own would restart the count and let the run ask over and over.
+    repo, task, tmp = env
+    script(tmp, [{"result": "tried"}, {"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--advisor", "opus") == 0
+    assert ("until-done: advisor opus via your claude login for every coder round; "
+            "at most 4 calls across the whole run") in capsys.readouterr().err
+    c = calls(tmp)
+    assert len(c) == 2
+    dirs = set()
+    for argv in c:
+        assert argv.count("--advisor") == 1 and argv[argv.index("--advisor") + 1] == "opus"
+        dirs.add(argv[argv.index("--advisor-state") + 1])
+    assert len(dirs) == 1
+    assert not os.path.exists(dirs.pop())               # no leftover state dir either
+
+
+def test_advisor_is_not_given_to_the_deviation_audit(env):
+    # The audit is a read-only call over the whole diff that nobody asked the advisor
+    # about: no advisor tool for it, and no way for it to spend the run's budget.
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}},
+                 {"result": "NO CONTRADICTIONS"}])
+    assert supervisor.main(["--task", str(task), "--repo", str(repo), "--agent", PY,
+                            "--agent", FAKE, "--advisor", "opus"]) == 0
+    c = calls(tmp)
+    coder = [a for a in c if a[a.index("-r") + 1] == "coder"]
+    audit = [a for a in c if a[a.index("-r") + 1] == "auditor"]
+    assert len(coder) == 1 and len(audit) == 1
+    assert "--advisor" in coder[0] and "--advisor-state" in coder[0]
+    assert "--advisor" not in audit[0] and "--advisor-state" not in audit[0]
+
+
+def test_advisor_report_section(env):
+    # What the one budget spent, over every round of the run: two calls, one answered
+    # (0.5) and one that came back unavailable (no cost to add).
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"},
+                  "advisor": [{"n": 1, "model": "opus", "seconds": 2.0, "cost_usd": 0.5,
+                               "unavailable": None},
+                              {"n": 2, "model": "opus", "seconds": 1.0, "cost_usd": None,
+                               "unavailable": "no answer within 600s"}]}])
+    assert sup(repo, task, "--advisor", "opus") == 0
+    text = _report_text(tmp)
+    assert "## Advisor" in text
+    assert "model: opus" in text and "budget: 4" in text
+    assert "calls: 2" in text and "cost_usd: 0.5" in text and "unavailable: 1" in text
+
+
+def test_no_advisor_no_report_section(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task) == 0
+    assert "## Advisor" not in _report_text(tmp)
+    assert all("--advisor" not in a for a in calls(tmp))
+
+
+def _raise_on_call(monkeypatch, n, exc):
+    """The n-th call_agent raises EXC; every other round runs the fake agent for real."""
+    real = supervisor.call_agent
+    seen = {"n": 0}
+
+    def flaky(*a, **k):
+        seen["n"] += 1
+        if seen["n"] == n:
+            raise exc
+        return real(*a, **k)
+    monkeypatch.setattr(supervisor, "call_agent", flaky)
+
+
+ASKED = [{"n": 1, "model": "opus", "seconds": 2.0, "cost_usd": 0.5, "unavailable": None}]
+
+
+def test_stale_advisor_lock_is_cleared_after_a_round(env):
+    # A round killed in the middle of an ask leaves the advisor's lock in the ONE state
+    # dir, and advisor_mcp breaks a stale one only after wait + 60 s (~660 s at the
+    # default timeout): the next round would sit on it that long before it could ask.
+    # call_agent returning means the round's agent process has exited, so the lock can
+    # only be a dead one -- the supervisor removes it before starting the next round.
+    repo, task, tmp = env
+    script(tmp, [{"result": "tried", "advisor_lock": True},
+                 {"result": "fixed", "advisor_lock": False, "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--advisor", "opus") == 0
+    # Round 1 found no lock and left one behind (the killed ask); round 2 started with
+    # none. Both halves of each line are read, so the run cannot pass by never making
+    # the lock in the first place.
+    locks = [json.loads(l) for l in (tmp / "record.jsonl.locks").read_text().splitlines()]
+    assert locks == [{"found": False, "left": True}, {"found": False, "left": False}]
+
+
+def test_advisor_dir_removed_when_a_round_raises(env, monkeypatch):
+    # A round that dies with an unexpected error ends the run on the crash path, which
+    # reports (under --probe, the only crash path that keeps going) and then sweeps the
+    # run's advisor state: a later run must not find this run's counter and call log.
+    repo, task, tmp = env
+    script(tmp, [{"result": "tried", "advisor": ASKED}, {"result": "fixed"}])
+    _raise_on_call(monkeypatch, 2, RuntimeError("the round died"))
+    assert sup(repo, task, "--advisor", "opus", "--probe") == 8
+    argv = calls(tmp)[0]                           # the round that got to run made the call
+    state = argv[argv.index("--advisor-state") + 1]
+    assert not os.path.exists(state), "the crashed run left its advisor counter behind"
+    text = _report_text(tmp)
+    assert "## Advisor" in text and "calls: 1" in text and "cost_usd: 0.5" in text
+    assert "error: RuntimeError" in text
+
+
+def test_advisor_dir_removed_on_keyboard_interrupt(env, monkeypatch):
+    # Ctrl-C on the way out of a round: the 130 path still says what the advisor spent
+    # (the report is written while the state dir is alive) and the dir goes with the run.
+    repo, task, tmp = env
+    script(tmp, [{"result": "tried", "advisor": ASKED}, {"result": "fixed"}])
+    _raise_on_call(monkeypatch, 2, KeyboardInterrupt())
+    assert sup(repo, task, "--advisor", "opus") == 130
+    argv = calls(tmp)[0]
+    state = argv[argv.index("--advisor-state") + 1]
+    assert not os.path.exists(state), "the interrupted run left its advisor counter behind"
+    text = _report_text(tmp)
+    assert "stop: interrupted (exit 130)" in text
+    assert "## Advisor" in text and "calls: 1" in text and "cost_usd: 0.5" in text

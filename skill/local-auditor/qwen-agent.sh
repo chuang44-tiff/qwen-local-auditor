@@ -131,6 +131,8 @@ ADVISOR_FLAG=""     # the typed --advisor value ("off" is accepted and means non
 ADVISOR_DIR=""      # the run's private advisor state (call counter, lock, calls.jsonl)
 ADVISOR_MCP=""      # its one-server MCP config, passed as one more --mcp-config
 ADVISOR_LOG=""      # QWEN_OUTDIR/advisor-<stamp>-<pid>.md: every question and answer
+ADVISOR_STATE=""    # --advisor-state DIR: the supervisor's state dir shared by every round (internal)
+ADVISOR_DIR_OWN=0   # 1 only when this run mktemp'd ADVISOR_DIR itself; only then may cleanup remove it
 BROWSER_DIR=""      # the browser run folder: made just before claude starts, kept after
                     # the run -- it is the evidence
 BROWSER_ROOT=""     # its parent (QWEN_BROWSER_DIR or the cache dir), resolved against the
@@ -508,9 +510,15 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
                        for. Implies --browser.
       --advisor MODEL  Let the session ask a Claude model (opus, sonnet, or an id) for
                        advice through your own claude login: one tool, ask, with no tools
-                       of its own. Typed flag only (no env var); not with --until-done. At most
+                       of its own. Typed flag only (no env var). At most
                        QWEN_ADVISOR_MAX_CALLS calls (4) per run, QWEN_ADVISOR_TIMEOUT
-                       seconds (600) each. Questions and attached files leave this machine.
+                       seconds (600) each. Allowed with --until-done: every coder round
+                       gets the advisor through ONE budget shared by the whole run, and
+                       the deviation audit never gets it. Questions and attached files
+                       leave this machine.
+      --advisor-state DIR
+                       internal: used by --until-done (the supervisor hands its one
+                       shared advisor state dir to each coder round)
       --scenarios FILE Scripted UI suite for the tester: implies --browser and
                        -r tester. The file (format: reference/qwen-agent.md,
                        "Scripted UI suites") is validated FIRST -- a parse error
@@ -1014,6 +1022,9 @@ while [ $# -gt 0 ]; do
     --advisor)            need_arg "$1" $(($#-1))
                           [ -n "$2" ] || { die "--advisor needs a model (opus, sonnet, a model id, or off)"; exit $QA_USAGE; }
                           ADVISOR_FLAG="$2"; shift 2 ;;
+    --advisor-state)      need_arg "$1" $(($#-1))
+                          [ -n "$2" ] || { die "--advisor-state needs a directory"; exit $QA_USAGE; }
+                          ADVISOR_STATE="$2"; shift 2 ;;
     --scenarios)          need_arg "$1" $(($#-1))
                           # The same empty-value trap as --mcp-config: an empty
                           # path would survive every later [ -n "$SCENARIOS" ] as
@@ -1103,7 +1114,9 @@ if [ "$SHALLOW" -eq 1 ] && [ "$DEEP" -eq 1 ]; then
   exit $QA_USAGE
 fi
 # Only the typed flag turns the advisor on (v1): no env var or config line can, so no
-# sweep, swarm or --until-done child, and no shell profile, sends code out unasked.
+# sweep, swarm or shell profile sends code out unasked. An --until-done run asks ONCE
+# for all its rounds (the supervisor hands --advisor to each coder round, never to
+# the deviation audit); nothing under the loop turns it on by itself.
 ADVISOR="$ADVISOR_FLAG"
 [ "$ADVISOR" = off ] && ADVISOR=""
 case "$ADVISOR" in
@@ -1193,6 +1206,9 @@ if [ "$INTERACTIVE" -eq 1 ]; then
       # interactive session never gets), so it would be silently dropped.
       --mcp-config|--mcp-config=*)       _ia_refuse "--mcp-config" ;;
       --advisor|--advisor=*)             _ia_refuse "--advisor" ;;
+      # Internal flag of the until-done supervisor; an interactive run has no rounds
+      # to hand a shared state dir to, exactly like --advisor itself.
+      --advisor-state|--advisor-state=*) _ia_refuse "--advisor-state" ;;
       # --browser writes its own MCP config and grants its tools as a headless run
       # does; an interactive session passes neither, so the browser would not come.
       --browser|--browser=*)             _ia_refuse "--browser" ;;
@@ -1201,6 +1217,23 @@ if [ "$INTERACTIVE" -eq 1 ]; then
     esac
   done
   unset _a
+fi
+
+# --------------------------------------------------- --advisor-state validation
+# INTERNAL flag: the --until-done supervisor makes ONE advisor state directory for
+# the run and hands it to each coder round (with --advisor), so all rounds share
+# one call budget. Typed by hand it changes nothing a --advisor run does not,
+# except surviving this run -- refuse where the message can say so. A typed
+# --advisor-state under --until-done is refused in that block below.
+if [ -n "$ADVISOR_STATE" ]; then
+  [ -n "$ADVISOR" ] || { die "--advisor-state needs --advisor"; exit $QA_USAGE; }
+  # Absolute before the -C chdir: the setup block writes its MCP config into this
+  # directory AFTER any cd, and the supervisor's path must survive the round's -C.
+  case "$ADVISOR_STATE" in /*|[A-Za-z]:*) ;; *) ADVISOR_STATE="$PWD/$ADVISOR_STATE" ;; esac
+  # The supervisor is Python: its temp directory arrives in the Windows spelling, and
+  # the -d check and the config written inside it want this shell's own (physical_dir).
+  command -v cygpath >/dev/null 2>&1 && ADVISOR_STATE="$(cygpath -u "$ADVISOR_STATE")"
+  [ -d "$ADVISOR_STATE" ] || { die "--advisor-state: not a directory: $ADVISOR_STATE"; exit $QA_USAGE; }
 fi
 
 # --------------------------------------------------------- --browser refusals
@@ -1383,8 +1416,12 @@ fi
 if [ -n "$UNTIL_DONE" ]; then
   _ud_refuse() { die "--until-done takes its prompt from TASK and owns -f/--resume/-o/--json per round; drop $1"; exit $QA_USAGE; }
   [ "$PROMPT_SET" -eq 0 ] || _ud_refuse "the prompt"
-  # every round is its own qwen-agent with its own advisor budget: not in v1
-  [ -n "$ADVISOR" ] && { die "--until-done cannot be combined with --advisor (each round would get its own budget); drop --advisor"; exit $QA_USAGE; }
+  # --advisor is allowed: it goes to the SUPERVISOR (--advisor below), which makes
+  # one shared state dir for the whole run and hands --advisor/--advisor-state to
+  # every coder round -- one QWEN_ADVISOR_MAX_CALLS budget for all rounds, never a
+  # separate one per round. --advisor-state is the supervisor's own flag: typed, it
+  # would aim the rounds at a directory no supervisor made for this run.
+  [ -z "$ADVISOR_STATE" ] || { die "--until-done: --advisor-state is passed by the supervisor to its own rounds; drop --advisor-state"; exit $QA_USAGE; }
   FWD=()
   _skip=0
   for a in ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}; do
@@ -1411,6 +1448,12 @@ if [ -n "$UNTIL_DONE" ]; then
       # harness's, not the caller's to retarget per loop.
       --mcp-config|--mcp-config=*)
         _ud_refuse "--mcp-config" ;;
+      # The advisor belongs to the supervisor, not to the rounds' passthrough: it
+      # appends --advisor and its own --advisor-state to each coder call itself.
+      # Forwarding it through FWD would hand the deviation audit an advisor too --
+      # the audit's passthrough is derived from this one.
+      --advisor)          _skip=1 ;;
+      --advisor=*)        ;;
       # One review round after the checks pass is the supervisor's, not each round's.
       --review-round) ;;
       # The supervisor owns the probe sandbox: one for the whole loop. Each round runs
@@ -1482,6 +1525,10 @@ if [ -n "$UNTIL_DONE" ]; then
   [ "$PROBE" -eq 1 ] && SUP_ARGS+=(--probe)
   [ "$KEEP_SANDBOX" -eq 1 ] && SUP_ARGS+=(--keep-sandbox)
   SUP_ARGS+=(--depth "$DEPTH_MODE")
+  # The advisor goes to the supervisor as its own option, never through FWD: the loop
+  # hands --advisor --advisor-state to each coder round itself, and the deviation audit
+  # keeps the passthrough without it (see the FWD scan above).
+  [ -n "$ADVISOR" ] && SUP_ARGS+=(--advisor "$ADVISOR")
   [ "$DEEP" -eq 1 ] && FWD+=(--role-variant deep --subagents-push)
   resolve_py || { die "no working Python 3.8+ found (set QWEN_PYTHON)"; exit $QA_HARNESS; }
   # The supervisor is exec'd, not sourced: it only sees EXPORTED variables. The
@@ -1493,6 +1540,11 @@ if [ -n "$UNTIL_DONE" ]; then
   [ -n "${QWEN_TEST_MAX_BYTES:-}" ] && export QWEN_TEST_MAX_BYTES
   [ -n "${QWEN_TEST_WORKTREES:-}" ] && export QWEN_TEST_WORKTREES
   [ -n "${QWEN_AGENT_STATE:-}" ] && export QWEN_AGENT_STATE
+  # The advisor knobs too: every round is a fresh qwen-agent, and a budget or a claude
+  # path set in THIS run's config must be the same in all of them through the state dir.
+  [ -n "${QWEN_ADVISOR_MAX_CALLS:-}" ] && export QWEN_ADVISOR_MAX_CALLS
+  [ -n "${QWEN_ADVISOR_TIMEOUT:-}" ] && export QWEN_ADVISOR_TIMEOUT
+  [ -n "${QWEN_ADVISOR_CLAUDE:-}" ] && export QWEN_ADVISOR_CLAUDE
   case "$UNTIL_DONE" in /*|[A-Za-z]:*) ;; *) UNTIL_DONE="$PWD/$UNTIL_DONE" ;; esac
   case "${WORKDIR:-.}" in /*|[A-Za-z]:*) SUP_REPO="${WORKDIR:-.}" ;; *) SUP_REPO="$PWD/$WORKDIR" ;; esac
   # bash (not $0's interpreter guess): the forwarder execs `bash qwen-agent.sh`, keep that.
@@ -1901,7 +1953,10 @@ fi
 
 # shellcheck disable=SC2329  # invoked via trap
 cleanup() {
-  [ -n "${ADVISOR_DIR:-}" ] && rm -rf "$ADVISOR_DIR"
+  # only a directory this run created: with --advisor-state the supervisor owns it and
+  # every other round is still using it. (ADVISOR_DIR_OWN guards the second, unconditional
+  # `trap cleanup EXIT` further down, which fires even when the mktemp branch never ran.)
+  [ "${ADVISOR_DIR_OWN:-0}" = 1 ] && [ -n "${ADVISOR_DIR:-}" ] && rm -rf "$ADVISOR_DIR"
   [ -n "${TMPD:-}" ] && rm -rf "$TMPD"
   [ -n "${TEST_WT:-}" ] && skill_py testrun.py --cleanup "$(native_path "$TEST_REPO")" "$(native_path "$TEST_WT")" >/dev/null 2>&1
   if [ -n "${PROBE_RUN:-}" ] && [ "$KEEP_SANDBOX" -eq 0 ]; then
@@ -2477,9 +2532,20 @@ fi
 # person's own claude login (lib/advisor_mcp.py). Its state dir is private and shared by
 # every session of this run (first answer, review round, subagents), so the budget is too.
 if [ -n "$ADVISOR" ] && [ "$INTERACTIVE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-  ADVISOR_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qwen-advisor.XXXXXXXX")" || { die "--advisor: mktemp failed"; exit $QA_HARNESS; }
-  trap cleanup EXIT
-  ADVISOR_MCP="$ADVISOR_DIR/advisor.json"
+  if [ -n "$ADVISOR_STATE" ]; then
+    # A round of an --until-done run: the supervisor owns this directory and its budget
+    # (count, lock, calls.jsonl), so this session writes only its own MCP config in here
+    # -- one per PID, so two rounds never land on one file -- and cleanup keeps the rest.
+    ADVISOR_DIR="$ADVISOR_STATE"
+    ADVISOR_MCP="$ADVISOR_DIR/advisor-$$.json"
+    _adv_scope="across this --until-done run"
+  else
+    ADVISOR_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qwen-advisor.XXXXXXXX")" || { die "--advisor: mktemp failed"; exit $QA_HARNESS; }
+    ADVISOR_DIR_OWN=1
+    trap cleanup EXIT
+    ADVISOR_MCP="$ADVISOR_DIR/advisor.json"
+    _adv_scope="this run"
+  fi
   # The log never lands in the tree under audit: QWEN_OUTDIR when the caller set it,
   # else the cache (QWEN_OUTDIR otherwise defaults to the caller's cwd, often the repo).
   if [ "$QWEN_OUTDIR_SET" -eq 1 ]; then _adv_logdir="$QWEN_OUTDIR"
@@ -2521,13 +2587,13 @@ PY
     die "--advisor: could not write the MCP config: $ADVISOR_MCP"; exit $QA_HARNESS
   fi
   TOOLS="${TOOLS:+$TOOLS,}mcp__qla_advisor__ask"
-  _adv_note="You can ask a stronger model for advice with the \`ask\` tool (at most $_adv_max times this run). Ask when you face a decision you cannot settle with a probe: contradictory evidence, a claim you are about to drop or keep but are unsure of, or a design choice with real trade-offs. Do not ask it to find bugs for you or to read the codebase: it sees only what you send. Send one self-contained question, the evidence, and the 1-3 files that matter. Treat its answer as advice: verify any claim it makes before you rely on it. Your answer has an ADVISOR section listing each question, the advice, and what you did with it."
+  _adv_note="You can ask a stronger model for advice with the \`ask\` tool (at most $_adv_max calls $_adv_scope). Ask when you face a decision you cannot settle with a probe: contradictory evidence, a claim you are about to drop or keep but are unsure of, or a design choice with real trade-offs. Do not ask it to find bugs for you or to read the codebase: it sees only what you send. Send one self-contained question, the evidence, and the 1-3 files that matter. Treat its answer as advice: verify any claim it makes before you rely on it. Your answer has an ADVISOR section listing each question, the advice, and what you did with it."
   if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
 
 $_adv_note"; else SYSTEM="$_adv_note"; fi
   # die, not note: -q must not hide that code leaves this machine.
-  die "advisor: $ADVISOR via your claude login. Questions and up to 120 KB of attached files per call leave this machine; at most $_adv_max calls this run (log: $(native_path "$ADVISOR_LOG"))"
-  unset _adv_note _adv_to _adv_bin _adv_res _adv_logdir
+  die "advisor: $ADVISOR via your claude login. Questions and up to 120 KB of attached files per call leave this machine; at most $_adv_max calls $_adv_scope (log: $(native_path "$ADVISOR_LOG"))"
+  unset _adv_note _adv_to _adv_bin _adv_res _adv_logdir _adv_scope
 fi
 
 # --------------------------------------------------- build the claude argv

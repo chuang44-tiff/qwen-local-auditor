@@ -130,6 +130,15 @@ disk).
 | `--budget-tokens N`, `--budget-seconds N` | stop early when spent |
 | `--allow-dirty` | start even with uncommitted changes |
 | `--no-deviation-audit` | skip the spec-vs-diff audit after the checks pass |
+| `--advisor MODEL` | every coder round may ask a Claude model for advice |
+
+`--advisor MODEL` is allowed with the loop (typed, as ever): the supervisor makes one
+advisor state directory for the run and hands it to every coder round, so all rounds
+draw on ONE `QWEN_ADVISOR_MAX_CALLS` budget between them instead of one each, and the
+deviation audit is called without the advisor — it never spends it and never sends the
+diff out on a call nobody asked it to make. Questions and the files a round attaches
+leave this machine; `report.md` gets a `## Advisor` section with the model, the budget,
+how many calls the run made, their total cost and how many came back unavailable.
 
 ### Depth: the rounds are deep by default
 

@@ -111,7 +111,7 @@ def _backoff():
 
 
 def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", test=True,
-               probe_here=False):
+               probe_here=False, advisor=None):
     # --shallow goes on the command line, not only into the environment below:
     # qwen-agent reads its config file AFTER the environment, so a QWEN_DEPTH=deep
     # sitting in the config would otherwise re-imply depth (a review round, a
@@ -127,6 +127,12 @@ def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", tes
     if session:
         argv += ["--resume", session]
     argv += list(passthrough)
+    if advisor:
+        # (model, state dir). Typed AFTER the passthrough on purpose: the advisor is the
+        # loop's own arrangement -- one state dir, so ONE QWEN_ADVISOR_MAX_CALLS budget
+        # for every round of the run -- and the deviation audit is called without it, so
+        # the read-only audit never gets a cloud call of its own.
+        argv += ["--advisor", advisor[0], "--advisor-state", advisor[1]]
     for delay in [0] + _backoff():
         time.sleep(delay)
         rc, out, err = _run_agent(argv)
@@ -373,8 +379,32 @@ def _tool_totals(repo, session):
     return counts
 
 
+def _advisor_budget():
+    """The call budget the advisor server enforces, as this run would state it."""
+    return os.environ.get("QWEN_ADVISOR_MAX_CALLS") or "4"
+
+
+def _advisor_lines(advisor):
+    """report.md's advisor lines for (model, state dir), read from the ONE state dir
+    every coder round of this run wrote into: the counts are for the whole run, not for
+    the last round. A call log that cannot be read is no calls, never a run failure."""
+    model, state_dir = advisor
+    recs = []
+    try:
+        with open(os.path.join(state_dir, "calls.jsonl"), encoding="utf-8") as fh:
+            recs = [json.loads(line) for line in fh if line.strip()]
+    except (OSError, ValueError):
+        recs = []
+    return ["model: %s" % model,
+            "budget: %s" % _advisor_budget(),
+            "calls: %d" % len(recs),
+            "cost_usd: %g" % sum(r.get("cost_usd") or 0 for r in recs),
+            "unavailable: %d" % sum(1 for r in recs if r.get("unavailable"))]
+
+
 def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, start, repo, denied=(),
-            agent_err="", notes=(), tools=None, transcript_found=False, switches=(), depth=None):
+            agent_err="", notes=(), tools=None, transcript_found=False, switches=(), depth=None,
+            advisor=None):
     diff = _git(repo, "diff", start)
     new = _new_files(repo)
     for rel in new:
@@ -403,6 +433,8 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
         *(["switches: %s" % ", ".join(switches)] if switches else []), "",
         "## Checklist", "", "| # | item | status | evidence |", "|---|---|---|---|", *rows, "",
         "## Tool use", "", *tool_lines, "",
+        # Only an --advisor run gets the section: what the option spent, over every round.
+        *(["## Advisor", "", *_advisor_lines(advisor), ""] if advisor else []),
         "## Decision log", "", decisions.render(log), "",
         "## Diff", "", "```", _git(repo, "diff", "--stat", start).rstrip(), "```",
         *(["new files:"] + ["  %s" % f for f in new] if new else []),
@@ -535,6 +567,7 @@ def _run(o):
     # holder's lock on its way out.
     mine = False
     run_dir = session = None
+    advisor_dir = None                # --advisor: this run's ONE advisor state dir (finally removes it)
     report_path = None                # the report.md of this run, once written (what a
                                       # late cleanup failure adds its note to)
     rounds = tokens = 0
@@ -596,6 +629,12 @@ def _run(o):
             if not gone:
                 return str(sb if sb is not None else run_dir)
         return None
+
+    def advisor_info():
+        """(model, state dir) for report.md's advisor section, or None without --advisor.
+        Read when the report is written and not after: the finally removes the directory,
+        and every path that leaves this run (including the os._exit one) reports first."""
+        return (o.advisor, advisor_dir) if advisor_dir is not None else None
     try:
         # The handler in _stop_on_signal is not enough on its own: a signal
         # landing between the mkdir and `mine = True` would run the cleanup
@@ -634,6 +673,17 @@ def _run(o):
             k += 1
             run_dir = "%s-%d" % (base, k)
         os.makedirs(run_dir)
+        if o.advisor:
+            # ONE state dir for the whole loop, handed to every coder round: the budget
+            # and the call log are shared, so QWEN_ADVISOR_MAX_CALLS caps the run rather
+            # than each round (a round of its own would restart the count). Made here,
+            # before the first round, and removed in the finally below once report.md has
+            # read it. Outside the repo and outside run_dir: qwen-test's worktree and the
+            # rounds' cwd must not find a cloud-facing tool lying around.
+            advisor_dir = tempfile.mkdtemp(prefix="qwen-advisor-run-")
+            print("until-done: advisor %s via your claude login for every coder round; "
+                  "at most %s calls across the whole run" % (o.advisor, _advisor_budget()),
+                  file=sys.stderr)
         if o.probe:
             # probe.check() and probe.remove() only accept a run folder carrying create()'s
             # marker; this run owns run_dir, so drop it in before the sandbox under it.
@@ -654,7 +704,7 @@ def _run(o):
                                code=EXIT_HARNESS, rounds=rounds, session=session,
                                tokens=tokens, results=results, log=log, start=start,
                                repo=run_dir, denied=denied, switches=_switches(o),
-                               depth=getattr(o, "depth", None))
+                               depth=getattr(o, "depth", None), advisor=advisor_info())
                 report_path = path
                 print("report: %s" % path)
                 return EXIT_HARNESS
@@ -672,7 +722,18 @@ def _run(o):
             ppath = os.path.join(run_dir, "round-%d.prompt.md" % rounds)
             _write(ppath, prompt)
             sig_before = _tree_sig(repo)
-            r = call_agent(o.agent, repo, ppath, session, o.passthrough, probe_here=o.probe)
+            r = call_agent(o.agent, repo, ppath, session, o.passthrough, probe_here=o.probe,
+                           # every coder round -- and the review round, which is a round --
+                           # asks the same advisor through the same state dir
+                           advisor=advisor_info())
+            # A round killed in the middle of an ask leaves the advisor's lock in the
+            # state dir, and advisor_mcp breaks a stale one only after wait + 60 s
+            # (~660 s with the default timeout): every later round would sit on it that
+            # long before it could ask. This call_agent has returned, so the round's
+            # agent process is gone and no ask can be in flight -- a lock here is dead.
+            if advisor_dir is not None:
+                with contextlib.suppress(OSError):
+                    os.rmdir(os.path.join(advisor_dir, "lock"))
             # The tree as the agent left it, taken once and before any check runs:
             # a `cmd` check runs in the live repo, so one that writes a file would
             # otherwise make a round that changed nothing look like progress.
@@ -808,7 +869,8 @@ def _run(o):
                        tokens=tokens, results=results, log=log, start=start, repo=repo,
                        denied=denied, agent_err=agent_err, notes=notes,
                        tools=tool_totals, transcript_found=transcript_found,
-                       switches=_switches(o), depth=getattr(o, "depth", None))
+                       switches=_switches(o), depth=getattr(o, "depth", None),
+                       advisor=advisor_info())
         report_path = path
         print("until-done: %s after %d round(s); session %s" % (reason, rounds, session or "-"))
         if patch:
@@ -835,7 +897,8 @@ def _run(o):
                            repo=run_dir if (o.probe and sb is None) else repo,
                            denied=denied, notes=notes,
                            tools=tool_totals, transcript_found=transcript_found,
-                           switches=_switches(o), depth=getattr(o, "depth", None))
+                           switches=_switches(o), depth=getattr(o, "depth", None),
+                           advisor=advisor_info())
             report_path = path
             # A dead terminal (the window closed under the run) must not turn
             # the interrupt into exit 1: an OSError escaping this handler would
@@ -873,6 +936,10 @@ def _run(o):
                     print("sandbox not removed: %s" % leftover, file=sys.stderr)
             if mine:
                 shutil.rmtree(lock, ignore_errors=True)
+            # The advisor's counter, lock and call log are this run's alone: whatever
+            # exits, they go with it (the same sweep the finally below makes).
+            if advisor_dir is not None:
+                shutil.rmtree(advisor_dir, ignore_errors=True)
             os._exit(EXIT_INTERRUPTED)
         return EXIT_INTERRUPTED
     except Exception as exc:
@@ -896,7 +963,8 @@ def _run(o):
                        repo=repo if sb is not None else run_dir,
                        denied=denied, agent_err=agent_err, notes=notes,
                        tools=tool_totals, transcript_found=transcript_found,
-                       switches=_switches(o), depth=getattr(o, "depth", None))
+                       switches=_switches(o), depth=getattr(o, "depth", None),
+                       advisor=advisor_info())
         report_path = path
         with contextlib.suppress(OSError):
             if patch:
@@ -916,6 +984,11 @@ def _run(o):
                 print("sandbox not removed: %s" % leftover, file=sys.stderr)
         if mine:
             shutil.rmtree(lock, ignore_errors=True)
+        # The advisor state dir outlives the loop only until report.md has read it: no
+        # exit path (limit, done, interrupt, crash) leaves a run's counter and call log
+        # behind, and every one of them reports before it gets here.
+        if advisor_dir is not None:
+            shutil.rmtree(advisor_dir, ignore_errors=True)
 
 
 def _stop_on_signal(signum, frame):
@@ -992,6 +1065,10 @@ def main(argv=None):
     # --shallow and QWEN_DEPTH=shallow (see _run_agent), so a round never implies
     # a depth switch of its own.
     ap.add_argument("--depth", choices=("default", "deep", "shallow"), default=None)
+    # The advisor model, typed by the caller and given to THIS loop: the loop makes one
+    # state dir and hands it to every coder round, so one budget covers the run. It is
+    # not part of the passthrough (that would put it in the deviation audit's call too).
+    ap.add_argument("--advisor", default=None)
     try:
         o = ap.parse_args(argv)
     except SystemExit:

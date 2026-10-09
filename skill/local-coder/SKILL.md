@@ -46,6 +46,9 @@ round after the checks first pass, and subagent delegation — `--probe` is NOT 
 for a coding loop and stays typed: it runs the whole loop in a sandbox and returns a
 `patch:` instead of editing your tree. `--shallow` restores the plain loop; `--deep`
 types all four (`reference/coding.md`, "Depth: the rounds are deep by default").
+`--advisor MODEL` lets every round ask a Claude model for advice through your `claude`
+login on ONE budget for the run (`QWEN_ADVISOR_MAX_CALLS`, default 4, the deviation audit
+never gets it); the code and questions it sends leave this machine.
 
 ## 3. Read the result
 
