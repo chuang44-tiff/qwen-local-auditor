@@ -1,0 +1,2 @@
+Fixture for the ui-confirm acceptance suite.
+The upload scenario must show this file name and its size in bytes.

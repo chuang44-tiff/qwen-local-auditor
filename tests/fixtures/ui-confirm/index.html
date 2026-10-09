@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Signal workbench</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; margin: 24px; color: #1d1d1f; background: #fafafa; }
+  section { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px;
+            margin: 0 0 16px; max-width: 640px; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  h2 { font-size: 17px; margin: 0 0 8px; }
+  canvas { border: 1px solid #ccc; display: block; background: #fff; }
+  .stage { position: relative; width: 302px; height: 202px; }
+  .stage canvas { position: absolute; left: 0; top: 0; }
+  .corner { position: absolute; width: 24px; height: 24px; margin: -12px 0 0 -12px; padding: 0;
+            border-radius: 50%; border: 1px solid #888; background: #fff; font-size: 11px;
+            cursor: crosshair; }
+  .hint { color: #666; font-size: 13px; margin: 4px 0 8px; }
+</style>
+</head>
+<body>
+<h1>Signal workbench</h1>
+<p id="status">Loading...</p>
+
+<section id="wave-section">
+  <h2>Waveform</h2>
+  <canvas id="wave" width="300" height="120" aria-label="Waveform"></canvas>
+  <p>
+    <button id="gain-down" type="button">Gain -</button>
+    <button id="gain-up" type="button">Gain +</button>
+    <span id="gain-readout">Gain 1.00</span>
+  </p>
+</section>
+
+<section id="shape-section">
+  <h2>Shapes</h2>
+  <p class="hint">Click the corner points to add corners. Double-click the last corner to close
+    the shape.</p>
+  <div class="stage" id="stage">
+    <canvas id="shape" width="300" height="200" aria-label="Shape canvas"></canvas>
+  </div>
+  <p id="shape-status">Corners: 0 (open)</p>
+  <p id="shape-message" class="hint"></p>
+  <button id="shape-clear" type="button">Clear shape</button>
+</section>
+
+<section id="data-section">
+  <h2>Data</h2>
+  <p id="data-status">Data: loading...</p>
+</section>
+
+<section id="upload-section">
+  <h2>Upload</h2>
+  <label for="upload">Notes file</label>
+  <input id="upload" type="file">
+  <p id="upload-status">No file uploaded</p>
+</section>
+
+<section id="items-section">
+  <h2>Items</h2>
+  <button id="add-item" type="button">Add item</button>
+  <span id="item-count">Items: 0</span>
+</section>
+
+<script>
+(function () {
+  "use strict";
+
+  var state = {
+    ready: false,
+    gain: 1.0,
+    renders: 0,
+    canvasHash: "",
+    polygon: { points: [], closed: false },
+    data: null,
+    upload: null,
+    items: 0,
+    uncaughtErrors: 0
+  };
+  window.appState = state;
+
+  window.addEventListener("error", function () { state.uncaughtErrors += 1; });
+  window.addEventListener("unhandledrejection", function () { state.uncaughtErrors += 1; });
+
+  function $(id) { return document.getElementById(id); }
+
+  // ------------------------------------------------------------------ waveform
+  function hashPixels(ctx, w, h) {
+    var d = ctx.getImageData(0, 0, w, h).data, x = 2166136261;
+    for (var i = 0; i < d.length; i++) {
+      x ^= d[i];
+      x = Math.imul(x, 16777619) >>> 0;
+    }
+    return ("00000000" + x.toString(16)).slice(-8);
+  }
+
+  function drawWave() {
+    var c = $("wave"), ctx = c.getContext("2d", { willReadFrequently: true }), w = c.width, h = c.height;
+    var amp = 40 + (state.gain - 1) * 20;
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = "#e4e4e4";
+    ctx.lineWidth = 1;
+    for (var gx = 0; gx <= w; gx += 30) {
+      ctx.beginPath(); ctx.moveTo(gx + 0.5, 0); ctx.lineTo(gx + 0.5, h); ctx.stroke();
+    }
+    ctx.beginPath(); ctx.moveTo(0, h / 2 + 0.5); ctx.lineTo(w, h / 2 + 0.5); ctx.stroke();
+    ctx.strokeStyle = "#2a6fdb";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (var x = 0; x <= w; x++) {
+      var y = h / 2 - amp * Math.sin((x / w) * Math.PI * 4);
+      if (x === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
+    }
+    ctx.stroke();
+    state.renders += 1;
+    state.canvasHash = hashPixels(ctx, w, h);
+  }
+
+  function setGain(g) {
+    state.gain = Math.round(Math.min(2, Math.max(0.5, g)) * 100) / 100;
+    $("gain-readout").textContent = "Gain " + state.gain.toFixed(2);
+    drawWave();
+  }
+
+  $("gain-up").addEventListener("click", function () { setGain(state.gain + 0.02); });
+  $("gain-down").addEventListener("click", function () { setGain(state.gain - 0.02); });
+
+  // -------------------------------------------------------------------- shapes
+  var CORNERS = [
+    ["A", 50, 40], ["B", 150, 40], ["C", 250, 40],
+    ["D", 50, 100], ["E", 150, 100], ["F", 250, 100],
+    ["G", 50, 160], ["H", 150, 160], ["I", 250, 160]
+  ];
+
+  function drawShape() {
+    var c = $("shape"), ctx = c.getContext("2d"), pts = state.polygon.points;
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (pts.length) {
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (var i = 1; i < pts.length; i++) { ctx.lineTo(pts[i].x, pts[i].y); }
+      if (state.polygon.closed) {
+        ctx.closePath();
+        ctx.fillStyle = "rgba(42, 111, 219, 0.06)";
+        ctx.fill();
+      }
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    $("shape-status").textContent = "Corners: " + pts.length +
+      (state.polygon.closed ? " (closed)" : " (open)");
+  }
+
+  function say(text) { $("shape-message").textContent = text; }
+
+  function addCorner(name, x, y) {
+    if (state.polygon.closed) { say("The shape is closed. Clear it to start again."); return; }
+    for (var i = 0; i < state.polygon.points.length; i++) {
+      if (state.polygon.points[i].name === name) { say("Corner " + name + " is already used."); return; }
+    }
+    state.polygon.points.push({ name: name, x: x, y: y });
+    say("");
+    drawShape();
+  }
+
+  function closeShape() {
+    if (state.polygon.closed) { return; }
+    if (state.polygon.points.length < 3) { say("A shape needs at least 3 corners."); return; }
+    state.polygon.closed = true;
+    say("");
+    drawShape();
+  }
+
+  CORNERS.forEach(function (c) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "corner";
+    b.id = "corner-" + c[0].toLowerCase();
+    b.textContent = c[0];
+    b.setAttribute("aria-label", "Corner " + c[0]);
+    b.style.left = (c[1] + 1) + "px";
+    b.style.top = (c[2] + 1) + "px";
+    b.addEventListener("click", function (e) {
+      if (e.detail > 1) { return; }        // the second click of a double-click adds nothing
+      addCorner(c[0], c[1], c[2]);
+    });
+    b.addEventListener("dblclick", function () { closeShape(); });
+    $("stage").appendChild(b);
+  });
+
+  $("shape-clear").addEventListener("click", function () {
+    state.polygon = { points: [], closed: false };
+    say("");
+    drawShape();
+  });
+
+  // ---------------------------------------------------------------------- data
+  function loadData() {
+    return fetch("missing-data.json").then(function (r) {
+      if (!r.ok) {
+        console.error("data request failed: HTTP " + r.status + " for missing-data.json");
+        $("data-status").textContent = "Data: none (using defaults)";
+        return;
+      }
+      return r.json().then(function (d) {
+        state.data = d;
+        $("data-status").textContent = "Data: loaded";
+      });
+    }).catch(function (e) {
+      console.error("data request failed: " + e);
+      $("data-status").textContent = "Data: none (using defaults)";
+    });
+  }
+
+  // -------------------------------------------------------------------- upload
+  $("upload").addEventListener("change", function () {
+    var f = this.files && this.files[0];
+    if (!f) {
+      state.upload = null;
+      $("upload-status").textContent = "No file uploaded";
+      return;
+    }
+    state.upload = { name: f.name, size: f.size };
+    $("upload-status").textContent = "Uploaded: " + f.name + " (" + f.size + " bytes)";
+  });
+
+  // --------------------------------------------------------------------- items
+  $("add-item").addEventListener("click", function () {
+    state.items += 2;
+    $("item-count").textContent = "Items: " + state.items;
+  });
+
+  // ---------------------------------------------------------------------- boot
+  console.error('[deprecation] Waveform option "legacyScale" is deprecated and will be ' +
+                'removed in the next release; use "gain" instead.');
+  setGain(1.0);
+  drawShape();
+  loadData().then(function () {
+    state.ready = true;
+    $("status").textContent = "Ready";
+  });
+})();
+</script>
+</body>
+</html>
