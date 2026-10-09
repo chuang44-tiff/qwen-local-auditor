@@ -12,6 +12,7 @@ in the engine or in workflow.py: the traceback goes to <run>/error.log); 130 int
 """
 import argparse
 import contextlib
+import copy
 import datetime
 import hashlib
 import importlib.util
@@ -26,7 +27,7 @@ import traceback
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from lib import search_mcp, swarm  # noqa: E402
-from lib.swarm_engine import api, fences, manifest, steps  # noqa: E402
+from lib.swarm_engine import api, events, fences, manifest, runlock, steps  # noqa: E402
 
 EXIT_OK, EXIT_USAGE, EXIT_PREFLIGHT, EXIT_PARTIAL, EXIT_EMPTY = 0, 2, 3, 4, 5
 EXIT_HARNESS, EXIT_INTERRUPTED = 8, 130
@@ -55,6 +56,7 @@ USAGE = {
           "[--role-effort ROLE=LEVEL[,ROLE=LEVEL...]] [--deep ROLE[,ROLE...]|all] "
           "[--shallow ROLE[,ROLE...]|all] [--out DIR] "
           "[--keep-sandboxes] | WORKFLOW --stdin | --resume RUN_DIR | --check WORKFLOW | --preflight [WORKFLOW] "
+          "| --record-verdict RUN_DIR --id ID --verdict VERDICT --evidence TEXT [--evidence TEXT ...] "
           "| --list",
     "deep-research": "usage: qwen-deep-research QUESTION "
                      "[--depth quick|standard|deep|overnight] [--max-agents N] [--max-items N] "
@@ -298,6 +300,11 @@ def parse_args(argv, compat=None):
         # qwen-deep-research takes neither
         ap.add_argument("--deep")
         ap.add_argument("--shallow")
+        # the main session's verdict on one row of a finished or running run
+        ap.add_argument("--record-verdict", metavar="RUN_DIR")
+        ap.add_argument("--id", dest="verdict_id")
+        ap.add_argument("--verdict")
+        ap.add_argument("--evidence", action="append")
     ap.add_argument("--out")
     ap.add_argument("--target")
     ap.add_argument("--keep-sandboxes", action="store_true")
@@ -358,6 +365,11 @@ def _main(o, compat):
     if o.check:
         from lib.swarm_engine import check
         return check.check_workflow(o.check, err)
+    if getattr(o, "record_verdict", None) is not None:
+        return record_verdict(o)
+    if getattr(o, "verdict_id", None) is not None or getattr(o, "verdict", None) is not None \
+            or getattr(o, "evidence", None):
+        raise Usage("--id, --verdict and --evidence go with --record-verdict RUN_DIR")
     words = list(o.words)
     if o.preflight and not words and not o.resume and not compat:
         # --preflight [WORKFLOW]: with no workflow only the model check runs and its
@@ -485,7 +497,8 @@ def _main(o, compat):
     o.run_dir = run                                     # where error.log goes if we crash
     if (run / "config.json").exists():
         raise Usage("--out %s already holds a run; use --resume %s or another --out" % (run, run))
-    return _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new=True)
+    return _post_release(run, mod, _start(o, m, mod, cfg, run, seats, web_seats, max_unit,
+                                          new=True))
 
 
 def _first(*values):
@@ -572,9 +585,10 @@ def _resume(o, compat, wf_spec, words):
     cfg.setdefault("retries", 0)
     cfg.setdefault("max_items", DEFAULT_MAX_ITEMS)
     cfg.setdefault("rounds", 1)
-    for k in [prof["goal_key"], "depth"] + list(m.knobs) + ["max_agents", "timeout_per_item"]:
+    for k in [prof["goal_key"], "depth", "max_agents", "timeout_per_item"]:
         if k not in cfg:
             raise Usage("--resume: config.json in %s has no '%s' key" % (run, k))
+    fill = _fill_knobs(m, cfg, run)
     if o.timeout is not None:
         cfg["timeout_per_item"] = o.timeout
     if o.retries is not None:
@@ -610,10 +624,62 @@ def _resume(o, compat, wf_spec, words):
     except Exception as e:
         err("internal error: workflow.py does not import: %s: %s" % (type(e).__name__, e))
         return EXIT_HARNESS
-    # the workflow loaded, so the merged settings can be written: a resume that fails on
-    # the workflow leaves config.json exactly as the interrupted run left it
-    save_json(run / "config.json", cfg)
-    return _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new=False)
+    # the run lock (runlock.py) before config.json is touched: a live runner owns that
+    # file, and of two resumes racing for one folder only one passes the O_EXCL create
+    _clear_stale(run)                                 # a killed runner's lock
+    try:
+        runlock.acquire(run)
+    except runlock.RunLive as e:
+        raise Usage("--resume: %s" % e)
+    for line in fill:
+        err(line)                                   # said only now: the lock is ours
+    try:
+        # the workflow loaded, so the merged settings can be written: a resume that fails
+        # on the workflow leaves config.json exactly as the interrupted run left it
+        save_json(run / "config.json", cfg)
+    except BaseException:
+        runlock.release(run)
+        raise
+    return _post_release(run, mod, _start(o, m, mod, cfg, run, seats, web_seats, max_unit,
+                                          new=False, locked=True))
+
+
+def _fill_knobs(m, cfg, run):
+    """A declared knob missing from config.json -- the run was made before the workflow
+    declared it -- takes the value of the run's own depth preset. The lines saying so
+    are RETURNED, not printed: --resume prints them only once it holds the run lock, so
+    a resume refused by a live runner says nothing. A run whose depth is no longer a
+    preset cannot be filled: usage error."""
+    missing = [k for k in m.knobs if k not in cfg]
+    if not missing:
+        return []
+    preset = m.presets.get(cfg["depth"]) if isinstance(cfg["depth"], str) else None
+    if preset is None:
+        raise Usage("--resume: config.json in %s has no '%s' key, and its depth %r is not "
+                    "a preset of %s to take it from" % (run, missing[0], cfg["depth"], m.name))
+    for k in missing:
+        cfg[k] = preset[k]
+    return ["config.json has no %r; using preset value %r" % (k, preset[k]) for k in missing]
+
+
+def _notice(mod, cfg, run):
+    """The workflow's notice(cfg) -> str | None, printed in the run-start summary on a
+    fresh run and on every resume: what the run will do that the user should know
+    before any agent starts (e.g. data leaving the machine). The hook sees a deep copy:
+    editing it cannot change the run's config. A return that is neither str nor None is
+    ignored, with one line in run.log."""
+    hook = getattr(mod, "notice", None)
+    if not callable(hook):
+        return
+    text = hook(copy.deepcopy(cfg))
+    if text is not None and not isinstance(text, str):
+        with open(run / "run.log", "a", encoding="utf-8", errors="replace") as fh:
+            fh.write("\t".join(["-", "workflow", "-", "0", "0",
+                                "notice returned %s, ignored" % type(text).__name__]) + "\n")
+        return
+    for line in str(text or "").splitlines():
+        if line.strip():
+            err("  notice: %s" % line)
 
 
 def summary(m, cfg):
@@ -650,16 +716,53 @@ def _internal_error(e, run=None):
     return EXIT_HARNESS
 
 
-def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new):
-    prof = profile(m)
-    env = prof["env"]
-    target = pathlib.Path(cfg["target"]) if cfg.get("target") else None
+def _clear_stale(run):
+    """runlock.clear_stale with its wait mapped: TimeoutError means another process is
+    mid-clear (RUN/.lock.clear held past the wait) -- a "try again" usage error, not
+    an internal error."""
     try:
+        runlock.clear_stale(run, err)
+    except TimeoutError as e:
+        raise Usage("another process is clearing the lock at %s; try again"
+                    % (pathlib.Path(run) / runlock.LOCK)) from e
+
+
+def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
+    """locked=True: the caller (--resume) already holds RUN/.lock; a fresh run takes it
+    here, once the folder exists. Whoever took it, it is released on every exit, and
+    only a holder may touch the run's files on the way out: a runner refused the lock
+    leaves the live run exactly as it found it."""
+    target = None
+    # once run_start is written, the finally writes run_end with rc, the exit this call
+    # returns: every exit of a run that started (0, 2 when run() itself raises Usage,
+    # 4, 5, 8, 130); the exits before run_start (2 and 3) never get that far
+    started, rc, wf = False, EXIT_HARNESS, None
+    try:
+        # inside the try, so a raise here still reaches the finally that releases a
+        # lock a --resume was already holding on entry
+        prof = profile(m)
+        env = prof["env"]
+        target = pathlib.Path(cfg["target"]) if cfg.get("target") else None
         if not preflight(o.agent):
             return EXIT_PREFLIGHT
         if fences.needs_search(m) and not search_preflight(env):
             return EXIT_PREFLIGHT
         run.mkdir(parents=True, exist_ok=True)
+        if not locked:
+            _clear_stale(run)                         # a killed runner's lock
+            try:
+                runlock.acquire(run)
+            except runlock.RunLive as e:
+                err(str(e))                           # another runner holds the folder
+                return EXIT_USAGE
+            locked = True
+        # the first stderr line after the preflight: a session that started the run in
+        # the background learns where to watch (RUN/events.jsonl) before anything runs
+        err("run folder: %s" % run)
+        events.emit(run, "run_start", workflow=m.name, goal=cfg[prof["goal_key"]],
+                    run=str(run), resumed=not new, depth=cfg["depth"],
+                    knobs={k: cfg[k] for k in m.knobs})
+        started = True
         if target is not None:
             from lib.swarm_engine import sandbox
             sandbox.cleanup(run, target)               # leftovers of a killed run
@@ -671,6 +774,7 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new):
         save_json(run / "config.json", cfg)
         mcp = fences.mcp_config(run) if fences.needs_search(m) else None
         print_summary(cfg["summary"])
+        _notice(mod, cfg, run)
         sw = swarm.Swarm(o.agent, run, seats=seats, timeout=cfg["timeout_per_item"],
                          backoff=env_int(env, "BACKOFF", 30), max_unit_seconds=max_unit,
                          deadline=deadline_epoch(cfg))
@@ -679,21 +783,38 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new):
         wf = api.Workflow(m, cfg, run, sw, goal=cfg[prof["goal_key"]], mcp=mcp,
                           web_seats=web_seats, start=start, keep_sandboxes=o.keep_sandboxes)
         mod.run(wf)
-        return finish(wf, cfg, run, start)
+        rc = finish(wf, cfg, run, start)
+        return rc
     except api.Empty as e:
         err(str(e))
         print(run)
-        return EXIT_EMPTY
+        rc = EXIT_EMPTY
+        return rc
     except KeyboardInterrupt:
         err("interrupted; resume with --resume %s" % run)
-        return EXIT_INTERRUPTED
+        rc = EXIT_INTERRUPTED
+        return rc
+    except Usage:
+        if started:
+            rc = EXIT_USAGE                         # run_end.exit matches the exit 2
+        raise                                       # the user's error, not the engine's
     except Exception as e:
-        return _internal_error(e, run)
+        rc = _internal_error(e, run)
+        return rc
     finally:
-        if target is not None and not o.keep_sandboxes and run.exists():
+        # only the holder of the lock cleans up: sandbox.cleanup deletes everything
+        # under <run>/sandboxes, and a start refused by RunLive must never wipe the
+        # live run's sandboxes through it
+        if locked and target is not None and not o.keep_sandboxes and run.exists():
             from lib.swarm_engine import sandbox
             with contextlib.suppress(Exception):
                 sandbox.cleanup(run, target)
+        if started:
+            report = wf.report_path if wf is not None and rc in (EXIT_OK, EXIT_PARTIAL) else None
+            events.emit(run, "run_end", exit=rc, report=None if report is None else str(report))
+        if locked:
+            with contextlib.suppress(OSError):
+                runlock.release(run)
 
 
 def finish(wf, cfg, run, start):
@@ -715,10 +836,172 @@ def finish(wf, cfg, run, start):
         err("deadline reached after %sh; %d items not run; --resume %s --hours %s continues"
             % (xh, wf.not_run, run, xh))
     if wf.dropped:
-        err("%d agent(s) dropped; see run.log" % wf.dropped)
+        err("%d agent(s) dropped; see run.log; rerun them with --resume %s" % (wf.dropped, run))
     if wf.unmet:
         err("finished without its goal: %s" % wf.unmet)
-    return EXIT_PARTIAL if (wf.dropped or wf.not_run or wf.unmet) else EXIT_OK
+    return exit_for(wf.dropped, wf.not_run, wf.unmet)
+
+
+def exit_for(dropped, not_run, unmet):
+    """The one rule for a run that wrote its report: EXIT_PARTIAL (4) when any unit was
+    dropped, the deadline left items unrun, or the goal was not met; else EXIT_OK.
+    Shared by finish() and by a re-render of a finished run (--record-verdict)."""
+    return EXIT_PARTIAL if (dropped or not_run or unmet) else EXIT_OK
+
+
+# ---------------------------------------------------------------- verdicts
+def _write_json(path, data):
+    """`path` replaced atomically (api.atomic_write) with `data` as wf.save writes JSON: the
+    same bytes, so a re-rendered artifact is indistinguishable from a live-written one."""
+    api.atomic_write(path, json.dumps(data, ensure_ascii=False, indent=1)
+                     .encode("utf-8", "surrogateescape"))
+
+
+def _write_report(path, markdown):
+    """`path` replaced atomically with the bytes wf.report writes (newlines as os.linesep)."""
+    api.atomic_write(path, markdown.replace("\n", os.linesep).encode("utf-8"))
+
+
+def rerender(run, mod):
+    """Re-render a finished run of a workflow that takes verdicts (its module defines
+    read_verdicts, apply_verdicts and render) from its `final` artifact and every valid
+    verdict file, under runlock.render_lock so parallel callers take turns (TimeoutError
+    when another holder never lets go): results.json, report.md and final.json (its
+    verdicts_applied) are each replaced atomically, final.json last, so an interrupted
+    re-render is simply redone; totals.json is left alone. Returns (exit code, final,
+    unmet), or (None, None, None) when the run has no final.json -- it never reached its
+    final rows."""
+    run = pathlib.Path(run)
+    with runlock.render_lock(run):
+        final = load_json(run / "final.json")
+        if not isinstance(final, dict):
+            return None, None, None
+        invalid = []
+        verdicts = mod.read_verdicts(run, invalid=invalid)
+        final["verdicts_applied"] = sorted([vid, v["mtime_ns"]] for vid, v in verdicts.items())
+        final["invalid_verdicts"] = [list(x) for x in invalid]
+        rows, unmet = mod.apply_verdicts(final, verdicts)
+        _write_json(run / "results.json", rows)
+        _write_report(run / "report.md", mod.render(final, rows))
+        _write_json(run / "final.json", final)
+    return exit_for(final.get("dropped") or 0, final.get("not_run") or 0, unmet), final, unmet
+
+
+def _exit_line(code, final, unmet):
+    """Why a re-rendered run exits as it does: a verdict clears neither a drop nor a NOT RUN."""
+    why = []
+    if final.get("dropped"):
+        why.append("%d agent(s) dropped (a verdict does not clear a drop)" % final["dropped"])
+    if final.get("not_run"):
+        why.append("%d item(s) not run (a verdict does not clear that; --resume runs them)"
+                   % final["not_run"])
+    if unmet:
+        why.append("rows that still count as failures remain")
+    return "exit %d: %s" % (code, "; ".join(why) or "nothing left that counts as a failure")
+
+
+def _post_release(run, mod, code):
+    """After a run ended (its `finally` has written run_end and released RUN/.lock): when the
+    workflow takes verdicts and finished with a `final` artifact, re-list RUN/verdicts/; a
+    verdict not in final.verdicts_applied (by id and mtime_ns) was written after the final
+    rows were built, so the run is re-rendered with it and that exit is the process's. A
+    --record-verdict call that saw the lock gone re-renders too; the render lock serializes
+    the two, and either way no verdict is lost. run_end.exit stays the run's own exit; the
+    docs tell sessions to gate on the process exit. A render lock that stays busy means a
+    verdict was NOT applied: the process exits 4 (never 0) and says to run the same
+    --record-verdict command again. Any other fault reading the verdicts or re-rendering
+    is one err() note and the run's own exit."""
+    if code not in (EXIT_OK, EXIT_PARTIAL) or not callable(getattr(mod, "apply_verdicts", None)):
+        return code
+    try:
+        final = load_json(pathlib.Path(run) / "final.json")
+        if not isinstance(final, dict):
+            return code
+        applied = {(x[0], x[1]) for x in final.get("verdicts_applied") or []
+                   if isinstance(x, list) and len(x) == 2}
+        current = {(vid, v["mtime_ns"]) for vid, v in mod.read_verdicts(run).items()}
+    except Exception as e:
+        err("could not read the run's session verdicts after the run: %s: %s; the run's "
+            "exit stands" % (type(e).__name__, e))
+        return code
+    if current <= applied:
+        return code
+    try:
+        new, final, unmet = rerender(run, mod)
+    except TimeoutError as e:
+        err("a session verdict was recorded as the run ended but %s; run `qwen-swarm "
+            "--record-verdict %s ...` again to apply it" % (e, run))
+        return EXIT_PARTIAL            # a verdict did not land: never report a clean pass
+    except Exception as e:
+        err("could not apply a session verdict recorded as the run ended: %s: %s; the run's "
+            "exit stands; run `qwen-swarm --record-verdict %s ...` once the fault is fixed"
+            % (type(e).__name__, e, run))
+        return code
+    if new is None:
+        return code
+    err("applied %d session verdict(s) recorded as the run ended; %s"
+        % (len(current - applied), _exit_line(new, final, unmet)))
+    return new
+
+
+def record_verdict(o):
+    """qwen-swarm --record-verdict RUN --id ID --verdict V --evidence TEXT [...]: the main
+    session's final say on one row. The workflow must take verdicts (its module defines
+    apply_verdicts; it names them in VERDICTS and may refuse an id through
+    verdict_problem(run_dir, id)). The verdict is written to RUN/verdicts/<ID>.json
+    atomically -- a later call for the same id replaces it. A live run (RUN/.lock held)
+    applies it itself: exit 0. A run that did not finish has no `final` artifact: exit 5,
+    the file waits for --resume. Otherwise the run is re-rendered under the render lock and
+    the exit is the re-rendered one. This command never writes events."""
+    if o.words or o.resume or o.stdin or o.sets or o.out or o.target or o.depth or o.preflight:
+        raise Usage("--record-verdict takes RUN_DIR --id ID --verdict VERDICT --evidence TEXT "
+                    "[--evidence TEXT ...] and nothing else")
+    run = pathlib.Path(o.record_verdict).resolve()
+    cfg = load_json(run / "config.json")
+    if not isinstance(cfg, dict):
+        raise Usage("--record-verdict: %s is not a run folder (no readable config.json)" % run)
+    name = cfg.get("workflow") or "research"
+    folder = pathlib.Path(cfg["workflow_dir"]) if cfg.get("workflow_dir") else BUILTIN / name
+    try:
+        mod = load_module(folder)
+    except Exception as e:
+        raise Usage("--record-verdict: the run's workflow %s does not load: %s: %s"
+                    % (name, type(e).__name__, e))
+    if not callable(getattr(mod, "apply_verdicts", None)):
+        raise Usage("--record-verdict: %s is a %s run; that workflow takes no verdicts"
+                    % (run, name))
+    choices = tuple(getattr(mod, "VERDICTS", ()))
+    if not o.verdict_id or not api._KEY.fullmatch(o.verdict_id):
+        raise Usage("--record-verdict needs --id ID (a row id of the run)")
+    if o.verdict not in choices:
+        raise Usage("--verdict must be one of %s (got %r)" % (", ".join(choices), o.verdict))
+    evidence = [e for e in (o.evidence or []) if e.strip()]
+    if not evidence:
+        raise Usage("--record-verdict needs at least one --evidence TEXT")
+    problem = getattr(mod, "verdict_problem", None)
+    why = problem(run, o.verdict_id) if callable(problem) else None
+    if why:
+        raise Usage("--record-verdict: %s" % why)
+    path = run / "verdicts" / ("%s.json" % o.verdict_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(path, {"id": o.verdict_id, "verdict": o.verdict, "evidence": evidence,
+                       "by": "session", "t": time.time()})           # atomic: api.atomic_write
+    if runlock.is_live(run):
+        print("recorded; the running workflow will apply it")
+        return EXIT_OK
+    try:
+        runlock.clear_stale(run, err)      # a killed runner's lock, "removed stale lock (pid N)"
+        code, final, unmet = rerender(run, mod)
+    except TimeoutError as e:              # .lock.clear or .render.lock held by someone else
+        err("verdict saved to %s, but it was not applied: %s; run the same command again"
+            % (path, e))
+        return EXIT_HARNESS
+    if code is None:
+        err("run did not finish; verdict saved, applied on --resume %s" % run)
+        return EXIT_EMPTY
+    err(_exit_line(code, final, unmet))
+    print(run / "report.md")
+    return code
 
 
 if __name__ == "__main__":

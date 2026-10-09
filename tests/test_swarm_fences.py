@@ -4,7 +4,7 @@ import sys
 import pytest
 
 from lib import swarm
-from lib.swarm_engine import fences
+from lib.swarm_engine import fences, manifest
 from swarm_fixtures import FAKE
 
 
@@ -20,6 +20,9 @@ def test_each_fence_maps_to_the_released_flags(tmp_path):
     # --mcp-config of ours (qwen-agent writes the Playwright server config for itself)
     assert fences.unit_fields("browser") == {"toolset": "none", "grants": "", "web": False,
                                              "mcp_config": None, "browser": True}
+    # browser-probe is browser plus qwen-agent --browser-eval, and nothing else
+    assert fences.unit_fields("browser-probe") == dict(fences.unit_fields("browser"),
+                                                       browser_eval=True)
     assert fences.unit_fields("read") == {"toolset": "Read,Glob,Grep", "grants": "Read,Glob,Grep",
                                           "web": False, "mcp_config": None}
     sb = fences.unit_fields("sandbox")
@@ -29,6 +32,8 @@ def test_each_fence_maps_to_the_released_flags(tmp_path):
     assert "browser" not in fences.unit_fields("none")
     assert "browser" not in fences.unit_fields("sandbox")
     assert "browser" not in fences.unit_fields("web", mcp)
+    assert "browser_eval" not in fences.unit_fields("browser")
+    assert set(fences.DESCRIBE) == set(manifest.FENCES)        # every fence is described
 
 
 def test_unknown_fence_and_web_without_mcp_are_errors():
@@ -41,6 +46,7 @@ def test_unknown_fence_and_web_without_mcp_are_errors():
 @pytest.mark.parametrize("fence,present,absent", [
     ("none", [("--toolset", "none")], ["-t", "--web", "--mcp-config"]),
     ("browser", [("--toolset", "none")], ["-t", "--web", "--mcp-config"]),
+    ("browser-probe", [("--toolset", "none")], ["-t", "--web", "--mcp-config"]),
     ("search", [("--toolset", "none"), ("-t", "mcp__search__search")], ["--web"]),
     ("web", [("--toolset", "none"), ("-t", "mcp__search__search")], []),
     ("read", [("--toolset", "Read,Glob,Grep"), ("-t", "Read,Glob,Grep")], ["--web", "--mcp-config"]),
@@ -65,7 +71,8 @@ def test_fence_reaches_the_agent_argv(tmp_path, monkeypatch, fence, present, abs
     for flag in absent:
         assert flag not in argv, flag
     assert ("--web" in argv) == (fence == "web")
-    assert ("--browser" in argv) == (fence == "browser")
+    assert ("--browser" in argv) == (fence in fences.BROWSER_FENCES)
+    assert ("--browser-eval" in argv) == (fence == "browser-probe")
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk" and "--warn-denials" in argv
 
 
@@ -98,7 +105,8 @@ def test_the_browser_fence_needs_neither_search_nor_a_target():
         def __init__(self, *fences_):
             self.roles = {str(i): _Role(f) for i, f in enumerate(fences_)}
 
-    assert "browser" not in fences.WEB_FENCES and "browser" not in fences.TARGET_FENCES
+    for fence in fences.BROWSER_FENCES:
+        assert fence not in fences.WEB_FENCES and fence not in fences.TARGET_FENCES
     assert fences.needs_search(_Manifest("none", "browser", "read", "sandbox")) is False
     assert fences.needs_search(_Manifest("browser", "web")) is True
 

@@ -9,6 +9,7 @@ of each unit's cache key (Swarm._key hashes toolset, grants, web and the mcp.jso
 |---------|--------------------------------|-------------------------|-------|--------------|--------------|
 | none    | none                           | -                       | no    | no           | agents/<unit>|
 | browser | none (--browser)               | -                       | no    | its own      | agents/<unit>|
+| browser-probe | none (--browser-eval)    | -                       | no    | its own      | agents/<unit>|
 | search  | none                           | mcp__search__search     | no    | yes          | agents/<unit>|
 | web     | none                           | mcp__search__search     | yes   | yes          | agents/<unit>|
 | read    | Read,Glob,Grep                 | Read,Glob,Grep          | no    | no           | --target     |
@@ -22,6 +23,12 @@ fresh timestamped folder inside that root and its screenshots and page snapshots
 so a unit's evidence stays inside the run folder, beside the unit that made it. It is not a
 web fence: a UI suite runs against local URLs, so browser units run at --seats and need no
 search preflight.
+
+`browser-probe` is `browser` plus qwen-agent --browser-eval: the session may also run
+scripted probes (browser_evaluate) and read single network requests -- what a confirmer
+needs to check a verdict directly instead of by eye. Everything said above about `browser`
+holds for it; --browser-eval joins the unit's cache key, so its answers never pass for a
+plain browser unit's.
 """
 import json
 import os
@@ -32,9 +39,12 @@ SEARCH_TOOL = "mcp__search__search"
 READ_TOOLS = "Read,Glob,Grep"
 SANDBOX_TOOLS = "Read,Edit,Write,Bash,Glob,Grep"
 WEB_FENCES = ("search", "web")         # run at --web-seats; need mcp.json and a search preflight
+BROWSER_FENCES = ("browser", "browser-probe")   # qwen-agent --browser; QWEN_BROWSER_DIR per unit
 TARGET_FENCES = ("read", "sandbox")    # need --target
 SEARCH_SERVER = pathlib.Path(__file__).resolve().parents[1] / "search_mcp.py"
-DESCRIBE = {"none": "no tools", "browser": "a real browser (Playwright)", "search": "search",
+DESCRIBE = {"none": "no tools", "browser": "a real browser (Playwright)",
+            "browser-probe": "a real browser (Playwright) + scripted probes (browser_evaluate)",
+            "search": "search",
             "web": "search + WebFetch",
             "read": "Read/Glob/Grep in --target", "sandbox": "edit + Bash in a sandbox copy"}
 
@@ -51,6 +61,11 @@ def unit_fields(fence, mcp=None):
         # (qwen-agent refuses --browser beside a caller's --mcp-config).
         return {"toolset": "none", "grants": "", "web": False, "mcp_config": None,
                 "browser": True}
+    if fence == "browser-probe":
+        # --browser plus --browser-eval (qwen-agent's own flag; it implies --browser, and
+        # both are passed so the argv reads as what it is)
+        return {"toolset": "none", "grants": "", "web": False, "mcp_config": None,
+                "browser": True, "browser_eval": True}
     if fence in WEB_FENCES:
         if mcp is None:
             raise ValueError("fence %r needs the run's mcp.json" % fence)

@@ -33,6 +33,8 @@ USAGE
   qwen-swarm --resume RUN_DIR [options]    continue an interrupted run
   qwen-swarm --check WORKFLOW              validate the manifest, dry-run run(wf) twice
                                            against fake agents (no agent starts)
+  qwen-swarm --record-verdict RUN --id ID --verdict CONFIRMED|FALSE_ALARM|NEEDS_HUMAN --evidence TEXT [--evidence TEXT ...]
+             the main session's verdict on one row of a run (--evidence is repeatable)
   qwen-swarm --preflight [WORKFLOW]        model (and search, if the workflow uses it)
   qwen-swarm --list                        built-in workflows with descriptions
 
@@ -118,9 +120,16 @@ for _p in QWEN_SWARM_ QWEN_DR_; do
     eval "[ -n \"\${$_v:-}\" ] && export $_v"
   done
 done
-for _v in QWEN_SEARCH_BACKEND QWEN_SEARCH_URL QWEN_SEARCH_KEY QWEN_SEARCH_BRAVE_URL; do
+# QWEN_PLAYWRIGHT_MCP, QWEN_CLAUDE_BIN and QWEN_EXEC_RETRY_BACKOFF: wf.claude_check runs
+# claude (and builds its browser's MCP config) inside the runner itself, not in a
+# qwen-agent child that would read this file on its own. The backoff goes out whenever it
+# is SET, even when blank: a blank value means "no retry" (as qwen-agent.sh reads it), and
+# dropping it here would hand the runner the default of "10 30" instead.
+for _v in QWEN_SEARCH_BACKEND QWEN_SEARCH_URL QWEN_SEARCH_KEY QWEN_SEARCH_BRAVE_URL \
+          QWEN_PLAYWRIGHT_MCP QWEN_CLAUDE_BIN; do
   eval "[ -n \"\${$_v:-}\" ] && export $_v"
 done
+[ -n "${QWEN_EXEC_RETRY_BACKOFF+x}" ] && export QWEN_EXEC_RETRY_BACKOFF
 unset _p _n _v
 export PYTHONUTF8=1
 

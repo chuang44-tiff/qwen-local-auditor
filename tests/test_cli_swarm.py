@@ -45,6 +45,14 @@ def test_help_and_version_only_as_the_first_argument(tmp_path):
     assert r.returncode == 2 and "EXIT CODES" not in r.stdout and "usage: qwen-swarm" in r.stderr
 
 
+def test_swarm_help_lists_record_verdict(tmp_path):
+    r = run(tmp_path, ["--help"])
+    assert r.returncode == 0
+    assert ("--record-verdict RUN --id ID --verdict CONFIRMED|FALSE_ALARM|NEEDS_HUMAN "
+            "--evidence TEXT") in r.stdout
+    assert "--evidence is repeatable" in r.stdout
+
+
 def test_list_and_check_need_no_server(tmp_path):
     r = run(tmp_path, ["--list"], **fake_env(tmp_path))
     assert r.returncode == 0, r.stderr
@@ -178,7 +186,8 @@ def test_engine_only_flags_are_not_advertised_in_the_alias_help(tmp_path):
     # flags the released command never had; its help stays its own flag set
     r = run(tmp_path, ["--help"], wrap=DR_WRAP)
     assert r.returncode == 0 and "EXIT CODES" in r.stdout
-    for flag in ("--set", "--list", "--rounds", "--target", "--keep-sandboxes"):
+    for flag in ("--set", "--list", "--rounds", "--target", "--keep-sandboxes",
+                 "--record-verdict"):                 # the alias does not even accept this one
         assert flag not in r.stdout, flag
 
 
@@ -232,3 +241,98 @@ def test_a_browser_workflow_checks_and_preflights_without_a_search_backend(tmp_p
     assert r.stdout.startswith("ok: echo:")
     r = run(tmp_path, ["--preflight", str(folder)], **fake_env(tmp_path))
     assert r.returncode == 0, r.stderr
+
+
+# ---------------------------------------------------------------- config-file settings
+ENV_WORKFLOW = r'''
+import os
+def run(wf):
+    # a test probe: real workflows must not read the environment
+    wf.save("seen", {k: os.environ.get(k) for k in
+                     ("QWEN_PLAYWRIGHT_MCP", "QWEN_CLAUDE_BIN", "QWEN_EXEC_RETRY_BACKOFF")})
+    wf.report("# env\n")
+'''
+
+
+def test_config_file_browser_and_claude_settings_reach_the_runner(tmp_path):
+    # wf.claude_check runs inside the runner, not in a qwen-agent child that reads the
+    # config file itself: qwen-swarm.sh must export these from the file.
+    (tmp_path / "noconfig").write_text(
+        'QWEN_PLAYWRIGHT_MCP="node /x/cli.js"\nQWEN_CLAUDE_BIN=/opt/cc/claude\n'
+        'QWEN_EXEC_RETRY_BACKOFF="0 0"\n', encoding="utf-8")
+    folder = make_workflow(tmp_path / "wfs", script=ENV_WORKFLOW)
+    out = tmp_path / "run"
+    r = run(tmp_path, [str(folder), "g", "--out", str(out)], **fake_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    seen = json.loads((out / "seen.json").read_text(encoding="utf-8"))
+    assert seen["QWEN_PLAYWRIGHT_MCP"] == "node /x/cli.js"
+    assert seen["QWEN_EXEC_RETRY_BACKOFF"] == "0 0"
+    # Git Bash hands a native Python the Windows spelling of a POSIX path
+    assert seen["QWEN_CLAUDE_BIN"].replace("\\", "/").endswith("/opt/cc/claude")
+
+
+def test_unset_settings_stay_unset(tmp_path):
+    folder = make_workflow(tmp_path / "wfs", script=ENV_WORKFLOW)
+    out = tmp_path / "run"
+    r = run(tmp_path, [str(folder), "g", "--out", str(out)], **fake_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert json.loads((out / "seen.json").read_text(encoding="utf-8")) == {
+        "QWEN_PLAYWRIGHT_MCP": None, "QWEN_CLAUDE_BIN": None, "QWEN_EXEC_RETRY_BACKOFF": None}
+
+
+def test_swarm_exports_a_blank_retry_backoff(tmp_path):
+    # a blank QWEN_EXEC_RETRY_BACKOFF is a value of its own -- "no retry". Exported only
+    # when non-empty, it would reach the runner unset there and the default "10 30" would
+    # be back: every blank spelling (empty, or only a space) goes out blank, while the
+    # other variables of that loop stay unset when they hold nothing
+    for i, blank in enumerate(("", " ")):
+        (tmp_path / "noconfig").write_text('QWEN_EXEC_RETRY_BACKOFF="%s"\n' % blank,
+                                           encoding="utf-8")
+        folder = make_workflow(tmp_path / ("wfs%d" % i), script=ENV_WORKFLOW)
+        out = tmp_path / ("run%d" % i)
+        r = run(tmp_path, [str(folder), "g", "--out", str(out)], **fake_env(tmp_path))
+        assert r.returncode == 0, r.stderr
+        seen = json.loads((out / "seen.json").read_text(encoding="utf-8"))
+        assert seen["QWEN_EXEC_RETRY_BACKOFF"] == blank         # set blank, not unset
+        assert seen["QWEN_PLAYWRIGHT_MCP"] is None and seen["QWEN_CLAUDE_BIN"] is None
+
+
+# ------------------------------------------------------------ a config-file value reaches claude_check
+import pytest  # noqa: E402
+
+CLAUDE_WORKFLOW = r'''
+import json
+def run(wf):
+    res = wf.claude_check("c", [{"id": "A"}], lambda it: "check ITEM=A",
+                          lambda text, it: json.loads(text), model="opus", max_calls=1,
+                          browser=True)
+    wf.save("checked", res)
+    wf.report("# checked\n")
+'''
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake claude is a POSIX script")
+def test_config_file_settings_reach_claude_check(tmp_path):
+    # The config file names the claude binary and the Playwright command; the runner's
+    # wf.claude_check uses both: the fake claude answers, and the MCP config it was
+    # handed starts the configured server.
+    from test_claude_check import FAKE as FAKE_CLAUDE
+    fake = tmp_path / "bin" / "my-claude"
+    fake.parent.mkdir()
+    fake.write_text(FAKE_CLAUDE, encoding="utf-8")
+    fake.chmod(0o755)
+    cc = tmp_path / "cc"
+    cc.mkdir()
+    (tmp_path / "noconfig").write_text(
+        'QWEN_PLAYWRIGHT_MCP="node /x/cli.js"\nQWEN_CLAUDE_BIN=%s\n' % fake, encoding="utf-8")
+    folder = make_workflow(tmp_path / "wfs", script=CLAUDE_WORKFLOW)
+    out = tmp_path / "run"
+    r = run(tmp_path, [str(folder), "g", "--out", str(out)], FAKE_CC_DIR=str(cc),
+            **fake_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    [row] = json.loads((out / "checked.json").read_text(encoding="utf-8"))
+    assert row["state"] == "ok" and row["data"] == {"seen": "A"}
+    argv = json.loads((cc / "call.1").read_text(encoding="utf-8"))["argv"]
+    cfg = json.loads(pathlib.Path(argv[argv.index("--mcp-config") + 1]).read_text(encoding="utf-8"))
+    assert cfg["mcpServers"]["playwright"]["command"] == "node"
+    assert cfg["mcpServers"]["playwright"]["args"][0] == "/x/cli.js"

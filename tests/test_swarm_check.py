@@ -67,3 +67,22 @@ def run(wf):
     folder = make_workflow(tmp_path, script=script,
                            extra={"check.py": "def answer(role, prompt):\n    return 'fine'\n"})
     assert check(folder) == 0, capsys.readouterr().err
+
+
+def test_check_dry_runs_emit_unit_events(tmp_path, fake, capsys):
+    # the dry-run folder is deleted afterwards, so the script itself is the hook that
+    # reads events.jsonl while the dry run is still going
+    script = '''
+import json
+def run(wf):
+    items = [{"id": "I%d" % i} for i in range(1, 4)]
+    wf.fan_out("work", "worker", items, lambda b: "\\n".join("- %s:" % i["id"] for i in b),
+               lambda text, b: [{"id": i["id"]} for i in b])
+    ev = [json.loads(x) for x in (wf.run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    got = sorted((e["kind"], e["unit"], e["role"], e["ok"]) for e in ev)
+    want = [("unit_done", "work-%d" % k, "worker", True) for k in (1, 2, 3)]
+    if got != want:
+        raise RuntimeError("events: %r" % (got,))
+    wf.report("x\\n")
+'''
+    assert check(make_workflow(tmp_path, script=script)) == 0, capsys.readouterr().err

@@ -447,3 +447,215 @@ def test_role_lists_in_config_are_matched_by_name_not_substring(tmp_path, fake):
     wf = workflow(tmp_path, deep="reader,voter", shallow="workers")   # hand-edited strings
     assert wf._deep("worker") == ("review_round",)
     assert wf._deep("reader") == ("review_round", "subagents")
+
+
+# ---------------------------------------------------------------- atomic writes
+
+def test_save_and_report_are_atomic(tmp_path, fake, monkeypatch):
+    wf = workflow(tmp_path)
+    wf.save("rows", [1])
+    wf.report("# one\n")
+    real = os.replace
+
+    def torn(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", torn)
+    with pytest.raises(OSError):
+        wf.save("rows", [2])
+    with pytest.raises(OSError):
+        wf.report("# two\n")
+    monkeypatch.setattr(os, "replace", real)
+    assert wf.load("rows") == [1]                                   # the old file, whole
+    assert (wf.run_dir / "report.md").read_text(encoding="utf-8") == "# one\n"
+    assert [p.name for p in wf.run_dir.iterdir() if p.name.endswith(".tmp")] == []
+    wf.report("# three\nline\n")                       # the bytes write_text used to write
+    assert (wf.run_dir / "report.md").read_bytes() == \
+        "# three\nline\n".replace("\n", os.linesep).encode("utf-8")
+
+
+def test_atomic_write_replaces_whole_files(tmp_path):
+    target = tmp_path / "x.json"
+    api.atomic_write(target, b"old")
+    api.atomic_write(target, b"new")
+    assert target.read_bytes() == b"new"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json"]
+
+
+# ---------------------------------------------------------------- stage= (fixtures)
+SEES_FIXTURES = r'''
+import json, os
+def answer_cwd(p, resumed, cwd):
+    staged = os.path.join(cwd, "fixtures")
+    have = sorted(os.listdir(staged)) if os.path.isdir(staged) else []
+    with open(os.path.join(os.environ["FAKE_SWARM_DIR"], "seen.txt"), "a", encoding="utf-8") as fh:
+        fh.write("%s %s %s\n" % ("repair" if resumed else "first", cwd, ",".join(have)))
+    if not resumed:
+        return 0, "I looked around but wrote no block."      # forces the repair round
+    return 0, "```json\n" + json.dumps([{"files": have}]) + "\n```"
+'''
+
+
+def fixtures_dir(tmp_path, files=None):
+    d = tmp_path / "fixtures-src"
+    d.mkdir(exist_ok=True)
+    for name, text in (files or {"a.txt": "one"}).items():
+        (d / name).write_text(text, encoding="utf-8")
+    return d
+
+
+def test_stage_copies_the_folder_into_the_unit_cwd_for_every_attempt(tmp_path, fake):
+    wf, run = browser_workflow(tmp_path, fake)
+    (fake / "tester.py").write_text(SEES_FIXTURES, encoding="utf-8")
+    src = fixtures_dir(tmp_path)
+    seen_staged = []
+
+    def staged_prompt(batch, staged):
+        seen_staged.append(staged)
+        return prompt(batch) + "\nfile at %s" % os.path.join(staged, "a.txt")
+
+    res = wf.fan_out("ui", "tester", items(1), staged_prompt,
+                     lambda text, batch: steps.extract_json(text), max_items=1, stage=str(src))
+    assert res.ok and res.rows[0]["files"] == ["a.txt"]
+    unit_dir = run / "agents" / "ui-1"
+    assert seen_staged == [str(unit_dir / "fixtures")]          # native, absolute, per unit
+    assert str(wf.stage_dir("ui-1")) == seen_staged[0]
+    handed = (run / "agents" / "ui-1.prompt.md").read_text(encoding="utf-8")
+    assert "file at %s" % (unit_dir / "fixtures" / "a.txt") in handed
+    lines = (fake / "seen.txt").read_text(encoding="utf-8").splitlines()
+    # the copy is there on the first attempt AND on the repair round, in the same cwd
+    assert lines == ["first %s a.txt" % unit_dir, "repair %s a.txt" % unit_dir]
+
+
+def test_stage_digest_joins_the_cache_key(tmp_path, fake):
+    src = fixtures_dir(tmp_path)
+
+    def go():
+        wf, _ = browser_workflow(tmp_path, fake)              # a fresh Workflow = a resume
+        return wf.fan_out("ui", "tester", items(1), lambda batch, staged: prompt(batch),
+                          lambda text, batch: steps.extract_json(text), stage=str(src))
+
+    assert go().ok and len(calls(fake)) == 1
+    assert go().units[0]["cached"] and len(calls(fake)) == 1      # same files: cached
+    (src / "a.txt").write_text("changed", encoding="utf-8")
+    assert not go().units[0]["cached"] and len(calls(fake)) == 2  # a changed fixture re-runs
+
+
+def test_no_stage_keeps_the_released_key_and_prompt_call(tmp_path, fake):
+    wf, run = browser_workflow(tmp_path, fake)
+    seen = []
+    wf.fan_out("ui", "tester", items(1), lambda batch: seen.append(batch) or prompt(batch),
+               lambda text, batch: steps.extract_json(text))
+    assert len(seen) == 1                                       # one-argument call, as before
+    assert not (run / "agents" / "ui-1" / "fixtures").exists()
+
+
+def test_agent_stage_takes_a_callable_prompt(tmp_path, fake):
+    wf, run = browser_workflow(tmp_path, fake)
+    (fake / "tester.py").write_text(SEES_FIXTURES, encoding="utf-8")
+    src = fixtures_dir(tmp_path, {"b.txt": "two"})
+    got = wf.agent("one", "tester", lambda staged: "stage at %s" % staged,
+                   lambda text: steps.extract_json(text), stage=str(src))
+    assert got[0]["files"] == ["b.txt"]
+    assert (run / "agents" / "one-1.prompt.md").read_text(encoding="utf-8") == \
+        "stage at %s" % (run / "agents" / "one-1" / "fixtures")
+
+
+def test_stage_is_refused_for_a_target_fence(tmp_path, fake):
+    wf, repo, run = target_workflow(tmp_path, fake)
+    src = fixtures_dir(tmp_path)
+    with pytest.raises(ValueError, match="works in --target"):
+        wf.agent("look", "looker", "p", steps.extract_json, stage=str(src))
+    assert calls(fake) == [] and not (repo / "fixtures").exists()
+
+
+def test_fan_out_repair_text_reaches_every_unit(tmp_path, fake):
+    (fake / "worker.py").write_text(
+        "def answer(p, resumed):\n"
+        "    return (0, '```json\\n[]\\n```') if resumed else (0, 'prose')\n", encoding="utf-8")
+    wf = workflow(tmp_path)
+    res = wf.fan_out("work", "worker", items(2), prompt, lambda text, batch: steps.extract_json(text),
+                     max_items=1, repair="Again please ({why}).")
+    assert res.ok
+    for u in ("work-1", "work-2"):
+        text = (tmp_path / "run" / "agents" / ("%s.repair.md" % u)).read_text(encoding="utf-8")
+        assert text.startswith("Again please (")
+
+
+# ---------------------------------------------------------------- browser-probe, unit_ids
+
+def test_a_browser_probe_role_gets_its_folder_and_the_eval_flag(tmp_path, fake):
+    (fake / "prober.py").write_text(SEES_DIR, encoding="utf-8")
+    folder = make_workflow(tmp_path / "wf", {"roles": {
+        "prober": {"file": "roles/prober.md", "fence": "browser-probe"}}}, roles=("prober",))
+    m = manifest.load(folder)                                  # the manifest accepts the fence
+    assert m.roles["prober"].fence == "browser-probe"
+    run = tmp_path / "run"
+    run.mkdir()
+    sw = swarm.Swarm([sys.executable, str(FAKE)], run, seats=1, timeout=60, backoff=0)
+    cfg = {"goal": "g", "depth": "quick", "items": 1, "max_agents": 2, "max_items": 1,
+           "timeout_per_item": 100, "retries": 0, "effort": None, "role_effort": {},
+           "hours": None, "deadline": None, "rounds": 1, "target": None}
+    wf = api.Workflow(m, cfg, run, sw, goal="g")
+    res = wf.fan_out("confirm", "prober", items(1), prompt,
+                     lambda text, batch: steps.extract_json(text))
+    assert res.rows == [{"dir": str(run / "browser" / "confirm-1")}]
+    argv = calls(fake)[0]
+    assert "--browser" in argv and "--browser-eval" in argv and "--mcp-config" not in argv
+    assert wf._seats("prober") is None                         # not a web fence: --seats
+
+
+def test_unit_ids_name_units_by_item_and_skipping_one_moves_no_other(tmp_path, fake):
+    wf = workflow(tmp_path)
+    rows = [{"id": "login"}, {"id": "cart-2"}, {"id": "s3"}]
+    res = wf.fan_out("confirm", "worker", rows, prompt,
+                     lambda text, batch: steps.extract_json(text), unit_ids=True)
+    assert res.ok and sorted(unit_names(fake)) == ["confirm-cart-2", "confirm-login", "confirm-s3"]
+    assert all(len(re.findall(r"^- ", (tmp_path / "run" / "agents" / ("%s.prompt.md" % u))
+                              .read_text(encoding="utf-8"), re.M)) == 1
+               for u in ("confirm-login", "confirm-cart-2", "confirm-s3"))   # one item each
+    # one row settled elsewhere and left out: the others keep their names, so their cache
+    again = workflow(tmp_path).fan_out("confirm", "worker", [rows[0], rows[2]], prompt,
+                                       lambda text, batch: steps.extract_json(text), unit_ids=True)
+    assert [u["name"] for u in again.units] == ["confirm-login", "confirm-s3"]
+    assert all(u["cached"] for u in again.units) and len(calls(fake)) == 3
+
+
+def test_unit_ids_in_waves_keep_their_names(tmp_path, fake):
+    # more items than --max-agents: later waves of a unit_ids deal keep the id naming,
+    # not the wave/place naming an ordinary fan_out falls back to (work-w2-1)
+    wf = workflow(tmp_path)                                        # max_agents 3, 8 items
+    res = wf.fan_out("confirm", "worker", items(8), prompt, echo_parse, unit_ids=True)
+    assert res.ok and len(res.units) == 8
+    assert [u["name"] for u in res.units] == ["confirm-I%d" % i for i in range(1, 9)]
+    assert sorted(unit_names(fake)) == sorted("confirm-I%d" % i for i in range(1, 9))
+
+
+def test_unit_ids_are_refused_when_they_cannot_name_files(tmp_path, fake):
+    wf = workflow(tmp_path)
+    parse = lambda text, batch: steps.extract_json(text)          # noqa: E731
+    with pytest.raises(ValueError, match="differ by more than case"):
+        wf.fan_out("confirm", "worker", [{"id": "Login"}, {"id": "login"}], prompt, parse,
+                   unit_ids=True)
+    with pytest.raises(ValueError, match=r"\[A-Za-z0-9._-\]"):
+        wf.fan_out("confirm", "worker", [{"id": "a b"}], prompt, parse, unit_ids=True)
+    assert calls(fake) == []
+
+
+def test_unit_ids_refuse_a_trailing_dot(tmp_path, fake):
+    # Windows strips a trailing dot from a file name: confirm-a. and confirm-a would
+    # name the same unit, so an id ending in '.' is refused like an unusable character
+    wf = workflow(tmp_path)
+    with pytest.raises(ValueError, match=r"do not end in '\.'"):
+        wf.fan_out("confirm", "worker", [{"id": "login"}, {"id": "login."}], prompt,
+                   lambda text, batch: steps.extract_json(text), unit_ids=True)
+    assert calls(fake) == []
+
+
+def test_unit_ids_name_the_deadline_lines_too(tmp_path, fake):
+    wf = workflow(tmp_path, deadline=time.time() - 1)
+    res = wf.fan_out("confirm", "worker", [{"id": "login"}], prompt,
+                     lambda text, batch: steps.extract_json(text), unit_ids=True)
+    assert res.not_run_items == [{"id": "login"}]
+    log = (tmp_path / "run" / "run.log").read_text(encoding="utf-8")
+    assert "confirm-login\tworker\t-\t0\t0\tdeadline: login not started" in log

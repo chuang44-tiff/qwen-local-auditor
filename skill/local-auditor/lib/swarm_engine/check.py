@@ -13,7 +13,7 @@ import shutil
 import tempfile
 import traceback
 
-from lib.swarm_engine import api, manifest
+from lib.swarm_engine import api, events, manifest
 
 DEFAULT_ANSWERS = ("```json\n[]\n```", "```json\n{}\n```")
 DEFAULT_CMD = {"applied": True, "rc": 1, "timed_out": False, "output_tail": ""}
@@ -27,7 +27,8 @@ class FakeSwarm:
     """Stands in for swarm.Swarm: answers every unit at once, starts nothing."""
 
     def __init__(self, run, answer):
-        self.agents_dir = pathlib.Path(run) / "agents"
+        self.run_dir = pathlib.Path(run)
+        self.agents_dir = self.run_dir / "agents"
         self.agents_dir.mkdir(parents=True, exist_ok=True)
         self.answer = answer
         self.deadline = None
@@ -50,8 +51,15 @@ class FakeSwarm:
                 res.update(ok=True, data=data, why="")
                 break
             self.agents_run += 1
+            unit = {"unit": u.name, "role": role}
             if not res["ok"]:
                 self.dropped += 1
+                events.emit(self.run_dir, "unit_dropped", why=res["why"], **unit)
+            # the events a real swarm writes, so a dry run exercises a workflow's watchers
+            done = {"ok": res["ok"], "cached": False, "seconds": 0.0}
+            if not res["ok"]:
+                done["why"] = res["why"]
+            events.emit(self.run_dir, "unit_done", **dict(unit, **done))
             out.append(res)
         return out
 

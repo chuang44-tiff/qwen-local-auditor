@@ -48,3 +48,12 @@ def _no_qwen_swarm_env(monkeypatch):
     for name in list(os.environ):
         if name.startswith(("QWEN_SWARM_", "QWEN_DR_")):
             monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _claude_probe_off(monkeypatch):
+    """The claude availability probe (claude_check.probe, and with it ui-test's run-start
+    notice) never runs against this machine's real claude or network from a test. Probe
+    tests switch it back on (monkeypatch.delenv) and own their target: a local http.server
+    or a refused port in QWEN_CLAUDE_PROBE_URL."""
+    monkeypatch.setenv("QWEN_CLAUDE_PROBE", "off")

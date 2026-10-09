@@ -898,3 +898,82 @@ def test_a_retry_gets_the_units_environment_again(tmp_path, fake):
     res = swarm(tmp_path).run_phase([u])
     assert res[0]["why"] and not res[0]["ok"]          # timed out twice, so dropped
     assert (fake / "saw.txt").read_text(encoding="utf-8").split() == ["mine/seen", "mine/seen"]
+
+
+def read_events(run):
+    return [json.loads(x) for x in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+
+
+def test_units_emit_done_and_dropped_events(tmp_path, fake):
+    (fake / "broken.py").write_text("def answer(p, r):\n    return 2, ''\n")
+    s = swarm(tmp_path, seats=1)                       # one worker: a fixed order
+    s.run_phase([unit(tmp_path, "a"), unit(tmp_path, "b", "broken")])
+    s.run_phase([unit(tmp_path, "a")])                 # a cache hit
+    ev = read_events(tmp_path / "run")
+    assert [(e["kind"], e["unit"], e["role"]) for e in ev] == [
+        ("unit_done", "a", "worker"), ("unit_dropped", "b", "broken"),
+        ("unit_done", "b", "broken"), ("unit_done", "a", "worker")]
+    assert ev[0]["ok"] is True and ev[0]["cached"] is False and "why" not in ev[0]
+    assert isinstance(ev[0]["seconds"], float)
+    assert ev[1]["why"] == "qwen-agent exit 2: fake failure rc=2"
+    assert ev[2]["ok"] is False and ev[2]["why"] == ev[1]["why"]
+    assert ev[3]["ok"] is True and ev[3]["cached"] is True and ev[3]["seconds"] == 0.0
+
+
+def test_a_crashing_parse_emits_its_drop(tmp_path, fake):
+    s = swarm(tmp_path, seats=1)
+    s.run_phase([unit(tmp_path, "a", parse=_crash_parse)])
+    ev = read_events(tmp_path / "run")
+    assert [(e["kind"], e["unit"]) for e in ev] == [("unit_done", "a"), ("unit_dropped", "a")]
+    assert ev[1]["why"].startswith("internal error: KeyError")
+
+
+def test_a_unit_the_deadline_stopped_emits_nothing(tmp_path, fake):
+    s = swarm(tmp_path, deadline=1.0)                  # long past
+    (res,) = s.run_phase([unit(tmp_path, "a")])
+    assert res["deadline"] is True
+    assert not (tmp_path / "run" / "events.jsonl").exists()
+
+
+# ---------------------------------------------------------------- per-unit repair text
+
+def test_a_unit_may_carry_its_own_repair_text(tmp_path, fake):
+    (fake / "worker.py").write_text(
+        "def answer(p, resumed):\n"
+        "    return (0, '```json\\n[1]\\n```') if resumed else (0, 'oops not json')\n")
+    s = swarm(tmp_path)
+    u = unit(tmp_path, "a")
+    u.repair_text = "Custom repair {why} -- with {braces} left alone."
+    assert s.run_phase([u])[0]["data"] == [1]
+    text = (tmp_path / "run" / "agents" / "a.repair.md").read_text(encoding="utf-8")
+    assert text.startswith("Custom repair the JSON block does not parse")
+    assert text.endswith(" -- with {braces} left alone.")
+    assert unit(tmp_path, "b").repair_text is None               # default: the module's REPAIR
+    plain = unit(tmp_path, "c")
+    assert s._key(plain) == s._key(sw.Unit(name="c", role_file=plain.role_file,
+                                           prompt=plain.prompt, repair_text="other"))
+
+
+def test_a_failed_repair_names_its_reason_after_repair_failed(tmp_path, fake):
+    (fake / "worker.py").write_text("def answer(p, r):\n    return 0, 'never json'\n")
+    res = swarm(tmp_path).run_phase([unit(tmp_path, "a")])
+    assert res[0]["why"].startswith(sw.REPAIR_FAILED)
+    assert sw.REPAIR_FAILED == "answer still unusable after one repair: "
+
+
+def test_browser_eval_is_on_both_calls_and_has_its_own_key(tmp_path, fake):
+    s = swarm(tmp_path)
+    u = unit(tmp_path, "a")
+    u.browser, u.browser_eval = True, True
+    first = s._argv(u, "p.md", 60)
+    assert first.index("--browser-eval") == first.index("--browser") + 1
+    assert "--browser-eval" in s._argv(u, "p.md", 60, resume="sess-1")   # the repair keeps it
+    plain, browsed = unit(tmp_path, "a"), unit(tmp_path, "a")
+    browsed.browser = True
+    assert "--browser-eval" not in s._argv(browsed, "p.md", 60)
+    blob = "%s\n%s\n%s\n%s\n%s\n%s\n%s" % ("role worker", "do a", "none", "", False, "", "")
+    assert s._key(u) == hashlib.sha256(
+        (blob + "\n--browser\n--browser-eval").encode("utf-8")).hexdigest()
+    # neither plain nor browser units move: their keys are exactly the released ones
+    assert s._key(plain) == hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    assert s._key(browsed) == hashlib.sha256((blob + "\n--browser").encode("utf-8")).hexdigest()

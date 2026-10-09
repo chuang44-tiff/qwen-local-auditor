@@ -13,9 +13,11 @@ import pytest
 import lib.research as rs
 from test_research import FAKE, env  # noqa: F401  (the fixture is used by name)
 
-PART_B_FILES = ["agents", "angles.json", "claims.json", "config.json", "fetch_stats.json",
-                "mcp.json", "question.md", "report.md", "run.log", "totals.json",
-                "urls.json", "votes.json"]
+# events.jsonl is the one addition since the release: the engine's progress stream
+# (lib/swarm_engine/events.py), written by every workflow's runs
+PART_B_FILES = ["agents", "angles.json", "claims.json", "config.json", "events.jsonl",
+                "fetch_stats.json", "mcp.json", "question.md", "report.md", "run.log",
+                "totals.json", "urls.json", "votes.json"]
 PART_B_CFG_KEYS = ["question", "depth", "angles", "sources", "claims", "voters", "max_agents",
                    "max_items", "timeout_per_item", "retries", "effort", "role_effort",
                    "hours", "deadline"]

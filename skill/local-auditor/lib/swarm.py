@@ -36,6 +36,8 @@ import subprocess
 import threading
 import time
 
+from lib.swarm_engine import events
+
 AGENT_PREFLIGHT, AGENT_APIERR = 3, 4
 AGENT_TIMEOUT = 5
 # The ceiling on any unit's --timeout, retry doublings included: a unit never runs
@@ -48,6 +50,9 @@ STOP_GRACE = 20
 REPAIR = ("Your last answer could not be used: {why}\n\n"
           "Reply again with ONLY the corrected answer as one ```json fenced block, "
           "following the format you were given.")
+# the start of a unit's `why` when its repair round's answer was still unusable: a
+# workflow reads the parse's own reason after it (ui-test: "no result block ...")
+REPAIR_FAILED = "answer still unusable after one repair: "
 _FENCE_JSON = re.compile(r"```json[ \t]*\r?\n(.*?)```", re.S | re.I)
 _FENCE_ANY = re.compile(r"```[^\n]*\r?\n(.*?)```", re.S)
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -123,7 +128,8 @@ class Unit:
     def __init__(self, name, role_file, prompt, toolset="none", grants="", web=False,
                  mcp_config=None, parse=extract_json, cache=True, timeout=None, retries=0,
                  effort=None, ignore_deadline=False, cwd=None, key_extra="", setup=None,
-                 teardown=None, deep=(), browser=False, env=None):
+                 teardown=None, deep=(), browser=False, env=None, repair_text=None,
+                 browser_eval=False):
         # fullmatch, not match: "a\n" must not pass on the strength of the trailing $.
         if not _SAFE_NAME.fullmatch(name or ""):
             raise ValueError("unit name must match %s (got %r)" % (_SAFE_NAME.pattern, name))
@@ -155,9 +161,15 @@ class Unit:
         # qwen-agent --browser: one Playwright MCP server and its tool grants (the fence
         # that drives a scripted UI suite). The flag joins this unit's cache key.
         self.browser = browser
+        # qwen-agent --browser-eval on top: scripted probes (browser_evaluate) and single
+        # network requests -- the browser-probe fence. Also joins the cache key.
+        self.browser_eval = browser_eval
         # extra environment variables for this unit's session ({NAME: VALUE}, both str);
         # None = the inherited environment alone
         self.env = env
+        # the repair round's text, "{why}" replaced by the parse's reason; None = REPAIR.
+        # Not part of the cache key: it only re-asks for an answer the key already names
+        self.repair_text = repair_text
 
 
 class Swarm:
@@ -208,6 +220,9 @@ class Swarm:
             # qwen-agent writes the Playwright MCP config for this itself and grants its
             # tools; a repair call resumes the same session, so it keeps its browser.
             argv.append("--browser")
+        if u.browser_eval:
+            # a repair call resumes the same session: it keeps its probe tools as well
+            argv.append("--browser-eval")
         if u.mcp_config:
             argv += ["--mcp-config", str(u.mcp_config)]
         if u.deep and not resume:
@@ -307,6 +322,11 @@ class Swarm:
             with open(self.run_dir / "run.log", "a", encoding="utf-8", errors="replace") as fh:
                 fh.write(line + "\n")
 
+    def _event(self, kind, u, **fields):
+        """One RUN/events.jsonl line about unit u (events.py): unit_done or unit_dropped."""
+        events.emit(self.run_dir, kind, unit=u.name, role=pathlib.Path(u.role_file).stem,
+                    **fields)
+
     def _key(self, u):
         # Over the role file's CONTENTS, not its stem: editing a role must invalidate
         # the cached answer, and so must widening a unit's tools or web access. The
@@ -324,6 +344,9 @@ class Swarm:
             # of the same prompt gave; no other fence reaches this line, so no other
             # unit's key moves
             blob += "\n--browser"
+        if u.browser_eval:
+            # a probing session can establish what a looking one cannot: its own key
+            blob += "\n--browser-eval"
         if u.deep:
             # an answer earned with a review round is not the answer asked for without one
             blob += "\ndeep:" + ",".join(u.deep)
@@ -353,6 +376,7 @@ class Swarm:
                 # a finished unit is never retried: its answer is already in hand
                 res.update(ok=True, data=data, cached=True)
                 self._log(u, 0, 0, 0, "cached")
+                self._event("unit_done", u, ok=True, cached=True, seconds=0.0)
                 return res
         if self.deadline is not None and not u.ignore_deadline and time.time() >= self.deadline:
             # the run's deadline has passed: this unit never starts -- no session, no
@@ -412,7 +436,8 @@ class Swarm:
                         else:
                             repair = self.agents_dir / ("%s.repair.md" % u.name)
                             # for a model to read, like the prompt: replace, not raise
-                            repair.write_bytes(REPAIR.format(why=e).encode("utf-8", "replace"))
+                            text = (u.repair_text or REPAIR).replace("{why}", str(e))
+                            repair.write_bytes(text.encode("utf-8", "replace"))
                             # the repair keeps this attempt's timeout: it is a
                             # continuation of the attempt, not a new one
                             rc, rec2, err = self._call(
@@ -424,7 +449,7 @@ class Swarm:
                                 try:
                                     data, status = u.parse(rec2["result"]), "repaired"
                                 except ValueError as e2:
-                                    why = "answer still unusable after one repair: %s" % e2
+                                    why = REPAIR_FAILED + str(e2)
                                     retryable = True
                             else:
                                 why = "qwen-agent exit %d on repair: %s" % (rc, (err.strip().splitlines() or [""])[0])
@@ -460,6 +485,7 @@ class Swarm:
                 else:
                     with self._lock:
                         self.dropped += 1
+                    self._event("unit_dropped", u, why=why)
             else:
                 out_path = self.agents_dir / ("%s.json" % u.name)
                 tmp_path = self.agents_dir / ("%s.json.tmp" % u.name)
@@ -488,6 +514,11 @@ class Swarm:
             self._log(u, rc, tokens - tokens_before, time.time() - t_start,
                       "interrupted" if status == "interrupted"
                       else status if not res["why"] else "dropped: %s" % res["why"])
+            # the one choke point every started unit passes, whatever its outcome
+            done = {"ok": bool(res["ok"]), "cached": False, "seconds": round(secs, 1)}
+            if not res["ok"]:
+                done["why"] = res["why"] or "interrupted"
+            self._event("unit_done", u, **done)
         return res
 
     # ------------------------------------------------------------ one phase
@@ -520,6 +551,7 @@ class Swarm:
                            "tokens": 0, "seconds": 0.0, "cached": False, "deadline": False}
                     with self._lock:
                         self.dropped += 1
+                    self._event("unit_dropped", u, why=res["why"])
                     # run_unit's finally already logged this unit's line with its tokens.
                     results[i] = res
 
