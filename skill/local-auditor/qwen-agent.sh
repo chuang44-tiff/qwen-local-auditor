@@ -2587,7 +2587,7 @@ PY
     die "--advisor: could not write the MCP config: $ADVISOR_MCP"; exit $QA_HARNESS
   fi
   TOOLS="${TOOLS:+$TOOLS,}mcp__qla_advisor__ask"
-  _adv_note="You can ask a stronger model for advice with the \`ask\` tool (at most $_adv_max calls $_adv_scope). Ask when you face a decision you cannot settle with a probe: contradictory evidence, a claim you are about to drop or keep but are unsure of, or a design choice with real trade-offs. Do not ask it to find bugs for you or to read the codebase: it sees only what you send. Send one self-contained question, the evidence, and the 1-3 files that matter. Treat its answer as advice: verify any claim it makes before you rely on it. Your answer has an ADVISOR section listing each question, the advice, and what you did with it."
+  _adv_note="You can ask a stronger model for advice with the \`ask\` tool (at most $_adv_max calls $_adv_scope). Ask when you face a decision you cannot settle with a probe: contradictory evidence, a claim you are about to drop or keep but are unsure of, or a design choice with real trade-offs. Do not ask it to find bugs for you or to read the codebase: it sees only what you send. Do not ask about mechanical work either: aligning docs, renaming, formatting or syncing wording -- do that yourself. Send one self-contained question, the evidence, and the 1-3 files that matter. Treat its answer as advice: verify any claim it makes before you rely on it. Your answer has an ADVISOR section listing each question, the advice, and what you did with it."
   if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
 
 $_adv_note"; else SYSTEM="$_adv_note"; fi

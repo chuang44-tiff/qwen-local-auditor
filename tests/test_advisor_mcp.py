@@ -230,3 +230,21 @@ def test_unreadable_and_odd_paths_are_notes(adv):
     assert "locked.py: unreadable, not attached" in out
     assert "not attached" in out.split("bad")[1]
     assert "print('a')" in (adv["calls"] / "stdin.1").read_text()
+
+
+@posix_only
+def test_secret_looking_files_are_not_attached(adv):
+    env, calls, root = adv["env"], adv["calls"], adv["root"]
+    (root / ".env").write_text("TOKEN=s3cret-env", encoding="utf-8")
+    (root / "id_rsa").write_text("s3cret-key", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("url = https://s3cret-git@x", encoding="utf-8")
+    (root / "server.pem").write_text("s3cret-pem", encoding="utf-8")
+    (root / "aws_credentials").write_text("s3cret-aws", encoding="utf-8")
+    out = am.ask("Which?", "ctx", [".env", ".git/config", "server.pem",
+                                   "aws_credentials", "a.py"], env, str(root))
+    stdin = (calls / "stdin.1").read_text()
+    assert "s3cret" not in stdin and "print('a')" in stdin
+    assert "looks like a secret" in out
+    am.ask("Which?", "ctx", ["id_rsa"], env, str(root))
+    assert "s3cret" not in (calls / "stdin.2").read_text()

@@ -474,7 +474,16 @@ the script by hand: an edited script fails its sha256 and `--replay` will not ru
 it. The replay names which scenario to re-check; only a model can say what the new
 right answer is.
 
-## Advisor (`--advisor MODEL`)
+## Advisor (`--advisor MODEL`, experimental)
+
+Inspired by Claude's [advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool):
+a cheaper model does the work and asks a stronger one at decision points. Here the local
+Qwen session is the executor. It is experimental and not proven effective: Qwen is not
+trained to use an advisor, so it decides on its own when to ask and rarely does. In a blind
+audit A/B it found 2 more of 51 known bugs, which is below our bar of 3. Its calls helped
+classify findings, not find them. In coder runs (`--until-done`) it asked twice in 22 runs,
+and both answers changed or should have changed the outcome. Read the advisor log: the
+advice is not binding, and the session can ignore it.
 
 The session gets one more tool, `ask`: it sends one self-contained question, the evidence,
 and up to 5 files (40 KB each, 120 KB in all, inside the working directory) to a Claude
@@ -495,6 +504,14 @@ the advisor never edits or runs anything.
 - Every question and answer is appended to `advisor-<stamp>-<pid>.md` in `QWEN_OUTDIR` when you set it, else in `~/.cache/qwen-agent/advisor/` (never the tree under audit).
   `--json` adds `qwen_agent.advisor` = `{model, budget, calls, answered, seconds, cost_usd,
   unavailable, log}`.
+- The system note tells the session to ask only about judgement calls: contradictory evidence,
+  a finding it is unsure whether to keep, a design trade-off. Not to find bugs, and not about
+  mechanical work (aligning docs, renaming, formatting).
+- Files that look like secrets are never attached, even inside the working directory:
+  `.env*`, `*.env`, `id_*`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, names with
+  "credential" or "secret", key and certificate files (`.pem`, `.key`, `.p12`, `.pfx`, `.jks`,
+  `.keystore`, `.kdbx`, `.asc`, `.gpg`), and anything under `.git`, `.ssh`, `.aws`, `.gnupg`,
+  `.kube` or `.docker`. The session gets "looks like a secret, not attached".
 - **Privacy:** questions and attached files leave this machine. The startup line says so
   even with `-q`. Only the `claude` login is used: no `ANTHROPIC_*` variable reaches the
   advisor, so Bedrock, Vertex and API-key-only setups get "unavailable".

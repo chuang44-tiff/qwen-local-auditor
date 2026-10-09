@@ -205,3 +205,11 @@ def test_json_record_and_state_cleanup(tmp_path, server, fake):
     assert adv["log"].endswith(".md")
     import os
     assert not os.path.exists(advisor_cfg(tmp_path)["env"]["QA_ADVISOR_STATE"])
+
+
+def test_ask_note_keeps_out_of_mechanical_work(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stderr
+    assert "mechanical work" in sys_prompt(calls(tmp_path)[0][0])

@@ -79,6 +79,20 @@ def _int(v, default):
     return n if n > 0 else default
 
 
+SECRET_DIRS = {".git", ".ssh", ".aws", ".gnupg", ".kube", ".docker"}
+SECRET_EXT = (".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx", ".asc", ".gpg")
+
+
+def looks_secret(rel):
+    parts = [x for x in rel.replace("\\", "/").split("/") if x]
+    name = parts[-1].lower() if parts else ""
+    return (any(x.lower() in SECRET_DIRS for x in parts[:-1])
+            or name == ".env" or name.startswith(".env.") or name.endswith(".env")
+            or name in (".netrc", ".npmrc", ".pypirc", ".git-credentials")
+            or name.startswith("id_") or "credential" in name or "secret" in name
+            or name.endswith(SECRET_EXT))
+
+
 def read_paths(paths, root):
     """([(path, text, truncated)], [note]) for the files inside root; the rest are notes."""
     if paths is None:
@@ -97,6 +111,9 @@ def read_paths(paths, root):
             inside = False
         if not inside:
             notes.append("%s: outside the working directory, not attached" % p)
+            continue
+        if looks_secret(os.path.relpath(full, root_r)) or looks_secret(p):
+            notes.append("%s: looks like a secret, not attached" % p)
             continue
         if not os.path.isfile(full):
             notes.append("%s: not a file, not attached" % p)

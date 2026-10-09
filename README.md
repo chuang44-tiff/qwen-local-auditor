@@ -161,10 +161,15 @@ session's API key, provider routing or model overrides, so a prompt cannot silen
 a cloud provider. The measured failure modes, and how to read a verdict:
 [reference/limits.md](skill/local-auditor/reference/limits.md).
 
-**Optional cloud advisor.** Everything runs locally by default. `qwen-agent --advisor opus`
-lets a session ask a Claude model for advice on a hard decision through your own `claude`
-login, with at most 4 calls per run. Questions and the files the session attaches leave your
-machine; nothing else changes and the session never depends on it.
+**Optional cloud advisor (experimental).** Everything runs locally by default. `qwen-agent
+--advisor opus` lets a session ask a Claude model for advice on a hard decision through your
+own `claude` login, with at most 4 calls per run. Questions and the files the session attaches
+leave your machine; nothing else changes and the session never depends on it. The idea comes
+from Claude's own [advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
+where a cheaper executor consults a stronger model at decision points. It is not proven to
+help: Qwen was never trained to use an advisor and rarely calls it. In our audit A/B it found
+2 more of 51 known bugs, below our bar. As a coder it asked twice in 22 runs, and both answers
+were useful.
 
 ## Benchmark
 
