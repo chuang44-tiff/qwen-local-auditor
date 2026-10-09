@@ -90,8 +90,12 @@ def test_git_bash_default_uses_cmd_c(tmp_path, server, fake):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     cyg = bindir / "cygpath"
-    cyg.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"${@: -1}\"\n",
-                   encoding="utf-8", newline="\n")   # prints its last argument
+    # on Git Bash the real cygpath (next on PATH) converts paths: qwen-agent hands a
+    # converted script path to the native python; elsewhere it prints its last argument
+    cyg.write_text("#!/usr/bin/env bash\n"
+                   "real=\"$(PATH=\"${PATH#*:}\" command -v cygpath)\" && exec \"$real\" \"$@\"\n"
+                   "printf '%s\\n' \"${@: -1}\"\n",
+                   encoding="utf-8", newline="\n")
     cyg.chmod(0o755)
     extra = dict(bdir(tmp_path),
                  PATH="%s%s%s" % (posix(bindir), os.pathsep, os.environ["PATH"]))

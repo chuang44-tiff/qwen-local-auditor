@@ -3015,7 +3015,7 @@ run_claude() {
     p="$(command -v "$CLAUDE_BIN" 2>/dev/null)" || p=""
     [ -n "$p" ] || p="$CLAUDE_BIN"
     CLAUDE_ARGV[0]="$p"
-    RUN_ARGV[$(( ${#RUN_ARGV[@]} - ${#CLAUDE_ARGV[@]} ))]="$p"
+    RUN_ARGV[${#RUN_ARGV[@]} - ${#CLAUDE_ARGV[@]}]="$p"
     run_claude_once; rc=$?
   done
   return $rc

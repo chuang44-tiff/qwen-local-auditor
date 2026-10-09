@@ -1460,10 +1460,12 @@ def test_retry_re_resolves_a_bare_claude_on_path(tmp_path, server, fake, timeout
 FAKE_SLEEP = r'''#!/usr/bin/env bash
 # Stands in for the backoff wait: the first call "finishes the update" by putting the
 # claude-late shim where the name resolves, then really sleeps (0 seconds in these tests).
+# It logs its argument: without GNU timeout (macOS) the built-in watchdog sleeps too,
+# so the tests count only the backoff's "sleep 0" lines.
 if [ ! -e "$FAKE_LATE_DIR/claude-late" ] && [ -z "${FAKE_NEVER:-}" ]; then
   cp "$FAKE_REAL" "$FAKE_LATE_DIR/claude-late" && chmod 755 "$FAKE_LATE_DIR/claude-late"
 fi
-echo x >> "$FAKE_SLEEP_LOG"
+echo "x $*" >> "$FAKE_SLEEP_LOG"
 exec /bin/sleep "$@"
 '''
 
@@ -1491,7 +1493,7 @@ def test_claude_absent_at_startup_is_waited_for(tmp_path, server, fake):
     assert r.returncode == 0, r.stderr
     assert "fake answer" in r.stdout
     assert r.stderr.count("claude not found: claude-late; retrying in 0s") == 1
-    assert (tmp_path / "sleeps.log").read_text().count("x") == 1    # one wait, not two
+    assert (tmp_path / "sleeps.log").read_text().splitlines().count("x 0") == 1   # one wait
 
 
 def test_claude_absent_at_startup_and_after_every_retry_is_exit_8(tmp_path, server, fake):
@@ -1499,7 +1501,7 @@ def test_claude_absent_at_startup_and_after_every_retry_is_exit_8(tmp_path, serv
     assert r.returncode == 8, r.stderr
     assert r.stderr.count("retrying in 0s") == 2
     assert "claude binary not found: claude-late (set QWEN_CLAUDE_BIN)" in r.stderr
-    assert (tmp_path / "sleeps.log").read_text().count("x") == 2
+    assert (tmp_path / "sleeps.log").read_text().splitlines().count("x 0") == 2
 
 # ------------------------------------------------------------------ --test-no-cmd
 

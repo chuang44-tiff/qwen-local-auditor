@@ -596,7 +596,8 @@ def test_holds_run_ignores_case_where_the_os_does(tmp_path, monkeypatch):
     (tmp_path / "fixtures").mkdir()
     (tmp_path / "fixtures" / "run").mkdir()
     inside = str(tmp_path / "FIXTURES" / "run")               # one folder, two spellings
-    assert mod._holds_run(str(tmp_path / "fixtures"), inside) is None   # a case-sensitive OS
+    if os.path.normcase("A") == "A":                          # a case-sensitive OS
+        assert mod._holds_run(str(tmp_path / "fixtures"), inside) is None
     monkeypatch.setattr(os.path, "normcase", str.lower)       # what Windows does
     why = mod._holds_run(str(tmp_path / "fixtures"), inside)
     assert why and "contains the run folder" in why
