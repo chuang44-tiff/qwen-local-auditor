@@ -1,10 +1,20 @@
 import os
 import pathlib
+import signal
 import sys
 # The skill directory is the install unit, so the library lives inside it.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "skill" / "local-auditor"))
 
 import pytest  # noqa: E402
+
+
+def sigint_default():
+    """preexec_fn for the tests that send SIGINT to a child: pytest itself may have been
+    started with SIGINT ignored (nohup, a background job), and the child would inherit
+    SIG_IGN and never see the interrupt. Runs in the child between fork and exec, so it
+    hands it the default disposition instead. POSIX only -- every test that passes it is
+    already skipped off POSIX."""
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
 @pytest.fixture(autouse=True, scope="session")

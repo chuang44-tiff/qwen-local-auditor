@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from conftest import sigint_default
 from lib import supervisor
 from lib.builders import history
 
@@ -582,7 +583,8 @@ def test_interrupt_lets_the_agent_remove_its_worktree(env):
     envv = dict(os.environ, FAKE_WT=str(wt), PYTHONPATH=os.path.dirname(os.path.dirname(supervisor.__file__)))
     p = subprocess.Popen([PY, supervisor.__file__, "--task", str(task), "--repo", str(repo),
                           "--agent", "bash", "--agent", str(agent), "--no-deviation-audit"],
-                         env=envv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                         env=envv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         preexec_fn=sigint_default)
     deadline = time.time() + 30
     while not os.path.exists(str(wt) + ".ready"):
         assert time.time() < deadline and p.poll() is None, p.communicate()
@@ -1102,7 +1104,8 @@ def test_main_interrupt_removes_the_sandbox(env):
     rec = tmp / "record.jsonl"
     p = subprocess.Popen([PY, supervisor.__file__, "--task", str(task), "--repo", str(repo),
                           "--agent", PY, "--agent", FAKE, "--no-deviation-audit", "--probe"],
-                         env=envv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                         env=envv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         preexec_fn=sigint_default)
     deadline = time.time() + 30
     while not rec.exists():                           # the fake agent has started its round
         assert time.time() < deadline and p.poll() is None, p.communicate()

@@ -10,6 +10,7 @@ import time
 import pytest
 
 import lib.swarm as sw
+from conftest import sigint_default
 
 FAKE = pathlib.Path(__file__).resolve().parent / "fake_swarm_agent.py"
 
@@ -255,7 +256,7 @@ def test_swarm_interrupt_stops_live_agents(tmp_path, fake):
         "try:\n    s.run_phase(us)\nexcept KeyboardInterrupt:\n    sys.exit(130)\n"
         % (str(pathlib.Path(sw.__file__).resolve().parents[1]), str(tmp_path / "run"), str(FAKE)))
     env = dict(os.environ, FAKE_SWARM_SLEEP="30")
-    p = subprocess.Popen([sys.executable, str(script)], env=env)
+    p = subprocess.Popen([sys.executable, str(script)], env=env, preexec_fn=sigint_default)
     live = fake / "live"
     deadline = time.time() + 20
     while time.time() < deadline and not (live.exists() and len(list(live.iterdir())) >= 4):

@@ -17,6 +17,7 @@ import time
 
 import pytest
 
+from conftest import sigint_default
 from lib import browser_mcp
 from lib.swarm_engine import claude_check as cc
 from swarm_fixtures import make_workflow  # noqa: F401  (only the INTERRUPTED child imports it)
@@ -631,7 +632,8 @@ def test_keyboard_interrupt_kills_the_group_and_propagates(tmp_path, fake_cc):
     script = tmp_path / "interrupted.py"
     script.write_text(INTERRUPTED, encoding="utf-8")
     p = subprocess.Popen([sys.executable, str(script), str(SA), str(TESTS), str(tmp_path)],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         preexec_fn=sigint_default)
     pidfile = fake_cc / "grandchild.pid"
     end = time.time() + 30
     while not pidfile.exists() and time.time() < end:
