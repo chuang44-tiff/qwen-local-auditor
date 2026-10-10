@@ -1826,8 +1826,10 @@ if [ "$PREFLIGHT_ONLY" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ]; then
   esac
 fi
 
-if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
+if [ "$PREFLIGHT_ONLY" -eq 0 ] && ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
   # An auto-update removes claude and recreates it: wait out the gap before giving up.
+  # --preflight-only is the exception: install.sh and qwen-sweep ask "is this usable"
+  # and want the verdict now, not after the backoff a real run would ride out.
   for _d in $EXEC_RETRY_BACKOFF; do
     die "claude not found: $CLAUDE_BIN; retrying in ${_d}s"
     sleep "$_d"

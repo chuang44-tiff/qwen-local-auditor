@@ -1496,6 +1496,20 @@ def test_claude_absent_at_startup_is_waited_for(tmp_path, server, fake):
     assert (tmp_path / "sleeps.log").read_text().splitlines().count("x 0") == 1   # one wait
 
 
+def test_preflight_only_does_not_wait_for_a_missing_claude(tmp_path, server, fake):
+    # install.sh and qwen-sweep call --preflight-only to ask "is this usable":
+    # a person without claude gets the exit-8 verdict now, not after the real
+    # 10s + 30s auto-update backoff (QWEN_EXEC_RETRY_BACKOFF left at its default).
+    extra = _late_claude(tmp_path, fake, never=True)
+    del extra["QWEN_EXEC_RETRY_BACKOFF"]                  # the default: 10 30
+    start = time.monotonic()
+    r = run(tmp_path, ["--preflight-only"], server, extra=extra)
+    assert r.returncode == 8, r.stderr
+    assert "retrying" not in r.stderr
+    assert "claude binary not found: claude-late (set QWEN_CLAUDE_BIN)" in r.stderr
+    assert time.monotonic() - start < 5                   # no backoff was slept
+
+
 def test_claude_absent_at_startup_and_after_every_retry_is_exit_8(tmp_path, server, fake):
     r = run(tmp_path, ["hi"], server, extra=_late_claude(tmp_path, fake, never=True))
     assert r.returncode == 8, r.stderr
