@@ -25,7 +25,7 @@ and how to use them, so "have the local model review this" is enough.
 - Claude Code (`claude` on `PATH`) and a server that serves the Anthropic Messages API at
   `/v1/messages`. vLLM does, and also lists models at `/v1/models`, which the tools use to
   pick the model and read its context window.
-- bash (Linux, macOS, or Git Bash on Windows), Python 3.8+ (stdlib only), curl >= 7.55, git.
+- bash (Linux, macOS, or Git Bash on Windows), Python 3.8+ (standard library only; CI exercises 3.10 and 3.12), curl >= 7.55, git.
 - Pillow (`pip install pillow`) for `--desktop` only (screenshots).
 - tmux for `qwen-cc`. A search backend (SearXNG or a Brave key) is needed only by research
   (`qwen-deep-research`, or a `qwen-swarm` workflow whose roles have a `search` or `web`
@@ -78,9 +78,10 @@ swarms are on the reference pages below.
 
 ## Safety
 
-Everything runs on your machine against your server; the child process never inherits
-your session's API key, provider routing or model overrides, so a prompt cannot silently
-go to a cloud provider. **Depth is the default:** a bare `qwen-agent` run never writes
+Everything runs on your machine against your server; the child process does not inherit
+your session's API key, provider routing or model overrides from the environment (one known
+gap: an `env.ANTHROPIC_BASE_URL` in a Claude Code settings file can still redirect it; a fix
+that pins the endpoint is planned). **Depth is the default:** a bare `qwen-agent` run never writes
 your files, but inside a git repo it gets a shell, Edit/Write and subagents in a throwaway
 sandbox copy of your tree, then reviews its own answer; the timeout is 3600 s. The copy
 is not a jail: the shell runs as you, with your network. `--shallow` (or `--read-only`)
@@ -105,6 +106,11 @@ changes. The idea comes from Claude's own [advisor tool](https://platform.claude
 where a cheaper executor consults a stronger model at decision points. It is not proven to
 help: Qwen was never trained to use an advisor and rarely calls it; in our audit A/B it found
 2 more of 51 known bugs, below our bar ([details](skill/local-auditor/reference/qwen-agent.md#advisor---advisor-model-experimental)).
+
+`qwen-swarm ui-test` re-checks each FAIL/BLOCKED row with Claude **by default** (`confirm=claude`,
+opus, up to `confirm_max` rows): the scenario, the tester's report and screenshots, the fixtures
+and a browser on the app's URL go to Claude through your own `claude` login;
+`--set confirm=local` keeps it on this machine, `--set confirm=none` skips it.
 
 ## Benchmark
 
@@ -141,7 +147,7 @@ Each skill's `SKILL.md` is the short version your Claude Code session reads:
 ```bash
 python -m pytest            # unit tests plus offline end-to-end CLI tests
 bash tests/test_install.sh  # install contract in a throwaway HOME
-ruff check . && shellcheck install.sh skill/local-auditor/*.sh tests/*.sh
+ruff check . && shellcheck install.sh skill/local-auditor/*.sh tests/*.sh tests/live/*.sh
 ```
 
 The CLI tests use a fake `/v1/models` server and a fake `claude`, so nothing needs a GPU or

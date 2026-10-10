@@ -7,6 +7,8 @@ import pathlib
 import re
 import subprocess
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 PATTERNS = {
@@ -49,6 +51,29 @@ def test_no_personal_machine_details_are_committed():
 # under docs/superpowers are working files, not shipped code, and are not checked.
 PROCESS_NARRATION = re.compile(
     r"Review focus:|\bfix round\b|\bper the spec\b|\bMust-fix\b|\bShould-fix\b|\bTask \d+:")
+
+
+CLI_SCRIPTS_GLOB = "skill/local-auditor/*.sh"
+
+
+def test_cli_scripts_are_executable_in_git():
+    """The commands are run as programs, so the executable bit belongs in the index: a
+    clone that checks them out 644 cannot run them. The on-disk bit of this particular
+    checkout proves nothing about a clone, so the index (mode 100755) is what is checked."""
+    try:
+        out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-s", CLI_SCRIPTS_GLOB],
+                             capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("not a git checkout")
+    modes = {}
+    for line in out.splitlines():
+        meta, _, path = line.partition("\t")
+        modes[path] = meta.partition(" ")[0]
+    assert modes, "git knows no CLI scripts under %s" % CLI_SCRIPTS_GLOB
+    not_exec = sorted(p for p, m in modes.items() if m != "100755")
+    assert not not_exec, ("committed without the executable bit: %s"
+                          "  fix: chmod +x PATH && git update-index --chmod=+x PATH"
+                          % ", ".join(not_exec))
 
 
 def test_shipped_files_do_not_narrate_their_review():

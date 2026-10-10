@@ -498,6 +498,16 @@ def test_swarm_reference_covers_claude_check_events_and_verdicts():
         assert needle in t, needle
 
 
+def test_readme_safety_discloses_the_ui_test_confirm_pass():
+    # The ui-test confirm pass is ON by default and hands evidence to Claude; the README's
+    # Safety section is where a reader should learn the default and the two ways out of it.
+    t = README.read_text(encoding="utf-8")
+    safety = _flat(t[t.index("## Safety"):t.index("## Benchmark")])
+    for needle in ("confirm=claude", "--set confirm=local", "--set confirm=none",
+                   "FAIL/BLOCKED", "screenshots", "login"):
+        assert needle in safety, needle
+
+
 def test_advisor_section_names_the_ui_test_exception():
     ref = (REF / "qwen-agent.md").read_text(encoding="utf-8")
     advisor = ref[ref.index("## Advisor"):ref.index("## Model, context and effort")]

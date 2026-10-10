@@ -21,6 +21,9 @@ QWEN_BASE_URL="${QWEN_BASE_URL:-http://127.0.0.1:8000}"
 # If the server requires a key (sent as the Anthropic auth token):
 # QWEN_API_KEY="${QWEN_API_KEY:-}"
 
+# Where the claude executable is when it is not on PATH (install.sh's rc=8 names this).
+# QWEN_CLAUDE_BIN="${QWEN_CLAUDE_BIN:-claude}"
+
 # Pin the interpreter used to parse results. Probed by RUNNING it: on Windows a
 # bare `python3` is often a Microsoft Store stub that cannot execute anything.
 # QWEN_PYTHON="${QWEN_PYTHON:-python}"

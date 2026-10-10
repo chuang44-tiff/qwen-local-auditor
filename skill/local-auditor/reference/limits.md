@@ -109,9 +109,10 @@ the measured detail.
   any the model wrote or edited, execute as you. Every `--test` run passes
   `claude --restricted`, so your own Claude settings cannot widen the fence.
 - **The child never inherits the parent session's control channel**, its provider routing
-  (Bedrock, Vertex, Foundry), `ANTHROPIC_API_KEY`, custom headers or model overrides, so a
-  prompt cannot silently go to a cloud provider instead of your server. `--dry-run` shows
-  the exact command and environment with secrets redacted.
+  (Bedrock, Vertex, Foundry), `ANTHROPIC_API_KEY`, custom headers or model overrides from the
+  environment. Known gap: an `env.ANTHROPIC_BASE_URL` set in a Claude Code settings file can
+  still redirect the child; a fix that pins the endpoint is planned. `--dry-run` shows the
+  exact command and environment with secrets redacted.
 - **Sweep runs are written to your cache directory**, never into the repository under
   audit; `--until-done` state must live outside the repo too.
 - **`qwen-cc` reads, types into and kills only the tmux sessions it created** (tagged
