@@ -508,6 +508,8 @@ def _grow_stack(wf, b, bl, st, new):
             added = True
             wf.log("stack: kept %s -> %.2fs" % (c["id"], st["best"]))
         else:
+            c["why"] = "approved; not added to the stack: %s" % (
+                m["why"] or "not faster than the stack by more than the noise")
             wf.log("stack: dropped %s (runs %s, %s)" % (c["id"], m["runs"], m["why"] or "not faster"))
     return added
 
@@ -597,7 +599,7 @@ def _final_guard(wf, b, bl, st):
             if dropped:
                 m = _measure(wf, b["measure"], stack, "measure final %s" % "+".join(st["kept"]), float("inf"))
                 st["best"] = m["seconds"] if m["ok"] and m["seconds"] is not None else st["best"]
-            line = "guard: passed (%s) in %.2fs; baseline %.2fs" % (_count(g), g["wall"], gw)
+            line = "guard: passed on the stack (%s) in %.2fs; baseline %.2fs" % (_count(g), g["wall"], gw)
             if dropped:
                 line += "; dropped from the stack because guard failed with them: %s" % ", ".join(dropped)
             gn = benchlib.noise(gw, gw, gw)
@@ -700,9 +702,9 @@ def _finish(wf, b, bl, st, target, reason, last):
     notes = ["", "## Slow outside focus (report only)", ""] + [
         "- %s: %s" % (n_["location"], n_["why"]) for n_ in st["notes"]] if st["notes"] else []
     wf.report("\n".join(head) + "\n\n" + (body or "# Optimize\n\n(the writer failed; see the table)") +
-              "\n\n## Measurements\n\n%s\n\nBaseline: %s in %.2fs. Stacked: %s\n\n%s\n\n%s\n"
-              % ("\n".join(["- " + x for x in facts.splitlines()[:5]]), count, base, stacked, guard_line,
-                 "\n".join(table)) + ("\n".join(notes) + "\n" if notes else ""))
+              "\n\n## Measurements\n\n%s\n\n%s\n"
+              % ("\n".join(["- " + x for x in facts.splitlines()[:5]]), "\n".join(table)) +
+              ("\n".join(notes) + "\n" if notes else ""))
 
 
 def run(wf):

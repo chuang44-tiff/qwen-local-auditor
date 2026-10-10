@@ -335,6 +335,76 @@ def test_conflicting_patches_stack_only_the_first():
     assert any("dropped P2" in m for m in fake.logs)
 
 
+def test_a_dropped_patch_falls_back_when_there_is_no_why():
+    W = _wf_module()
+    bl = {"base": 10.0, "noise": 0.2, "passed": 4}      # the stack trial passes 3 of the 4
+    st = {"stack": "", "best": 10.0, "kept": [], "patches": {"P1": "diff A\n"}}
+    new = [{"id": "P1", "approved": True, "seconds": 5.0}]
+    assert not W._grow_stack(FakeWF([5.0, 5.0]), {"measure": "m"}, bl, st, new)
+    assert new[0]["why"] == ("approved; not added to the stack: not faster than "
+                             "the stack by more than the noise")
+
+
+PROFILER_TWO_EDITS = r'''
+import json, re
+def answer(p, r):
+    line = re.search(r"^\s*[\d.]+\s+test_slow\.py::test_work\s*$", p, re.M).group(0).strip()
+    return 0, "```json\n" + json.dumps({"ideas": [
+        {"location": "slow.py:2", "profile_line": line, "change": "lower DELAY to 0.01", "why": "sleep", "saving": "0.6s"},
+        {"location": "slow.py:2", "profile_line": line, "change": "lower DELAY to 0.02", "why": "sleep", "saving": "0.6s"}],
+        "outside_focus": None}) + "\n```"
+'''
+IMPLEMENTER_DELAY = r'''
+import json, pathlib, re
+def answer_cwd(p, r, cwd):
+    iid = re.search(r"^- (I\d+):", p, re.M).group(1)
+    new = re.search(r"lower DELAY to ([0-9.]+)", p).group(1)
+    d = pathlib.Path(cwd)
+    s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.6", "DELAY = %s" % new)
+    (d / "slow.py").write_text(s, encoding="utf-8", newline="\n")
+    return 0, "```json\n" + json.dumps({"id": iid, "done": True, "summary": "DELAY %s" % new, "note": ""}) + "\n```"
+'''
+REVIEWER_KEEPS_DELAY = r'''
+import json, re
+def answer(p, r):
+    return 0, "```json\n" + json.dumps([{"patch": pid, "verdict": "keeps", "lines": ["-DELAY = 0.6"],
+                                         "reason": "only the sleep constant changes"}
+                                        for pid in re.findall(r"^- (P\d+) ", p, re.M)]) + "\n```"
+'''
+
+
+def test_a_patch_left_out_of_the_stack_says_why(tmp_path, team):
+    # two approved patches that each speed measure up edit the same line: only the faster
+    # one stacks; the other's diff cannot apply on top of it, and its row says why
+    write_fakes(team, profiler=PROFILER_TWO_EDITS, implementer=IMPLEMENTER_DELAY,
+                reviewer=REVIEWER_KEEPS_DELAY)
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
+    assert rc == 0, report(run)
+    rows = [line.split("|") for line in report(run).splitlines() if line.startswith("| P")]
+    assert len(rows) == 2
+    left = [r for r in rows if r[6].strip() == "-"]                     # not stacked
+    assert len(left) == 1, report(run)
+    assert left[0][7].strip().startswith("approved; not added to the stack:")
+    cands = {c["id"]: c for c in json.loads((run / "candidates.json").read_text(encoding="utf-8"))}
+    assert cands[left[0][1].strip()]["approved"] and cands[left[0][1].strip()]["seconds"] is not None
+
+
+def test_measurements_section_has_no_repeats(tmp_path, team):
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="-30%"))
+    assert rc == 0, report(run)
+    after = report(run).split("## Measurements", 1)[1]
+    assert after.count("guard: passed on the stack") == 1
+    assert after.count("Stacked:") == 1
+
+
+def test_writer_role_has_no_review_round():
+    data = json.loads((pathlib.Path(__file__).resolve().parent.parent / "skill" / "local-auditor" /
+                       "lib" / "workflows" / "optimize" / "workflow.json").read_text(encoding="utf-8"))
+    assert data["roles"]["writer"]["deep"] is False
+
+
 def test_parse_review_downgrades_uncited_verdicts():
     W = _wf_module()
     patches = {"P1": "+++ b/x.py\n+DELAY = 0.1\n"}
