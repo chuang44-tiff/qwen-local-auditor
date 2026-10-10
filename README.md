@@ -109,7 +109,8 @@ help: Qwen was never trained to use an advisor and rarely calls it; in our audit
 ## Benchmark
 
 One local model on one workstation GPU, 20 Aider polyglot exercises: Claude Code alone
-solved 12/20, `qwen-agent --until-done` solved **18/20**. `--until-done` runs the coding
+solved 12-14/20 with a retry, `qwen-agent --until-done` solved **18/20**, in two runs a week
+apart. `--until-done` runs the coding
 task in rounds, each new round seeing the previous round's test failures, until the task
 file's checklist passes or `--max-rounds` is reached. The gain is the loop, not the
 model; method, caveats and numbers: [reference/benchmark.md](skill/local-auditor/reference/benchmark.md).
