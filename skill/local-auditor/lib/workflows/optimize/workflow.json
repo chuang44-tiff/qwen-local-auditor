@@ -1,0 +1,21 @@
+{
+ "name": "optimize",
+ "description": "Make a test suite faster without changing what it checks, toward a target set in a bench file: bench check, profile, sandboxed ideas, measured, reviewed, stacked, guarded",
+ "goal": "what to make faster and what must not change",
+ "target": "required",
+ "roles": {
+  "checker": {"file": "roles/checker.md", "fence": "read"},
+  "profiler": {"file": "roles/profiler.md", "fence": "read"},
+  "implementer": {"file": "roles/implementer.md", "fence": "sandbox", "budget_weight": 3},
+  "reviewer": {"file": "roles/reviewer.md", "fence": "read"},
+  "writer": {"file": "roles/writer.md", "fence": "none"}
+ },
+ "knobs": {"bench": "str", "tests": "str", "ideas": "int", "voters": "int", "min_gain": "float"},
+ "presets": {
+  "quick": {"bench": "", "tests": "", "ideas": 3, "voters": 1, "min_gain": 0.01, "budget": 900, "retries": 1, "rounds": 1},
+  "standard": {"bench": "", "tests": "", "ideas": 5, "voters": 3, "min_gain": 0.01, "budget": 1200, "retries": 1, "rounds": 2},
+  "deep": {"bench": "", "tests": "", "ideas": 6, "voters": 3, "min_gain": 0.01, "budget": 1800, "retries": 2, "rounds": 3},
+  "overnight": {"bench": "", "tests": "", "ideas": 8, "voters": 3, "min_gain": 0.005, "budget": 2400, "retries": 2, "rounds": "until", "hours": 8}
+ },
+ "default_depth": "deep"
+}
