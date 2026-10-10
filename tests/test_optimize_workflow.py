@@ -164,3 +164,204 @@ def test_resume_uses_the_saved_bench(tmp_path, env):
     p.write_text("{", encoding="utf-8")                     # now unreadable
     rc2 = runner.main(agent_args() + ["optimize", "--resume", str(run)])
     assert rc2 == rc
+
+
+PROFILER = r'''
+import json, re
+def answer(p, r):
+    m = (re.search(r"^\s*[\d.]+\s+test_slow\.py::test_work\s*$", p, re.M)
+         or re.search(r"^OUTPUT TAIL:$", p, re.M))         # unknown runner: no per-test lines
+    line = m.group(0).strip()
+    n = len(re.findall(r"^- I\d+ at ", p, re.M))
+    ideas = [] if n else [
+        {"location": "slow.py:2", "profile_line": line, "change": "lower DELAY", "why": "sleep", "saving": "0.5s"},
+        {"location": "test_slow.py:5", "profile_line": line, "change": "drop the assert", "why": "x", "saving": "0"},
+        {"location": "nope.py:1", "profile_line": line, "change": "ghost file", "why": "x", "saving": "0"},
+        {"location": "slow.py:2", "profile_line": "invented profile line", "change": "other", "why": "x", "saving": "0"}]
+    return 0, "```json\n" + json.dumps({"ideas": ideas, "outside_focus":
+        {"location": "test_other.py:1", "profile_line": line, "why": "also slow"}}) + "\n```"
+'''
+IMPLEMENTER = r'''
+import json, pathlib, re
+def answer_cwd(p, r, cwd):
+    iid = re.search(r"^- (I\d+):", p, re.M).group(1)
+    d = pathlib.Path(cwd)
+    if "lower DELAY" in p:
+        s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.6", "DELAY = 0.01")
+        (d / "slow.py").write_text(s, encoding="utf-8", newline="\n")
+    elif "drop the assert" in p:
+        s = (d / "test_slow.py").read_text(encoding="utf-8").replace("assert slow.work() == 42", "pass")
+        s = s.replace("import slow\n", "")
+        (d / "test_slow.py").write_text(s, encoding="utf-8", newline="\n")
+    return 0, "```json\n" + json.dumps({"id": iid, "done": True, "summary": "did it", "note": ""}) + "\n```"
+'''
+REVIEWER = r'''
+import json, re
+def answer(p, r):
+    rows = []
+    for pid, body in re.findall(r"^- (P\d+) .*?\n(.*?)(?=^- P\d+ |\Z)", p, re.M | re.S):
+        if "pass" in body and "-    assert" in body:
+            rows.append({"patch": pid, "verdict": "weakens", "lines": ["-    assert slow.work() == 42"], "reason": "assert gone"})
+        else:
+            rows.append({"patch": pid, "verdict": "keeps", "lines": ["+DELAY = 0.01"], "reason": "same test"})
+    return 0, "```json\n" + json.dumps(rows) + "\n```"
+'''
+REVIEWER_FAKE_CITE = r'''
+import json, re
+def answer(p, r):
+    return 0, "```json\n" + json.dumps([{"patch": i, "verdict": "keeps", "lines": ["+not in the patch"], "reason": "r"}
+        for i in re.findall(r"^- (P\d+) ", p, re.M)]) + "\n```"
+'''
+
+
+@pytest.fixture
+def team(env):
+    write_fakes(env, profiler=PROFILER, implementer=IMPLEMENTER, reviewer=REVIEWER)
+    return env
+
+
+def test_a_slow_sleep_gets_a_checked_stacked_patch(tmp_path, team):
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="-30%"))
+    text = report(run)
+    assert rc == 0, text
+    assert text.splitlines()[0] == "bench: ok"
+    stacked = (run / "patches" / "stacked.diff").read_text(encoding="utf-8")
+    assert "+DELAY = 0.01" in stacked and "assert" not in stacked
+    assert "guard: passed" in text
+    assert "test_other.py:1" in text                     # the outside-focus note, report only
+    assert (repo / "slow.py").read_text(encoding="utf-8").count("DELAY = 0.6") == 1   # target untouched
+    ideas = json.loads((run / "ideas.json").read_text(encoding="utf-8"))
+    assert [i["location"] for i in ideas] == ["slow.py:2", "test_slow.py:5"]   # ghost + invented dropped
+
+
+def test_a_weakening_patch_is_never_approved(tmp_path, team):
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
+    cands = json.loads((run / "candidates.json").read_text(encoding="utf-8"))
+    weak = [c for c in cands if c["idea"] == "I2"][0]
+    assert not weak["approved"]
+
+
+def test_a_citation_not_in_the_patch_counts_as_unclear(tmp_path, team):
+    write_fakes(team, reviewer=REVIEWER_FAKE_CITE)
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
+    assert rc == 4 and not (run / "patches" / "stacked.diff").exists()
+    assert "no approved patch" in report(run)
+
+
+def test_patch_outside_focus_is_not_measured(tmp_path, team):
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, focus=["slow.py"]))
+    cands = json.loads((run / "candidates.json").read_text(encoding="utf-8"))
+    assert [c["location"] for c in cands] == ["slow.py:2"]   # test_slow.py:5 dropped as an idea
+    assert rc == 0
+
+
+def test_target_reached_stops_rounds_early(tmp_path, team):
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="-20%"), depth="deep")
+    assert rc == 0
+    assert not (run / "round-2").exists()
+    assert "target reached" in (run / "run.log").read_text(encoding="utf-8")
+
+
+def test_target_not_reached_is_exit_4_with_the_stack(tmp_path, team):
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="0.01s"))
+    assert rc == 4 and (run / "patches" / "stacked.diff").exists()
+    assert "target 0.01s not reached" in report(run)
+
+
+def test_unknown_runner_still_optimizes(tmp_path, team):
+    files = dict(SLOW, **{"check.sh": "%s -c 'import slow; assert slow.work() == 42'\n" % PY})
+    repo = git_repo(tmp_path / "repo", files)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(
+        tmp_path, measure="bash check.sh", guard="bash check.sh", focus=["slow.py"]))
+    text = report(run)
+    assert rc == 0, text
+    assert "pass count not checked" in text
+
+
+def _wf_module():
+    import importlib.util
+    src = pathlib.Path(__file__).resolve().parent.parent / "skill" / "local-auditor" / "lib" / \
+        "workflows" / "optimize" / "workflow.py"
+    spec = importlib.util.spec_from_file_location("optimize_wf_t", str(src))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class FakeWF:
+    """Just enough of wf for _recheck and _grow_stack: run_cmd answers from a queue."""
+    def __init__(self, walls):
+        self.walls, self.logs = list(walls), []
+        self.steps = self
+
+    def run_cmd(self, cmd, patch=None, timeout=0):
+        if patch and "CONFLICT" in patch:              # does not apply: no command runs
+            return {"applied": False, "rc": None, "timed_out": False, "output_tail": "error: patch failed"}
+        w = self.walls.pop(0)
+        ok = w is not None
+        res = {"rc": 0 if ok else 1, "wall": w if ok else 0.1, "runner": "pytest", "files": None,
+               "passed": 3, "failed": 0 if ok else 1, "skipped": 0}
+        return {"applied": True, "rc": res["rc"], "timed_out": False,
+                "output_tail": "QLA_RESULT " + json.dumps(res) + "\n"}
+
+    def log(self, msg):
+        self.logs.append(msg)
+
+
+def test_one_drifting_recheck_does_not_stop_the_run():
+    W = _wf_module()
+    bl = {"base": 10.0, "noise": 0.2, "passed": 3}
+    b = {"measure": "m"}
+    assert W._recheck(FakeWF([12.0, 10.1]), b, bl, 2) is None            # drift, then fine
+    assert "drifted" in W._recheck(FakeWF([12.0, 12.5]), b, bl, 2)        # drift twice
+    assert W._recheck(FakeWF([None, 10.0]), b, bl, 2) is None             # one failure
+    assert "fails on the unchanged tree" in W._recheck(FakeWF([None, None]), b, bl, 2)
+
+
+def test_conflicting_patches_stack_only_the_first():
+    W = _wf_module()
+    bl = {"base": 10.0, "noise": 0.2, "passed": 3}
+    st = {"stack": "", "best": 10.0, "kept": [], "patches": {"P1": "diff A\n", "P2": "CONFLICT\n"}}
+    new = [{"id": "P1", "approved": True, "seconds": 5.0}, {"id": "P2", "approved": True, "seconds": 6.0}]
+    fake = FakeWF([5.0, 5.0])                     # P1 stacked: two runs at 5.0; P2 never applies
+    added = W._grow_stack(fake, {"measure": "m"}, bl, st, new)
+    assert added and st["kept"] == ["P1"]
+    assert any("dropped P2" in m for m in fake.logs)
+
+
+def test_parse_review_downgrades_uncited_verdicts():
+    W = _wf_module()
+    patches = {"P1": "+++ b/x.py\n+DELAY = 0.1\n"}
+    parse = W.parse_review(patches)
+    rows = parse(json.dumps([{"patch": "P1", "verdict": "keeps", "lines": ["+DELAY = 0.1"], "reason": "r"}]),
+                 [({"id": "P1"}, 0)])
+    assert rows[0]["verdict"] == "supported"
+    rows = parse(json.dumps([{"patch": "P1", "verdict": "keeps", "lines": ["+other"], "reason": "r"}]),
+                 [({"id": "P1"}, 0)])
+    assert rows[0]["verdict"] == "unclear"
+
+
+PROFILER_OUTSIDE = r'''
+import json, re
+def answer(p, r):
+    line = re.search(r"^\s*[\d.]+\s+test_slow\.py\S*\s*$", p, re.M).group(0).strip()
+    return 0, "```json\n" + json.dumps({"ideas": [
+        {"location": "slow.py:2", "profile_line": line, "change": "lower DELAY", "why": "s", "saving": "1"}],
+        "outside_focus": None}) + "\n```"
+'''
+
+
+def test_every_idea_outside_focus_stops_the_run(tmp_path, team):
+    write_fakes(team, profiler=PROFILER_OUTSIDE)
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, focus=["test_slow.py"]))
+    assert rc == 4
+    assert report(run).splitlines()[0].startswith(
+        "bench: problem (see bench-review.md): round 1: every idea was outside focus")
+    assert "round 1" in (run / "bench-review.md").read_text(encoding="utf-8")
