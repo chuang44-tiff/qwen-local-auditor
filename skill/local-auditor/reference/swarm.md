@@ -8,8 +8,8 @@ answer cached in the run folder so `--resume` continues where a run stopped, and
 `--hours` deadline. The short version your session loads is `skill/local-swarm/SKILL.md`.
 
 Built-ins: `research` (this is `qwen-deep-research`; see [deep-research.md](deep-research.md)),
-`debug` and `ui-test` (a scripted UI suite), each documented under its own heading below.
-`qwen-swarm --list` prints them.
+`debug`, `ui-test` (a scripted UI suite) and `optimize` (a faster test suite), each documented
+under its own heading below. `qwen-swarm --list` prints them.
 
 ## A workflow folder
 
@@ -455,6 +455,55 @@ hypotheses) -> report (`none`; the writer is shown the winning patch).
 Patches are ranked into `RUN/patches/<n>.diff`; exit 0 when one passed, was approved,
 leaves the tests alone and was reviewed whole, exit 4 otherwise. The engine never writes
 `--target`; you apply a patch with `git apply`.
+
+## The optimize workflow
+
+`qwen-swarm optimize "GOAL" --target REPO --out RUN_DIR --set bench=bench.json` makes a test
+suite faster without changing what it checks, toward a target the calling session sets. The
+bench file:
+
+```json
+{
+  "measure": "python -m pytest -q tests/test_cli.py",
+  "guard":   "python -m pytest -q",
+  "focus":   ["tests/test_cli.py", "tests/conftest.py"],
+  "target":  "-30%",
+  "keep":    "no test removed or skipped; assertions unchanged"
+}
+```
+
+| field | meaning |
+|---|---|
+| `"measure"` | required: the command timed on every candidate |
+| `"guard"` | default `measure`: must still pass, with no fewer tests, on the final patch |
+| `"focus"` | default the whole target: paths or globs a patch may change |
+| `"target"` | optional, `-N%` or `Ns` on measure: reached = the rounds stop |
+| `"keep"` | what reviewers judge each patch against |
+
+`--set tests=CMD` without a bench times the whole suite with no focus and no target.
+Any runner works: the wrapper times the command itself; pytest, unittest, jest, vitest,
+`go test -v` and cargo test also give a pass count (a patch must keep it) and pytest and jest
+a per-file profile (go a per-test one). Another runner is judged by its exit code alone, and the report
+says "pass count not checked".
+
+The run checks the bench before round 1 (measure passes twice, guard passes and runs at
+least as many tests, the profile reaches focus, the target is above the timing noise) and
+a checker agent may report a problem, quoting the output. A failed check stops the run:
+exit 4, `report.md` starts with `bench: problem (see bench-review.md): <reason>`, and
+`bench-review.md` holds the evidence. The local model never changes the bench; its
+suggestion goes to `bench-suggested.json` and is not run. The same stop happens mid-run when
+measure fails twice on the unchanged tree, when its timing drifts past 3x the noise twice,
+or when a round's ideas all fall outside focus; approved patches so far stay in `patches/`.
+
+Every claim a local agent makes is checked: an idea names a real `path:line` inside focus
+and quotes a real profile line; speed is measured by the engine, never taken from the
+agent; a reviewer's verdict counts only when the diff lines it cites are in the patch.
+Approved patches are stacked when the stack gets faster by more than the noise; the guard
+then runs once on the stack, dropping patches from the end until it passes.
+
+Output: `patches/stacked.diff` (apply it yourself; `--target` is never written),
+`patches/<n>-<id>.diff`, `bench-review.md`, `report.md`. Exit 0 when a stack was kept,
+guard passed and the target (if any) was reached; exit 4 otherwise.
 
 ## The ui-test workflow
 

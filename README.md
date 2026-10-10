@@ -14,7 +14,7 @@ frontier tokens for the hard parts and hand the rest to the local model through 
 - `qwen-test`: your test command in a throwaway git worktree, the one shell command a `--test` run is granted.
 - `qwen-cc`: an interactive session in tmux that Claude Code can read, type into and stop.
 - `qwen-deep-research`: local sessions research a question on the web and write a cited report.
-- `qwen-swarm`: a workflow (built-in `research` or `debug`, or your own) run by many local agents in rounds, often overnight.
+- `qwen-swarm`: a workflow (built-in `research`, `debug`, `ui-test` or `optimize`, or your own) run by many local agents in rounds, often overnight.
 
 Six skills (`local-agent` routes; `local-auditor`, `local-sweep`, `local-coder`,
 `local-deep-research` and `local-swarm` do the work) teach your Claude Code session when
@@ -133,7 +133,7 @@ All under `skill/local-auditor/reference/`; the installed skills read the same f
 | [sweep.md](skill/local-auditor/reference/sweep.md) | `qwen-sweep`: builders, flags, output files, writing a builder |
 | [interactive.md](skill/local-auditor/reference/interactive.md) | `qwen-agent --interactive` and `qwen-cc` |
 | [deep-research.md](skill/local-auditor/reference/deep-research.md) | `qwen-deep-research`: SearXNG or Brave setup, depth presets, run folder, resume |
-| [swarm.md](skill/local-auditor/reference/swarm.md) | `qwen-swarm`: workflows, the manifest, fences, the `wf` API, the debug workflow |
+| [swarm.md](skill/local-auditor/reference/swarm.md) | `qwen-swarm`: workflows, the manifest, fences, the `wf` API, the debug, ui-test and optimize workflows |
 | [limits.md](skill/local-auditor/reference/limits.md) | the fence at a glance, and what this lane gets wrong, measured |
 | [vllm.md](skill/local-auditor/reference/vllm.md) | serving Qwen on vLLM: the chat-template fix that keeps the prefix cache |
 | [benchmark.md](skill/local-auditor/reference/benchmark.md) | full method and numbers |
