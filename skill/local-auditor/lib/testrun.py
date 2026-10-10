@@ -291,7 +291,7 @@ def _read_capped(fh, cap=None):
             + tail.decode("utf-8", "replace"))
 
 
-def _run(argv, cwd, timeout):
+def _run(argv, cwd, timeout, label="test"):
     """(returncode or None on timeout, combined output). Kills the whole process group.
 
     Output goes to a temporary file, not a pipe: a test suite that prints gigabytes is
@@ -306,7 +306,7 @@ def _run(argv, cwd, timeout):
             p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
                                  stderr=subprocess.STDOUT, env=_child_env(), **kw)
         except OSError as exc:
-            return 127, "cannot run the test command %r: %s" % (argv[0], exc)
+            return 127, "cannot run the %s command %r: %s" % (label, argv[0], exc)
         try:
             try:
                 rc = p.wait(timeout=timeout)

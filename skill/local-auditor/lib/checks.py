@@ -20,7 +20,7 @@ DETAIL_BYTES = 3000
 
 
 def _cmd(item, repo, timeout):
-    rc, out = testrun._run(testrun.split_command(item.arg), repo, timeout)
+    rc, out = testrun._run(testrun.split_command(item.arg), repo, timeout, "check")
     last = next((l.strip() for l in reversed(out.splitlines()) if l.strip()), "")
     if rc is None:
         return CheckResult(item.index, item.text, "FAIL", "CMD %s TIMEOUT after %ds" % (item.arg, timeout),

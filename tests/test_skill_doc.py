@@ -84,6 +84,9 @@ def test_coder_documents_until_done_and_exit_codes():
     assert "--until-done" in t and "DEVIATION" in t
     for code in ("11", "12", "13", "14"):
         assert code in t
+    # cmd checks run without a shell: both pages must name the way to keep a shell
+    assert "sh -c" in t, "local-coder SKILL.md never says to wrap a shell command in sh -c"
+    assert "sh -c" in (REF / "coding.md").read_text(encoding="utf-8"), "coding.md never says it"
 
 
 def test_deep_research_skill_documents_exit_codes_and_check():

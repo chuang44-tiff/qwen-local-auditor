@@ -1,3 +1,5 @@
+import shlex
+import shutil
 import subprocess
 import sys
 
@@ -77,6 +79,8 @@ def repo(tmp_path, monkeypatch):
     for a in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"]):
         subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True)
     (r / "check.py").write_text("import sys\nsys.exit(0 if 'good' in sys.argv else 1)\n")
+    (r / "sub").mkdir()
+    (r / "sub" / "check.py").write_text("import sys\nsys.exit(0)\n")
     subprocess.run(["git", "-C", str(r), "add", "-A"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(r), "commit", "-qm", "i"], check=True, capture_output=True)
     return r
@@ -92,6 +96,62 @@ def test_run_checks(repo):
     assert [r.status for r in res] == ["PASS", "FAIL", "FAIL", "UNVERIFIED"]
     assert res[1].evidence.startswith("TEST bad FAILED")
     assert "exit 3" in res[2].evidence
+
+
+@pytest.mark.parametrize("cmd", [
+    "python check.py && python other.py",      # &&
+    "python check.py | wc -l",                 # pipe
+    "python check.py > out.txt",               # redirect
+    "python check.py ; python other.py",       # ;
+    "python check.py 2>&1 log",                # redirect
+    "python check.py || python other.py",      # ||
+    "FOO=1 python check.py",                   # leading assignment: no program named FOO=1
+    "cd sub && python check.py",               # leading cd (a builtin: nothing to exec)
+    "export FOO=1 && python check.py",         # leading export
+    "source env.sh",                           # leading source
+    ". ./env.sh",                              # leading .
+])
+def test_cmd_check_with_shell_operators_is_refused(cmd):
+    # A cmd check runs as argv, without a shell: such a line can never pass, and the
+    # loop would burn rounds on it. It is refused when the task file is parsed.
+    with pytest.raises(ValueError) as ei:
+        taskfile.parse("- [ ] x -- check: cmd %s\n" % cmd)
+    assert "sh -c" in str(ei.value)
+
+
+SAFE_CMDS = [
+    'python -c "import x; assert x.y == 1"',
+    "pytest -k 'a or b'",
+    "grep -q '&&' f",
+    "C:\\Python\\python.exe check.py",
+    "./run.sh --flag=1",
+    "tests/*.py",
+    "sh -c 'cd sub && pytest -q'",
+    'bash -c "cd sub && pytest -q"',
+    'python --opt="a&&b" check.py',            # an operator inside a word is data under argv
+    'python -c "print(\\"hi\\")"',             # escaped quotes inside double quotes
+    "pytest tests/test_(x).py",
+    "grep -E foo$ f",
+    "make FOO=1",                              # an assignment that is not the first word
+    "grep -E a\\|b f",                         # a backslash-escaped operator
+]
+
+
+def test_quoted_operators_and_sh_c_are_accepted():
+    for cmd in SAFE_CMDS:
+        assert taskfile.parse("- [ ] x -- check: cmd %s\n" % cmd).items[0].arg == cmd
+    # A quoted " -- check: none" inside the command is not shell syntax (the scan
+    # accepts it); that whole line is separately refused as a double marker, see
+    # test_ambiguous_markers_are_refused.
+    taskfile._scan_cmd(1, 'grep -q " -- check: none" t.md')
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs sh")
+def test_sh_c_cmd_check_passes_end_to_end(repo):
+    py = shlex.quote(PY)                       # posix form: what sh will read
+    t = taskfile.parse("- [ ] sub passes -- check: cmd sh -c 'cd sub && %s check.py'\n" % py)
+    res = checks.run_checks(t.items, str(repo), test_cmd="%s check.py" % PY, timeout=60)
+    assert [r.status for r in res] == ["PASS"], res[0].evidence
 
 
 def test_ambiguous_markers_are_refused():

@@ -102,8 +102,12 @@ Write the ` -- check:` suffix once per line, at the end. A line with no valid su
 prose contains `check:` is refused. When item text quotes the syntax, the last valid
 ` -- check:` on the line is the check and anything before it is item text; anything that
 still reads like a marker after it, or text after `check: none`, is refused. A `test`
-selector obeys the `qwen-test` allowlist above: a test id or path, or `-k EXPR`. Make
-every item checkable: the local model cannot tick items or edit this file. For batch
+selector obeys the `qwen-test` allowlist above: a test id or path, or `-k EXPR`. A `cmd`
+check runs without a shell: `&&`, `|`, `;` or a redirect as a separate word, and a leading `cd` or
+`NAME=value`, are refused when the task file
+is read, so wrap such a command in `sh -c '...'` (for example
+`-- check: cmd sh -c 'cd sub && pytest -q'`).
+Make every item checkable: the local model cannot tick items or edit this file. For batch
 edits across many files, give one item per file.
 
 ### What the loop does
