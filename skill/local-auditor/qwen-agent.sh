@@ -2424,12 +2424,14 @@ fi
 # ---------------------------------------------------------------- preflight
 preflight() {
   local resp code body rows ids n chat len
-  local hdr=()
+  # Headers travel on stdin (`-H @-`, curl >= 7.55), never argv: a key on the
+  # command line is readable by other local users through ps.
   if [ -n "${QWEN_API_KEY:-}" ]; then
-    hdr=(-H "Authorization: Bearer $QWEN_API_KEY" -H "x-api-key: $QWEN_API_KEY")
+    resp="$(printf 'Authorization: Bearer %s\nx-api-key: %s\n' "$QWEN_API_KEY" "$QWEN_API_KEY" |
+            curl -s --max-time 8 -H @- -w '\n%{http_code}' "$BASE/v1/models" 2>/dev/null)"
+  else
+    resp="$(curl -s --max-time 8 -w '\n%{http_code}' "$BASE/v1/models" 2>/dev/null)"
   fi
-  # ${hdr[@]+...}: an empty array under set -u is an error before bash 4.4.
-  resp="$(curl -s --max-time 8 ${hdr[@]+"${hdr[@]}"} -w '\n%{http_code}' "$BASE/v1/models" 2>/dev/null)"
   code="$(printf '%s\n' "$resp" | tail -n 1 | tr -d '\r')"
   body="$(printf '%s\n' "$resp" | sed '$d')"
   case "$code" in
@@ -2438,7 +2440,13 @@ preflight() {
       die "cannot reach $BASE/v1/models — is the model server running? (set QWEN_BASE_URL or -b)"
       return $QA_PREFLIGHT ;;
     401|403)
-      die "$BASE/v1/models answered $code: the server wants a key. Set QWEN_API_KEY."
+      # A key was sent: name it as the refused thing, instead of telling the
+      # user to set one they already set.
+      if [ -n "${QWEN_API_KEY:-}" ]; then
+        die "$BASE/v1/models answered $code: the key in QWEN_API_KEY was refused. Replace it."
+      else
+        die "$BASE/v1/models answered $code: the server wants a key. Set QWEN_API_KEY."
+      fi
       return $QA_PREFLIGHT ;;
     404)
       die "$BASE/v1/models answered 404. QWEN_BASE_URL takes no /v1 suffix; drop it if present."

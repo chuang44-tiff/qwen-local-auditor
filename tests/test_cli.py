@@ -213,8 +213,42 @@ def test_a_server_that_wants_a_key_gets_one_and_says_so(tmp_path, server, fake):
     server.key = "sekrit"
     r = run(tmp_path, ["--preflight-only"], server, fake)
     assert r.returncode == 3 and "QWEN_API_KEY" in r.stderr
+    assert "Set QWEN_API_KEY" in r.stderr  # no key sent: still says to set one
     r = run(tmp_path, ["--preflight-only"], server, fake, extra={"QWEN_API_KEY": "sekrit"})
     assert r.returncode == 0, r.stderr
+    # A key WAS sent and the server refused it: name the key, the URL that
+    # refused it, and do not tell the user to set a key they already set.
+    r = run(tmp_path, ["--preflight-only"], server, fake, extra={"QWEN_API_KEY": "wrong-key"})
+    assert r.returncode == 3, r.stderr
+    assert "the key in QWEN_API_KEY was refused. Replace it." in r.stderr
+    assert "%s/v1/models" % base_url(server) in r.stderr
+    assert "Set QWEN_API_KEY" not in r.stderr
+
+
+def test_preflight_does_not_put_the_key_on_an_argv(tmp_path, server, fake):
+    # A curl shim first on PATH logs every argv it is called with, then execs
+    # the real curl unchanged, so the preflight still reaches the server.
+    real_curl = shutil.which("curl")
+    if real_curl is None:
+        pytest.skip("no curl on PATH")
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    log = tmp_path / "curl-argv.log"
+    shim = shim_dir / "curl"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%%s\\n' \"$*\" >> '%s'\n"
+        "exec '%s' \"$@\"\n" % (posix(log), posix(real_curl)),
+        encoding="utf-8", newline="\n")
+    shim.chmod(0o755)
+    server.key = "sekrit123"
+    r = run(tmp_path, ["--preflight-only"], server, fake,
+            extra={"QWEN_API_KEY": "sekrit123",
+                   "PATH": posix(shim_dir) + os.pathsep + os.environ["PATH"]})
+    assert r.returncode == 0, r.stderr
+    logged = log.read_text(encoding="utf-8")
+    assert "-H @-" in logged  # the headers really did go through the shim on stdin
+    assert "sekrit123" not in logged
 
 
 def test_a_v1_suffix_on_the_base_url_is_diagnosed(tmp_path, server, fake):

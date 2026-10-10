@@ -13,7 +13,7 @@ are the authoritative texts; this page arranges the same facts for lookup.
 | A model server | serves the **Anthropic Messages API** at `/v1/messages`, and ideally lists models at `/v1/models` |
 | bash | Linux, macOS (the stock bash 3.2 is fine), or **Git Bash** on Windows |
 | Python 3.8+ | stdlib only; used to parse results, build sweeps and run the swarm engine (the test suite needs 3.10+) |
-| curl, git | `git` for `qwen-sweep --builder diff`, for the throwaway worktrees `--test` uses, for `--until-done`'s clean-tree check, and for the sandbox copies a `qwen-swarm` workflow runs in |
+| curl >= 7.55, git | curl 7.55 is the floor because preflight hands its headers to curl on stdin (`-H @-`), so the key never appears on an argv; `git` for `qwen-sweep --builder diff`, for the throwaway worktrees `--test` uses, for `--until-done`'s clean-tree check, and for the sandbox copies a `qwen-swarm` workflow runs in |
 | tmux | only for `qwen-cc` (interactive sessions); Windows has none: run `qwen-agent --interactive` in a terminal there |
 | internet | needed by research (a search backend and pages to fetch): `qwen-deep-research`, `qwen-swarm research`, or a workflow with a `search` or `web` fence; and a browser's first run needs it too, for the `@playwright/mcp` npm package and the Playwright browser install it drives (`npx -y @playwright/mcp@0.0.83 --help` fetches the package, `npx playwright install chromium` the browser; [`qwen-agent.md`](qwen-agent.md) "Scripted UI suites"). No other fence adds a search or fetch tool, but a `browser` role drives a real browser, which opens whatever URL it is told to, and a `sandbox` agent's Bash is your shell, with your network ([`swarm.md`](swarm.md)) |
 
@@ -198,7 +198,7 @@ searches through.
 |---|---|
 | `cannot reach …/v1/models` | the server is down or `QWEN_BASE_URL` is wrong |
 | `…/v1/models answered 404` | remove a trailing `/v1` from `QWEN_BASE_URL`; or, if the server has no listing, set `QWEN_MODEL`, `QWEN_CTX` and `QWEN_PREFLIGHT=0` |
-| `answered 401` / `403` | set `QWEN_API_KEY` |
+| `answered 401` / `403` | set `QWEN_API_KEY`; if a key was sent, the message says it was refused: replace the key |
 | `several models are served` | set `QWEN_MODEL` (or pass `-m`) |
 | `the server does not report a context window` | set `QWEN_CTX` |
 | exit 2 `effort '…' is not accepted` | your `QWEN_EFFORT_ALLOWED` list refused it; pick a listed level |

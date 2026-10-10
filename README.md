@@ -25,7 +25,7 @@ and how to use them, so "have the local model review this" is enough.
 - Claude Code (`claude` on `PATH`) and a server that serves the Anthropic Messages API at
   `/v1/messages`. vLLM does, and also lists models at `/v1/models`, which the tools use to
   pick the model and read its context window.
-- bash (Linux, macOS, or Git Bash on Windows), Python 3.8+ (stdlib only), curl, git.
+- bash (Linux, macOS, or Git Bash on Windows), Python 3.8+ (stdlib only), curl >= 7.55, git.
 - Pillow (`pip install pillow`) for `--desktop` only (screenshots).
 - tmux for `qwen-cc`. A search backend (SearXNG or a Brave key) is needed only by research
   (`qwen-deep-research`, or a `qwen-swarm` workflow whose roles have a `search` or `web`
