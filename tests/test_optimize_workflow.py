@@ -13,7 +13,7 @@ from swarm_fixtures import agent_args, git_repo
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 
 PY = pathlib.Path(sys.executable).as_posix()
-SLOW = {"slow.py": "import time\nDELAY = 0.6\n\n\ndef work():\n    time.sleep(DELAY)\n    return 42\n",
+SLOW = {"slow.py": "import time\nDELAY = 0.4\n\n\ndef work():\n    time.sleep(DELAY)\n    return 42\n",
         "test_slow.py": "import slow\n\n\ndef test_work():\n    assert slow.work() == 42\n",
         "test_other.py": "def test_other():\n    assert 1 + 1 == 2\n"}
 PYTEST = '"%s" -m pytest -q -p no:cacheprovider' % PY
@@ -56,6 +56,7 @@ def env(tmp_path, monkeypatch):
     write_fakes(d, checker=CHECKER_OK, writer=WRITER)
     monkeypatch.setenv("FAKE_SWARM_DIR", str(d))
     monkeypatch.setenv("FAKE_SWARM_SLEEP", "0")
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     b = os.environ.get("TEST_BASH") or shutil.which("bash")
     if b:
         monkeypatch.setenv("QWEN_SWARM_BASH", b)
@@ -97,7 +98,7 @@ def test_a_bad_bench_file_is_exit_2(tmp_path, env, capsys):
 
 def test_failing_measure_stops_before_round_1(tmp_path, env):
     repo = git_repo(tmp_path / "repo", dict(SLOW, **{"test_slow.py": "def test_x():\n    assert False\n"}))
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE))
     assert rc == 4
     first = report(run).splitlines()[0]
     assert first.startswith("bench: problem (see bench-review.md): B1")
@@ -110,21 +111,22 @@ def test_failing_measure_stops_before_round_1(tmp_path, env):
 
 def test_focus_outside_the_profile_is_a_note_not_a_stop(tmp_path, env):
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, focus=["slow.py"]))
+    rc, run = optimize(tmp_path, repo,
+                       "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE, focus=["slow.py"]))
     assert report(run).splitlines()[0] == "bench: ok"
     assert "B3 skipped: note: no profiled file is inside focus" in (run / "bench-review.md").read_text(encoding="utf-8")
 
 
 def test_target_inside_the_noise_stops(tmp_path, env):
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="-0.1%"))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE, target="-0.1%"))
     assert rc == 4 and "B4" in report(run).splitlines()[0]
 
 
 def test_checker_problem_with_real_evidence_stops_and_suggests(tmp_path, env):
     write_fakes(env, checker=CHECKER_PROBLEM)
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE))
     assert rc == 4 and "checker: time is in test_slow" in report(run).splitlines()[0]
     review = (run / "bench-review.md").read_text(encoding="utf-8")
     assert "time is in test_slow" in review
@@ -135,7 +137,7 @@ def test_checker_problem_with_real_evidence_stops_and_suggests(tmp_path, env):
 def test_checker_finding_without_evidence_does_not_stop(tmp_path, env):
     write_fakes(env, checker=CHECKER_INVENTED)
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE))
     assert report(run).splitlines()[0] == "bench: ok"
     assert "made up" in (run / "bench-review.md").read_text(encoding="utf-8")
 
@@ -153,7 +155,7 @@ def test_profile_falls_back_when_flags_break_the_command(tmp_path, env):
     # refuses (too many arguments, rc 1): the plain baseline output is then the profile
     repo = git_repo(tmp_path / "repo", SLOW)
     rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(
-        tmp_path, measure=MEASURE + " && exit 0", focus=[]))
+        tmp_path, measure=MEASURE + " && exit 0", guard=MEASURE + " && exit 0", focus=[]))
     assert report(run).splitlines()[0] == "bench: ok"
 
 
@@ -187,7 +189,7 @@ def answer_cwd(p, r, cwd):
     iid = re.search(r"^- (I\d+):", p, re.M).group(1)
     d = pathlib.Path(cwd)
     if "lower DELAY" in p:
-        s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.6", "DELAY = 0.01")
+        s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.4", "DELAY = 0.01")
         (d / "slow.py").write_text(s, encoding="utf-8", newline="\n")
     elif "drop the assert" in p:
         s = (d / "test_slow.py").read_text(encoding="utf-8").replace("assert slow.work() == 42", "pass")
@@ -230,14 +232,14 @@ def test_a_slow_sleep_gets_a_checked_stacked_patch(tmp_path, team):
     assert "+DELAY = 0.01" in stacked and "assert" not in stacked
     assert "guard: passed" in text
     assert "test_other.py:1" in text                     # the outside-focus note, report only
-    assert (repo / "slow.py").read_text(encoding="utf-8").count("DELAY = 0.6") == 1   # target untouched
+    assert (repo / "slow.py").read_text(encoding="utf-8").count("DELAY = 0.4") == 1   # target untouched
     ideas = json.loads((run / "ideas.json").read_text(encoding="utf-8"))
     assert [i["location"] for i in ideas] == ["slow.py:2", "test_slow.py:5"]   # ghost + invented dropped
 
 
 def test_a_weakening_patch_is_never_approved(tmp_path, team):
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE))
     cands = json.loads((run / "candidates.json").read_text(encoding="utf-8"))
     weak = [c for c in cands if c["idea"] == "I2"][0]
     assert not weak["approved"]
@@ -246,14 +248,15 @@ def test_a_weakening_patch_is_never_approved(tmp_path, team):
 def test_a_citation_not_in_the_patch_counts_as_unclear(tmp_path, team):
     write_fakes(team, reviewer=REVIEWER_FAKE_CITE)
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE))
     assert rc == 4 and not (run / "patches" / "stacked.diff").exists()
     assert "no approved patch" in report(run)
 
 
 def test_patch_outside_focus_is_not_measured(tmp_path, team):
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, focus=["slow.py"]))
+    rc, run = optimize(tmp_path, repo,
+                       "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE, focus=["slow.py"]))
     cands = json.loads((run / "candidates.json").read_text(encoding="utf-8"))
     assert [c["location"] for c in cands] == ["slow.py:2"]   # test_slow.py:5 dropped as an idea
     assert rc == 0
@@ -269,7 +272,7 @@ def test_target_reached_stops_rounds_early(tmp_path, team):
 
 def test_target_not_reached_is_exit_4_with_the_stack(tmp_path, team):
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="0.01s"))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE, target="0.01s"))
     assert rc == 4 and (run / "patches" / "stacked.diff").exists()
     assert "target 0.01s not reached" in report(run)
 
@@ -350,8 +353,8 @@ import json, re
 def answer(p, r):
     line = re.search(r"^\s*[\d.]+\s+test_slow\.py::test_work\s*$", p, re.M).group(0).strip()
     return 0, "```json\n" + json.dumps({"ideas": [
-        {"location": "slow.py:2", "profile_line": line, "change": "lower DELAY to 0.01", "why": "sleep", "saving": "0.6s"},
-        {"location": "slow.py:2", "profile_line": line, "change": "lower DELAY to 0.02", "why": "sleep", "saving": "0.6s"}],
+        {"location": "slow.py:2", "profile_line": line, "change": "lower DELAY to 0.01", "why": "sleep", "saving": "0.4s"},
+        {"location": "slow.py:2", "profile_line": line, "change": "lower DELAY to 0.02", "why": "sleep", "saving": "0.4s"}],
         "outside_focus": None}) + "\n```"
 '''
 IMPLEMENTER_DELAY = r'''
@@ -360,14 +363,14 @@ def answer_cwd(p, r, cwd):
     iid = re.search(r"^- (I\d+):", p, re.M).group(1)
     new = re.search(r"lower DELAY to ([0-9.]+)", p).group(1)
     d = pathlib.Path(cwd)
-    s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.6", "DELAY = %s" % new)
+    s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.4", "DELAY = %s" % new)
     (d / "slow.py").write_text(s, encoding="utf-8", newline="\n")
     return 0, "```json\n" + json.dumps({"id": iid, "done": True, "summary": "DELAY %s" % new, "note": ""}) + "\n```"
 '''
 REVIEWER_KEEPS_DELAY = r'''
 import json, re
 def answer(p, r):
-    return 0, "```json\n" + json.dumps([{"patch": pid, "verdict": "keeps", "lines": ["-DELAY = 0.6"],
+    return 0, "```json\n" + json.dumps([{"patch": pid, "verdict": "keeps", "lines": ["-DELAY = 0.4"],
                                          "reason": "only the sleep constant changes"}
                                         for pid in re.findall(r"^- (P\d+) ", p, re.M)]) + "\n```"
 '''
@@ -430,7 +433,8 @@ def answer(p, r):
 def test_every_idea_outside_focus_stops_the_run(tmp_path, team):
     write_fakes(team, profiler=PROFILER_OUTSIDE)
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, focus=["test_slow.py"]))
+    rc, run = optimize(tmp_path, repo,
+                       "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE, focus=["test_slow.py"]))
     assert rc == 4
     assert report(run).splitlines()[0].startswith(
         "bench: problem (see bench-review.md): round 1: every idea was outside focus")
