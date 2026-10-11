@@ -312,10 +312,13 @@ def test_ui_test_all_pass_exit_0(tmp_path, fake, capsys):
 
 
 def test_ui_test_one_agent_per_scenario_pinned(tmp_path, fake):
-    # --max-agents 1 with three scenarios: one agent per wave, and every prompt still holds
-    # exactly one scenario -- a unit ever handed two would score one answer against both
+    # --max-agents 1 with three scenarios: one unit per deal group (the wW names are the
+    # proof), and --seats 1 runs them one at a time so the calls order is the deal order;
+    # every prompt still holds exactly one scenario -- a unit ever handed two would score
+    # one answer against both
     out = tmp_path / "run"
-    assert ui_run(fake, suite_file(tmp_path, 3), out, "--max-agents", "1") == 0
+    assert ui_run(fake, suite_file(tmp_path, 3), out, "--max-agents", "1",
+                  "--seats", "1") == 0
     assert unit_names(fake) == ["scenario-1", "scenario-w2-1", "scenario-w3-1"]
     assert {u: re.findall(r"^Scenario (\S+):", t, re.M) for u, t in prompts(out).items()} == {
         "scenario-1": ["s1"], "scenario-w2-1": ["s2"], "scenario-w3-1": ["s3"]}
@@ -1095,9 +1098,9 @@ def test_confirm_local_failed_unit_is_needs_human(tmp_path, fake, monkeypatch):
 
 
 def test_confirm_local_pairs_rows_by_name_and_survives_missing_units(tmp_path):
-    # fan_out returns rows in completion order and, when the deadline passes before a
-    # wave is even built (api.py's `continue`), NO unit for those items at all: rows are
-    # paired by unit/row id, so a shifted or missing unit is NEEDS_HUMAN, never a crash
+    # rows come back in deal order but their units may not: the pairing is by unit/row
+    # id, so a shifted unit, a failed one, or items whose unit never ran (deadline) are
+    # NEEDS_HUMAN, never a crash
     mod = ui()
 
     class Res:

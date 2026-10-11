@@ -1,7 +1,7 @@
 """The Workflow object a workflow script's run(wf) receives.
 
 A workflow script states what to do; this object does it the way the released
-qwen-deep-research did: units are named, dealt, waved, timed, fenced, cached and logged
+qwen-deep-research did: units are named, dealt, timed, fenced, cached and logged
 exactly as its pipeline did, so a script only decides which calls to make. Scripts must not read the clock, randomness or
 the environment: resume replays run(wf) from the start and relies on the same calls in
 the same order (wf.rounds() owns time).
@@ -63,7 +63,8 @@ class Steps:
 
 
 def _waves(items, ma, mi):
-    """Consecutive in-order chunks of ma * mi items: (wave number, chunk)."""
+    """Consecutive in-order chunks of ma * mi items: (group number, chunk). The number
+    only ever names units (fan_out runs every group's units in one phase)."""
     cap = ma * mi
     for w, i in enumerate(range(0, len(items), cap), 1):
         yield w, items[i:i + cap]
@@ -190,8 +191,9 @@ class Workflow:
         return self.web_seats if self._role(role).fence in fences.WEB_FENCES else None
 
     def _unit_name(self, name, k, wave=1, item=None):
-        """name-k (wave 1), name-wW-k (later waves) -- or name-<item> when `item` (an item
-        id, fan_out(unit_ids=True)) is given; r<round>- in front from round 2 on."""
+        """name-k (first deal), name-wW-k (later deals of the same call) -- or name-<item>
+        when `item` (an item id, fan_out(unit_ids=True)) is given; r<round>- in front from
+        round 2 on."""
         if item is not None:
             base = "%s-%s" % (name, item)
         else:
@@ -323,20 +325,27 @@ class Workflow:
 
     def fan_out(self, name, role, items, prompt, parse, *, item_id=None, max_items=None,
                 stage=None, repair=None, unit_ids=False):
-        """Deal `items` over at most --max-agents agents in waves of --max-agents x
-        --max-items (max_items= lowers the per-agent cap for this call). prompt(batch) ->
-        str; parse(text, batch) -> list of rows (parse(text, batch, patch) for a sandbox
-        role). item_id(item) names an item in run.log's deadline lines (default: its
-        "id"). stage=DIR copies DIR into every unit's agents/<unit>/fixtures/ when it
-        starts, and prompt is then called as prompt(batch, staged): `staged` is that
-        unit's wf.stage_dir as a native absolute path, for the prompt to name files by.
-        repair=TEXT replaces the swarm's REPAIR text for these units' repair round
-        ("{why}" in it is replaced by parse's reason). unit_ids=True deals ONE item per
-        unit and names each unit <name>-<item id> instead of by its place in the deal, so
-        dropping an item from the list (one already settled) moves no other unit's name,
-        files or cache; the ids must be [A-Za-z0-9._-]+, not end in '.' (Windows strips
-        it, so 'a.' and 'a' would collide) and differ by more than case (they name
-        files, and Windows and macOS fold case), else ValueError."""
+        """Deal `items` over groups of at most --max-agents agents x --max-items items
+        (max_items= lowers the per-agent cap for this call) and run EVERY unit of the call
+        in one phase: --max-agents and --max-items shape the deal, seats alone limit how
+        many units are live. prompt(batch) -> str; parse(text, batch) -> list of rows
+        (parse(text, batch, patch) for a sandbox role). item_id(item) names an item in
+        run.log's deadline lines (default: its "id"). stage=DIR copies DIR into every
+        unit's agents/<unit>/fixtures/ when it starts, and prompt is then called as
+        prompt(batch, staged): `staged` is that unit's wf.stage_dir as a native absolute
+        path, for the prompt to name files by. repair=TEXT replaces the swarm's REPAIR
+        text for these units' repair round ("{why}" in it is replaced by parse's reason).
+        unit_ids=True deals ONE item per unit and names each unit <name>-<item id> instead
+        of by its place in the deal, so dropping an item from the list (one already
+        settled) moves no other unit's name, files or cache; the ids must be
+        [A-Za-z0-9._-]+, not end in '.' (Windows strips it, so 'a.' and 'a' would
+        collide) and differ by more than case (they name files, and Windows and macOS
+        fold case), else ValueError.
+
+        Past the run's deadline a cached unit is still served and its rows count, as the
+        first group's always were; only an uncached unit is kept from starting (as the
+        swarm reports it: not a drop) -- its items are not_run, each with its own
+        run.log deadline line."""
         ma, mi = self.cfg["max_agents"], self.cfg["max_items"]
         if max_items is not None:
             mi = max(1, min(mi, max_items))
@@ -359,25 +368,23 @@ class Workflow:
 
         def uname(k, w, batch):
             return self._unit_name(name, k, w, ident(batch[0]) if unit_ids else None)
-        rows, units_res, dropped, not_run = [], [], [], []
+        # Every unit of the call runs in ONE phase: a group w of the deal (at most ma
+        # batches of at most mi items -- w only ever names the units) no longer waits for
+        # the slowest unit of group w-1; seats alone decides how many are live. A unit
+        # past the deadline is marked by the swarm when it would start, cached ones aside.
+        units, batches = [], []
         for w, chunk in _waves(list(items), ma, mi):
-            batches = list(swarm.deal(chunk, ma))
-            if self._past_deadline():
-                for k, batch in enumerate(batches, 1):
-                    for it in batch:
-                        self._log_deadline(uname(k, w, batch), role, ident(it))
-                not_run += chunk
-                continue
-            units = []
-            for k, batch in enumerate(batches, 1):
+            for k, batch in enumerate(swarm.deal(chunk, ma), 1):
                 p = self._bind(parse, batch, self._role(role).fence == "sandbox")
                 un = uname(k, w, batch)
                 text = prompt(batch) if stage is None else prompt(batch, str(self.stage_dir(un)))
                 units.append(self._unit(un, role, text, self._timeout(role, len(batch)), p,
                                         batch, stage=stage, repair=repair))
-            wave_res = self._phase(units, role)
-            units_res += wave_res
-            for r, batch in zip(wave_res, batches):
+                batches.append(batch)
+        rows, units_res, dropped, not_run = [], [], [], []
+        if units:
+            units_res = self._phase(units, role)
+            for r, batch in zip(units_res, batches):
                 if r["ok"]:
                     rows += r["data"]
                 elif r.get("deadline"):

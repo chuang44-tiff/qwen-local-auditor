@@ -776,8 +776,9 @@ def answer(p, r):
 
 
 def test_waves_split_big_phases(tmp_path, env):
-    # 9 found sources (cut to quick's 6) and 7 claims: with 2 agents x 2 items a wave
-    # holds 4 items, so fetch and verify each run in two waves of at most 2 agents.
+    # 9 found sources (cut to quick's 6) and 7 claims: with 2 agents x 2 items a deal
+    # group holds 4 items, so fetch and verify are each dealt in two groups of at most
+    # 2 agents.
     (env / "searcher.py").write_text(WAVE_SEARCHER, encoding="utf-8")
     assert main(tmp_path, "--depth", "quick", "--max-agents", "2", "--max-items", "2", "q") == 0
     cfg = json.loads((tmp_path / "run" / "config.json").read_text(encoding="utf-8"))
@@ -789,25 +790,25 @@ def test_waves_split_big_phases(tmp_path, env):
     for name in names:                                       # no unit holds more than 2 items
         text = (agents / ("%s.prompt.md" % name)).read_text(encoding="utf-8")
         assert len(re.findall(r"^- [ASC]\d+:", text, re.M)) <= 2, name
-    waves = {}                                               # and never over 2 agents per wave
+    waves = {}                                               # and never over 2 agents per group
     for name in names:
         phase, wave = re.fullmatch(r"([a-z]+)(?:-w(\d+))?-\d+", name).groups()
         waves.setdefault((phase, wave or "1"), set()).add(name)
     assert max(len(v) for v in waves.values()) <= 2
     votes = json.loads((tmp_path / "run" / "votes.json").read_text(encoding="utf-8"))
-    assert all(len(v["votes"]) == 1 for v in votes.values())  # every wave's votes landed
+    assert all(len(v["votes"]) == 1 for v in votes.values())  # every deal group's votes landed
 
 
 def test_wave_votes_stay_independent(tmp_path, env):
-    # standard depth: 5 claims x 3 voters = 15 slots; a wave holds 3 agents x 2 items
-    # = 6 slots, so verify runs in three waves and no unit ever holds two slots of
-    # one claim (the deal is round-robin and 3 voters fit in 3 agents)
+    # standard depth: 5 claims x 3 voters = 15 slots; a deal group holds 3 agents x 2
+    # items = 6 slots, so verify is dealt across three groups and no unit ever holds
+    # two slots of one claim (the deal is round-robin and 3 voters fit in 3 agents)
     (env / "searcher.py").write_text(VOTE_SEARCHER, encoding="utf-8")
     (env / "reader.py").write_text(VOTE_READER, encoding="utf-8")
     assert main(tmp_path, "--max-agents", "3", "--max-items", "2", "q") == 0
     agents = tmp_path / "run" / "agents"
     prompts = sorted(agents.glob("verify-*.prompt.md"))
-    assert len(prompts) == 9                                 # 3 waves of 3 agents
+    assert len(prompts) == 9                                 # 3 deal groups of 3 agents
     for p in prompts:
         ids = re.findall(r"^- (C\d+):", p.read_text(encoding="utf-8"), re.M)
         assert ids and len(ids) == len(set(ids)), p          # never the same claim twice
@@ -833,9 +834,9 @@ def test_bad_max_unit_seconds_is_usage(tmp_path, env, capsys, monkeypatch, bad):
 
 
 def test_wave_votes_independent_mid_claim(tmp_path, env):
-    # standard depth: 5 claims x 3 voters = 15 slots, and 4 agents x 1 item = a wave of
-    # 4 slots: waves start mid-claim and a claim's votes straddle wave boundaries, but
-    # the round-robin deal never gives one unit two slots of the same claim
+    # standard depth: 5 claims x 3 voters = 15 slots, and 4 agents x 1 item = a deal
+    # group of 4 slots: groups start mid-claim and a claim's votes straddle group
+    # boundaries, but the round-robin deal never gives one unit two slots of the same claim
     (env / "searcher.py").write_text(VOTE_SEARCHER, encoding="utf-8")
     (env / "reader.py").write_text(VOTE_READER, encoding="utf-8")
     assert main(tmp_path, "--max-agents", "4", "--max-items", "1", "q") == 0

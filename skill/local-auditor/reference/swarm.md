@@ -2,8 +2,9 @@
 
 `qwen-swarm` runs a **workflow** on a swarm of Claude Code sessions on your local model.
 A workflow states a purpose; the engine runs it the way `qwen-deep-research` always ran:
-work dealt round-robin over at most `--max-agents` agents per phase, at most `--seats`
-running at once, one repair round for an unusable answer, retries for timeouts, every
+work dealt round-robin over at most `--max-agents` agents of at most `--max-items` items
+each, every unit of a call running in one phase with at most `--seats` running at once,
+one repair round for an unusable answer, retries for timeouts, every
 answer cached in the run folder so `--resume` continues where a run stopped, and a hard
 `--hours` deadline. The short version your session loads is `skill/local-swarm/SKILL.md`.
 
@@ -124,7 +125,7 @@ its patch. `--target` itself is never an agent's working directory unless the fe
 | `wf.knob(name)` | a knob (preset, then `--set`); also `budget`, `retries`, `rounds`, `hours` |
 | `wf.target` | the target directory (a `pathlib.Path`) or `None` |
 | `wf.agent(name, role, prompt, parse)` | one agent, unit `name-1`; returns `parse(text)`, or `None` when it failed (then `wf.last_unit` has `ok`, `why`, `deadline`). Options: `cache=False`, `always=True` (runs past the deadline), `item="goal"` (the deadline log label), `stage=DIR` (below) |
-| `wf.fan_out(name, role, items, prompt, parse)` | deals `items` over <= `--max-agents` agents in waves of `--max-agents` x `--max-items`; `prompt(batch)` -> str, `parse(text, batch)` -> list of rows. Returns `Result`: `.rows`, `.dropped_items`, `.not_run_items`, `.units`, `.ok`. Options: `item_id=`, `max_items=` (e.g. 1 = one item per agent), `stage=DIR` (a fresh copy of DIR in each unit's folder as `fixtures/`, made once per unit and kept for its retries and repair round; DIR's content hash joins the unit's cache key), `repair=TEXT` (this call's repair-round prompt; `{why}` is filled in), `unit_ids=True` (units named `name-<item id>` instead of by position, so skipping an item does not move another unit's cache key; needs `item_id=` and `max_items=1`) |
+| `wf.fan_out(name, role, items, prompt, parse)` | deals `items` in groups of <= `--max-agents` units holding <= `--max-items` items each and runs every unit of the call in ONE phase (`--seats` alone limits concurrency; the group number only names units); `prompt(batch)` -> str, `parse(text, batch)` -> list of rows. Returns `Result`: `.rows`, `.dropped_items`, `.not_run_items`, `.units`, `.ok`. Options: `item_id=`, `max_items=` (e.g. 1 = one item per agent), `stage=DIR` (a fresh copy of DIR in each unit's folder as `fixtures/`, made once per unit and kept for its retries and repair round; DIR's content hash joins the unit's cache key), `repair=TEXT` (this call's repair-round prompt; `{why}` is filled in), `unit_ids=True` (units named `name-<item id>` instead of by position, so skipping an item does not move another unit's cache key; needs `item_id=` and `max_items=1`) |
 | `wf.claude_check(name, items, prompt, parse, model=M, max_calls=N)` | one `claude -p` per item through the user's claude login (below); returns one `{item, state, data, why}` per item, in order. Options: `budget_usd=2.0`, `browser=False`, `stage=DIR`, `read_dirs=()`, `item_id=`, `timeout=600`, `max_turns=40` |
 | `wf.event(kind, **fields)` | one line in `RUN/events.jsonl` (below); an engine kind is a `ValueError` |
 | `wf.vote(name, role, claims, voters, prompt, parse)` | claim-major vote slots — `(claim, k)` with `k` = 0..`voters`-1, dealt so no agent holds two slots of one claim (`voters` above `--max-agents` is an error). `prompt(batch)` and `parse(text, batch)` get the batch as that list of `(claim, k)` tuples; `parse` returns rows with `claim` (a claim id) and `verdict` (`supported`, `refuted`, `unclear`) — a row naming a claim this vote never asked about, or whose `verdict` is not a string, is ignored. `claim_id=fn` says how a claim is identified (default `c["id"]`); it also labels `run.log`'s deadline lines. Returns `{claim_id: verdict}` (majority of the votes requested) with `.cast`, `.requested`, `.result` |
@@ -154,7 +155,8 @@ A round in which any unit was dropped is not resumable from where it stopped, so
 `converged: units dropped in round <r>`): no later round is built on ids that `--resume`
 will renumber when it retries the dropped units.
 
-Unit names: `name-<k>` in wave 1, `name-w<n>-<k>` in later waves, prefixed `r<r>-` from
+Unit names: `name-<k>` for a call's first deal group, `name-w<n>-<k>` for its later groups
+(the grouping only names units; all of them run in one phase), prefixed `r<r>-` from
 round 2. A `parse` that raises `ValueError` makes the answer unusable: one repair round,
 then the unit's retries.
 
@@ -286,9 +288,11 @@ Precedence: a flag, then `--set`, then the environment (`QWEN_SWARM_MAX_AGENTS`,
 `_BACKOFF`; the research workflow also reads the `QWEN_DR_*` names), then the preset.
 `--timeout` is the per-item budget: an agent holding k items gets
 max(300, weight x k x budget) seconds, one `wf.agent` counts as 2 items. `--hours` is a
-hard deadline stored in `config.json`: no new unit starts after it, items not run are
-logged as `deadline`, synthesis-style `always=True` agents still run, and no new round
-starts. `--rounds until` needs a deadline. Depth is the default, so the two flags are
+hard deadline stored in `config.json`: no new uncached unit starts after it (a cached
+unit is still served past the deadline and its rows count, as the first deal group's
+always were), items not run are logged as `deadline`, synthesis-style `always=True`
+agents still run, and no new round starts. `--rounds until` needs a deadline. Depth is
+the default, so the two flags are
 requests in opposite directions: `--deep ROLE[,ROLE...]|all` forces a review round and the
 delegation nudge on those roles — a fence-`none` role has no tools, so it never gets the
 review round: `--deep` gives it its subagent switch only and says so once on stderr —
@@ -539,7 +543,8 @@ The app under test must already be listening at the suite's URLs: the workflow s
 server. `--set base=URL` points the whole suite somewhere other than the file's `base:` line.
 
 The manifest has one depth, `quick`: 900 s per scenario, one retry, one round. A suite's size
-comes from its scenario count and from `--seats` / `--max-agents`, not from depth, and `--hours`
+comes from its scenario count and from `--seats` (how many scenarios run at once —
+`--max-agents` only shapes the deal), not from depth, and `--hours`
 bounds a long suite. The `tester` role says `"deep": false` — a review round would be a second
 browser session for the same scenario — which `--deep tester` overrides. The browsers run
 headless: `--headed` is qwen-agent's own per-session flag (it implies `--browser` and needs a

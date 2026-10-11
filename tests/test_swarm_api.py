@@ -680,3 +680,102 @@ def test_unit_ids_name_the_deadline_lines_too(tmp_path, fake):
     assert res.not_run_items == [{"id": "login"}]
     log = (tmp_path / "run" / "run.log").read_text(encoding="utf-8")
     assert "confirm-login\tworker\t-\t0\t0\tdeadline: login not started" in log
+
+
+# ------------------------------------------------ one phase per fan_out call
+def test_fan_out_of_no_items_makes_no_calls(tmp_path, fake, monkeypatch):
+    phases = []
+    real = swarm.Swarm.run_phase
+    monkeypatch.setattr(swarm.Swarm, "run_phase",
+                        lambda self, units, seats=None: (phases.append(len(units)),
+                                                         real(self, units, seats=seats))[1])
+    wf = workflow(tmp_path)
+    res = wf.fan_out("work", "worker", [], prompt, echo_parse)
+    assert phases == []                                      # nothing to run: no phase at all
+    assert res.rows == [] and res.units == [] and res.dropped_items == []
+    assert res.not_run_items == [] and res.ok and wf.not_run == 0
+    assert calls(fake) == []
+
+
+SLOW_FIRST = r'''
+import json, re, time
+def answer(p, r):
+    if "I1:" in p:                       # work-1's batch alone (round-robin: I1, I5)
+        time.sleep(1.5)
+    ids = re.findall(r"^- (\S+):", p, re.M)
+    return 0, "```json\n" + json.dumps([{"id": i} for i in ids]) + "\n```"
+'''
+
+
+def test_fan_out_runs_one_phase(tmp_path, fake, monkeypatch):
+    # 20 items dealt 4 agents x 2 items: three deal groups of 8+8+4 items = 12 units, and
+    # exactly ONE phase for all of them. The names are the ones the old per-wave code
+    # produced (name-k, then name-wW-k) -- the group number only ever names units now.
+    phases = []
+    real = swarm.Swarm.run_phase
+
+    def counting(self, units, seats=None):
+        phases.append([u.name for u in units])
+        return real(self, units, seats=seats)
+
+    monkeypatch.setattr(swarm.Swarm, "run_phase", counting)
+    wf = workflow(tmp_path, max_agents=4, max_items=2)
+    res = wf.fan_out("work", "worker", items(20), prompt, echo_parse)
+    assert len(phases) == 1
+    assert phases[0] == ["work-1", "work-2", "work-3", "work-4",
+                         "work-w2-1", "work-w2-2", "work-w2-3", "work-w2-4",
+                         "work-w3-1", "work-w3-2", "work-w3-3", "work-w3-4"]
+    assert res.ok and len(res.units) == 12
+    assert sorted(unit_names(fake)) == phases[0]
+    assert sorted(r["id"] for r in res.rows) == sorted("I%d" % i for i in range(1, 21))
+
+
+def test_slow_unit_does_not_hold_back_later_units(tmp_path, fake):
+    # seats 2 over 8 items (max_agents 3 x max_items 2): work-1 sleeps 1.5 s, and the
+    # units the old second wave queued behind it run WHILE it sleeps -- events.jsonl
+    # says so. Seats are the only concurrency limit; a slow unit holds no one else up.
+    (fake / "worker.py").write_text(SLOW_FIRST, encoding="utf-8")
+    wf = workflow(tmp_path)
+    res = wf.fan_out("work", "worker", items(8), prompt, echo_parse)
+    assert res.ok and sorted(r["id"] for r in res.rows) == ["I%d" % i for i in range(1, 9)]
+    done = [json.loads(x)["unit"] for x in
+            (tmp_path / "run" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            if json.loads(x)["kind"] == "unit_done"]
+    assert {"work-w2-1", "work-w2-2"} <= set(done)
+    assert done.index("work-w2-1") < done.index("work-1")
+    assert done.index("work-w2-2") < done.index("work-1")
+
+
+def test_deadline_marks_only_units_that_would_start_late(tmp_path, fake, monkeypatch):
+    # 2 agents x 1 item, so 5 items form three deal groups (not the one the old wave
+    # code saw). Seats 1, agents that hold 1.2 s, a deadline ~0.6 s into the call:
+    # work-1 is cached, work-2 starts before the deadline and holds its seat through it,
+    # and by the time the seat frees the deadline has passed -- yet the cached unit of
+    # the SECOND group, work-w2-1, is still served and its rows count (the old code
+    # skipped the whole wave, cached units included), while work-w2-2/work-w3-1 -- the
+    # uncached units that would start late -- are marked deadline instead of dropped,
+    # each of their items with its own run.log line and no agent call.
+    warm = workflow(tmp_path, max_agents=2, max_items=1)
+    # the filler item keeps work-2's real [I2] prompt out of the cache: work-2 is then
+    # the one uncached unit that runs across the deadline. The deadline is 2x under the
+    # 1.2 s an agent holds its seat, so the crossings are not near a coin-flip.
+    assert warm.fan_out("work", "worker", [{"id": "I1"}, {"id": "X"}, {"id": "I3"}],
+                        prompt, echo_parse).ok
+    monkeypatch.setenv("FAKE_SWARM_SLEEP", "1.2")
+    calls_before = len(calls(fake))
+    wf = workflow(tmp_path, deadline=time.time() + 0.6, max_agents=2, max_items=1)
+    wf.sw.seats = 1
+    res = wf.fan_out("work", "worker", items(5), prompt, echo_parse)
+    assert [u["name"] for u in res.units] == ["work-1", "work-2", "work-w2-1",
+                                               "work-w2-2", "work-w3-1"]
+    assert res.units[0]["cached"] and res.units[1]["ok"] and not res.units[1]["cached"]
+    assert res.units[2]["cached"] and res.units[2]["ok"]     # served past the deadline
+    assert res.units[3]["deadline"] and res.units[4]["deadline"]
+    assert res.not_run_items == [{"id": "I4"}, {"id": "I5"}] and wf.not_run == 2
+    assert not res.dropped_items and wf.dropped == 0
+    assert [r["id"] for r in res.rows] == ["I1", "I2", "I3"]  # the served unit's rows count
+    assert len(calls(fake)) == calls_before + 1               # only work-2 ever ran
+    log = (tmp_path / "run" / "run.log").read_text(encoding="utf-8")
+    for line in ("work-w2-2\tworker\t-\t0\t0\tdeadline: I4 not started",
+                 "work-w3-1\tworker\t-\t0\t0\tdeadline: I5 not started"):
+        assert log.count(line) == 1                          # one deadline line per item

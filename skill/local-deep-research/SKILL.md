@@ -34,11 +34,14 @@ From round 2 a planner turns the last report's gaps into new angles and re-check
 unclear claims; the run stops early when the planner finds nothing new or a round adds
 no supported claim, and every round leaves `report-round-<r>.md`. `--rounds N|until`
 overrides the preset (`until` needs `--hours`).
-`--max-agents` (default 8) caps agents started per phase; work is split among them, never
+`--max-agents` (default 8) shapes the deal: a fan-out deals its units in groups of at most
+N, work is split among them, never
 cut (it must be at least the voters per claim — 5 for `overnight`). `--max-items` (default
 10) caps the items one agent holds: a phase with more items than `--max-agents x --max-items`
-splits them in order into waves, one wave run after another. `--seats` (default 4)
-caps agents running at once; keep it at or below the server's concurrent-request capacity.
+splits them in order into such deal groups; every group's units run in one phase, so a slow
+unit holds back none of them. `--seats` (default 4)
+caps agents running at once — the only concurrency limit; keep it at or below the server's
+concurrent-request capacity.
 `--web-seats N` caps the search/fetch/verify agents among them (default: `--seats`; must be
 between 1 and `--seats`) — web agents are told to call one tool at a time, so lower
 `--web-seats` if the server shows requests waiting during the search, fetch and verify
@@ -52,8 +55,8 @@ a server error (exit 3 or 4) after its backoff, or an answer still unusable afte
 repair round (or with no session to repair) — any other exit code drops it at once — each
 try with double the previous timeout (up to the 4 h cap), before it counts as dropped.
 `--hours H` (default: 8 for `overnight`, none otherwise) is a hard stop for the whole
-run: once H hours from the first start have passed, no new wave or unit starts (running
-units finish, queued ones of the current wave do not), every item not run is logged as
+run: once H hours from the first start have passed, no new unit starts (running
+units finish, queued ones do not), every item not run is logged as
 `deadline` in `run.log`, the phase continues with what it has — its file stays unwritten —
 and synthesis always runs. Each agent is capped at 4 h; --hours bounds the whole run.
 `--resume RUN --hours H` sets a new deadline from then; without `--hours` a resume keeps

@@ -331,13 +331,12 @@ def _batch_suite(suite, base, batch):
 
 def _scored(items, res):
     """One row per scenario, in file order, each with the `unit` that ran it (null when none
-    did). `max_items=1` deals one scenario per unit, so `res.units` holds the units of the
-    waves that started, in item order: a unit that failed carries its reason, a unit the
-    deadline reached before it started carries `deadline` and started nothing at all, and a
-    wave the deadline stops before it is dealt starts no units of its own -- its scenarios
-    are the suffix of the file with no unit entry. A scenario whose unit failed is BLOCKED
-    with exactly that unit's reason; one the deadline kept from starting is NOT RUN: no
-    session, no browser folder, and a --resume runs it."""
+    did). `max_items=1` deals one scenario per unit, so `res.units` holds one unit per
+    scenario, in item order: a unit that failed carries its reason, and a unit the deadline
+    reached before it started carries `deadline` and started nothing at all (a scenario with
+    no unit entry at all pairs the same way: not started). A scenario whose unit failed is
+    BLOCKED with exactly that unit's reason; one the deadline kept from starting is NOT RUN:
+    no session, no browser folder, and a --resume runs it."""
     by_id = {row["id"]: row for row in res.rows}
     out = []
     for n, sc in enumerate(items):

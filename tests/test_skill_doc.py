@@ -127,7 +127,7 @@ def test_deep_research_docs_cover_retries_and_effort():
 
 
 def test_deep_research_docs_bound_long_runs():
-    # waves (--max-items), the 4 h cap on one unit's --timeout, and the retry rule
+    # deal-group sizes (--max-items), the 4 h cap on one unit's --timeout, and the retry rule
     # naming the exits that retrying can fix (QWEN_DR_BACKOFF waits out "exit 3 or 4")
     t = DR_REF.read_text(encoding="utf-8")
     for needle in ("--max-items", "QWEN_DR_MAX_ITEMS", "QWEN_DR_MAX_UNIT_SECONDS",

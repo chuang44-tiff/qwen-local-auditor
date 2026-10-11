@@ -1,7 +1,8 @@
 """A seat-limited swarm of qwen-agent sessions.
 
-Work is dealt to at most max_agents agents per phase (deal); never more than `seats`
-qwen-agent processes are alive at once; each agent answers with one fenced JSON block,
+Work is dealt to at most max_agents agents per group of a fan-out's deal (deal); never
+more than `seats` qwen-agent processes are alive at once; each agent answers with one
+fenced JSON block,
 gets one repair round (resuming its own session) when that block does not parse, and
 leaves everything in the run folder so an interrupted run resumes where it stopped.
 A unit whose last failure was a timeout (exit 5), a server error (exit 3 or 4) that

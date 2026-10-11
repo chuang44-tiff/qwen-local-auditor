@@ -49,9 +49,12 @@ FLAGS
   --set KNOB=VALUE     override one knob (repeatable); also budget, retries, rounds, hours
   --target DIR         the codebase, for workflows that need one (debug). Agents that can
                        edit or run commands work only in throwaway copies of it
-  --max-agents N       most agents one phase starts (default 8; env QWEN_SWARM_MAX_AGENTS)
+  --max-agents N       how items are dealt: at most N units per group of the deal, every
+                       unit still runs in one phase -- seats, not this, limit concurrency
+                       (default 8; env QWEN_SWARM_MAX_AGENTS)
   --max-items N        most items one agent holds (default 10; env QWEN_SWARM_MAX_ITEMS)
-  --seats N            agents running at once (default 4; env QWEN_SWARM_SEATS)
+  --seats N            agents running at once -- the only concurrency limit
+                       (default 4; env QWEN_SWARM_SEATS)
   --web-seats N        web agents running at once (default --seats; env QWEN_SWARM_WEB_SEATS)
   --timeout SECONDS    per-item budget (default: the preset's budget; env QWEN_SWARM_TIMEOUT)
   --retries N          re-runs of a unit that timed out or answered unusably (default:

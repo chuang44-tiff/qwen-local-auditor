@@ -51,18 +51,22 @@ FLAGS
                         overnight     10       40     80       5     900s       3   until
                        From round 2 a planner turns the last report's gaps into
                        new angles; the run stops early when nothing new is found.
-  --max-agents N       Most agents one phase starts; work is dealt among them,
-                       never cut (default 8; env QWEN_DR_MAX_AGENTS). Must be at
-                       least the voters per claim (3 for standard and deep, 5
-                       for overnight).
+  --max-agents N       How items are dealt: at most N units per group of a
+                       fan-out's deal; every unit still runs in one phase, and
+                       --seats alone limits how many run at once. Work is dealt
+                       among them, never cut (default 8; env QWEN_DR_MAX_AGENTS).
+                       Must be at least the voters per claim (3 for standard and
+                       deep, 5 for overnight).
   --max-items N        Most items one agent holds (angles, sources or claim
                        votes; default 10; env QWEN_DR_MAX_ITEMS; N >= 1). A phase
                        with more items than --max-agents x --max-items splits
-                       them in order into waves of that many items, each wave
-                       dealt over --max-agents agents and run before the next
-                       wave starts; wave 1 keeps the unit names ("verify-3"),
-                       later waves carry the wave number ("verify-w2-3").
-  --seats N            Agents running at once (default 4; env QWEN_DR_SEATS).
+                       them in order into deal groups of that many items, each
+                       group dealt over --max-agents agents; every group's units
+                       run in one phase, so a slow unit holds back no later
+                       group's units. Group 1 keeps the unit names ("verify-3"),
+                       later groups carry the group number ("verify-w2-3").
+  --seats N            Agents running at once -- the only concurrency limit
+                       (default 4; env QWEN_DR_SEATS).
   --web-seats N        Search/fetch/verify agents running at once: default
                        --seats, never above it (env QWEN_DR_WEB_SEATS). Web
                        agents are told to call one tool at a time; lower
@@ -91,9 +95,8 @@ FLAGS
                        --depth overnight, none otherwise; env QWEN_DR_HOURS):
                        a deadline H hours from the first start, stored in
                        config.json as an absolute UTC time. Once it passes,
-                       no new wave and no new unit starts (running units
-                       finish, queued units of the current wave are not
-                       started), every item not run is logged as deadline in
+                       no new unit starts (running units finish, queued
+                       units are not started), every item not run is logged as deadline in
                        run.log (not a drop), the phase continues with what it
                        has without writing its phase file, and synthesis
                        always runs; the report's Run table gains a "stopped at
