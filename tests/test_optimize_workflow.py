@@ -408,6 +408,25 @@ def test_writer_role_has_no_review_round():
     assert data["roles"]["writer"]["deep"] is False
 
 
+def test_writer_tool_call_answer_gets_the_report_repair(tmp_path, team):
+    # the writer's answer IS the report: an answer that opens with a tool call is the
+    # call, not the report, and its repair round asks for the whole markdown report
+    # (WRITE_REPAIR); the repaired body is what lands in report.md
+    (team / "writer.py").write_text(
+        "def answer(p, r):\n"
+        "    return (0, '# Optimize\\n\\nslow.py sleeps less, repaired.\\n') if r"
+        " else (0, '<command name=\"Bash\">ls</command>')\n", encoding="utf-8")
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="-30%"))
+    assert rc == 0, report(run)                                          # repaired, not dropped
+    log = (run / "run.log").read_text(encoding="utf-8").splitlines()
+    assert any(l.split("\t")[0] == "write-1" and l.endswith("\trepaired") for l in log)
+    repair = (run / "agents" / "write-1.repair.md").read_text(encoding="utf-8")
+    assert "complete markdown report" in repair
+    assert "answered with a tool call" in repair         # the {why} WRITE_REPAIR carries
+    assert "slow.py sleeps less, repaired." in report(run)
+
+
 def test_parse_review_downgrades_uncited_verdicts():
     W = _wf_module()
     patches = {"P1": "+++ b/x.py\n+DELAY = 0.1\n"}

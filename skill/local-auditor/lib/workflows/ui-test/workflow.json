@@ -4,7 +4,7 @@
  "goal": "a name for the suite run (the scenario file is --set scenarios=PATH)",
  "target": "none",
  "roles": {
-  "tester": {"file": "roles/tester.md", "fence": "browser", "deep": false},
+  "tester": {"file": "roles/tester.md", "fence": "browser", "deep": false, "effort": "medium"},
   "confirmer": {"file": "roles/confirmer.md", "fence": "browser-probe", "deep": false}
  },
  "knobs": {"scenarios": "str", "base": "str", "fixtures": "str", "confirm": "str",

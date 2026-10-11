@@ -428,3 +428,15 @@ def test_failed_hypothesizer_stops_with_reason(tmp_path, env):
     assert "hypothesizer failed" in totals["stop_reason"]
     report = (run / "report.md").read_text(encoding="utf-8")
     assert "hypothesizer failed" in report
+
+
+def test_triager_and_reviewer_default_to_medium_effort():
+    # the triager locates files and the reviewer only reads patches and votes; they run
+    # at medium so a run does not spend top effort on every triage and review pass
+    # (--effort/--role-effort still beat the manifest default, as the engine tests pin)
+    from lib.swarm_engine import manifest
+    m = manifest.load(pathlib.Path(__file__).resolve().parent.parent / "skill" /
+                      "local-auditor" / "lib" / "workflows" / "debug")
+    assert {r: m.roles[r].effort for r in m.roles} == {
+        "triager": "medium", "hypothesizer": None, "prober": None,
+        "reviewer": "medium", "planner": None, "writer": None}

@@ -4,10 +4,10 @@
  "goal": "the symptom to debug",
  "target": "required",
  "roles": {
-  "triager": {"file": "roles/triager.md", "fence": "read"},
+  "triager": {"file": "roles/triager.md", "fence": "read", "effort": "medium"},
   "hypothesizer": {"file": "roles/hypothesizer.md", "fence": "read"},
   "prober": {"file": "roles/prober.md", "fence": "sandbox"},
-  "reviewer": {"file": "roles/reviewer.md", "fence": "read"},
+  "reviewer": {"file": "roles/reviewer.md", "fence": "read", "effort": "medium"},
   "planner": {"file": "roles/planner.md", "fence": "none"},
   "writer": {"file": "roles/writer.md", "fence": "none"}
  },

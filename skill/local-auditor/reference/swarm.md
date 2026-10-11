@@ -347,8 +347,8 @@ and every later unit whose prompt depends on its output; and (b) a run folder ma
 earlier version re-runs, on resume, the tool-less roles that used to get the review round
 (research's scoper, planner when its plan is missing, and synthesizer; debug's planner
 and writer), the roles whose default effort changed (research's searcher, reader and
-verifier; optimize's checker and reviewer), and every web-fence unit (its grants now
-include the `page` tool).
+verifier; optimize's checker and reviewer; debug's triager and reviewer; ui-test's
+tester), and every web-fence unit (its grants now include the `page` tool).
 
 ## The run folder
 
@@ -482,6 +482,9 @@ note in the report.
 | deep | 8 | 3 | 1200 | 2 | 3 |
 | overnight | 12 | 5 | 1800 | 3 | until, 8 h |
 
+The triager and the reviewer default to `medium` effort; on a run, `--effort` and
+`--role-effort` override that.
+
 triage (`read`; with no `--set repro=` the triager proposes the reproduction command, and
 `run.log` records it as the triager's) -> reproduce (`run_cmd(repro)` in a fresh sandbox must
 fail, else the report says it did not reproduce; with no `repro` at all — no knob, no
@@ -529,6 +532,9 @@ Any runner works: the wrapper times the command itself; pytest, unittest, jest, 
 `go test -v` and cargo test also give a pass count (a patch must keep it) and pytest and jest
 a per-file profile (go a per-test one). Another runner is judged by its exit code alone, and the report
 says "pass count not checked".
+
+The checker and the reviewers default to `medium` effort; on a run, `--effort` and
+`--role-effort` override that.
 
 The run checks the bench before round 1 (measure passes twice, guard passes and runs at
 least as many tests, the profile reaches focus, the target is above the timing noise) and
@@ -589,6 +595,9 @@ browser session for the same scenario — which `--deep tester` overrides. The b
 headless: `--headed` is qwen-agent's own per-session flag (it implies `--browser` and needs a
 display), and the swarm never passes it — watch one scenario with
 `qwen-agent -r tester --headed "open http://localhost:3000 ..."`.
+
+The tester defaults to `medium` effort; on a run, `--effort` and `--role-effort`
+override that.
 
 Every scenario is dealt to a `browser` agent of its own (`max_items=1`), so a suite of twenty
 scenarios is twenty browser sessions at `--seats` rather than one long one, and a suite the

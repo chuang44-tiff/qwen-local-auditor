@@ -337,6 +337,14 @@ Write the report: what was measured, the stacked result, each kept patch with it
 the others briefly with why they did not qualify, any note about a slow place outside
 focus, and what to check before applying patches/stacked.diff.
 """
+# The writer's answer IS the report, so its repair round asks for the whole report --
+# not for a json block, which is what the swarm's default REPAIR asks for. A fence
+# "none" role has no tools: a review round once told it to re-check with probes it does
+# not have, and it answered with the tool call itself; the repair says not to.
+WRITE_REPAIR = ("Your last answer could not be used: {why}\n\n"
+                "Reply again with ONLY the complete markdown report, following the "
+                "format you were given. Do not answer with a tool call: you have no "
+                "tools, and the report itself is the answer.")
 
 
 def _bench_text(b):
@@ -691,7 +699,8 @@ def _finish(wf, b, bl, st, target, reason, last):
             "kept in the stack" if c["id"] in st["kept"] else (c["why"] or "approved, not stacked"))
         for c in st["cands"]] + [
         "Slow outside focus (not implemented): %s -- %s" % (n_["location"], n_["why"]) for n_ in st["notes"]])
-    body = wf.agent("write", "writer", WRITE_P.format(goal=wf.goal, facts=facts), parse_report)
+    body = wf.agent("write", "writer", WRITE_P.format(goal=wf.goal, facts=facts), parse_report,
+                    repair=WRITE_REPAIR)
     table = ["| patch | idea | seconds (runs) | passed | review | stacked | why not |",
              "|---|---|---|---|---|---|---|"]
     for c in st["cands"]:

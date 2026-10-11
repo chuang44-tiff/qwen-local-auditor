@@ -1286,3 +1286,14 @@ def test_resume_of_a_pre_change_ui_test_folder_fills_confirm_and_warns(tmp_path,
     rows = {r["id"]: r for r in json.loads((out / "results.json").read_text(encoding="utf-8"))}
     assert rows["s1"]["confirmation"]["verdict"] == "NEEDS_HUMAN"   # FakeClaude: unavailable
     assert "confirmation" not in rows["s2"]                          # a PASS is never confirmed
+
+
+def test_tester_defaults_to_medium_effort():
+    # a tester walks a scripted scenario and reports: extraction work, so it runs at
+    # medium while the confirmer keeps qwen-agent's own default
+    # (--effort/--role-effort still beat the manifest default, as the engine tests pin)
+    from lib.swarm_engine import manifest
+    m = manifest.load(pathlib.Path(__file__).resolve().parent.parent / "skill" /
+                      "local-auditor" / "lib" / "workflows" / "ui-test")
+    assert {r: m.roles[r].effort for r in m.roles} == {
+        "tester": "medium", "confirmer": None}
