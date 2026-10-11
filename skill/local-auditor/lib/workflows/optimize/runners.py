@@ -63,12 +63,12 @@ def _word_counts(s):
 
 def _jest(t):
     rows = _JEST.findall(t)
-    return (True, _word_counts(rows[-1])) if rows else (False, None)
+    return (True, _word_counts("\n".join(rows))) if rows else (False, None)
 
 
 def _vitest(t):
     rows = _VITEST.findall(t)
-    return (True, _word_counts(rows[-1])) if rows else (False, None)
+    return (True, _word_counts("\n".join(rows))) if rows else (False, None)
 
 
 def _go(t):
@@ -82,25 +82,37 @@ def _go(t):
 
 
 def _unittest(t):
-    ran = _UNIT_RAN.findall(t)
-    res = _UNIT_RES.findall(t)
+    ran = list(_UNIT_RAN.finditer(t))
+    res = list(_UNIT_RES.finditer(t))
     if not ran or not res:
         return False, None
-    detail = dict((k.strip(), int(v)) for k, v in re.findall(r"([a-z ]+)=(\d+)", res[-1][1] or ""))
-    failed = detail.get("failures", 0) + detail.get("errors", 0) + detail.get("unexpected successes", 0)
-    skipped = detail.get("skipped", 0) + detail.get("expected failures", 0)
-    return True, {"passed": int(ran[-1]) - failed - skipped, "failed": failed, "skipped": skipped}
+    c, paired = _zero(), 0
+    for r in ran:                            # each "Ran N" pairs with the result line after it
+        nxt = next((x for x in res if x.start() > r.start()), None)
+        if nxt is None:
+            continue
+        paired += 1
+        detail = dict((k.strip(), int(v)) for k, v in re.findall(r"([a-z ]+)=(\d+)", nxt.group(2) or ""))
+        failed = detail.get("failures", 0) + detail.get("errors", 0) + detail.get("unexpected successes", 0)
+        skipped = detail.get("skipped", 0) + detail.get("expected failures", 0)
+        c["passed"] += int(r.group(1)) - failed - skipped
+        c["failed"] += failed
+        c["skipped"] += skipped
+    return (True, c) if paired else (False, None)
 
 
 def _pytest(t):
-    for line in reversed(t.splitlines()):
+    c = None
+    for line in t.splitlines():              # every summary line of every chained run
+        if _CARGO.match(line):               # a cargo summary ends "... finished in 0.02s": cargo's, not pytest's
+            continue
         if re.search(r" in [\d.]+s\b", line) and (_PYTEST_WORDS.search(line) or "no tests ran" in line):
-            c = _zero()
+            if c is None:
+                c = _zero()
             for n, word in _PYTEST_WORDS.findall(line):
                 if word in _PYTEST_KEY:
                     c[_PYTEST_KEY[word]] += int(n)
-            return True, c
-    return False, None
+    return (True, c) if c is not None else (False, None)
 
 
 _RUNNERS = (("cargo", _cargo), ("jest", _jest), ("vitest", _vitest), ("go", _go),
@@ -108,15 +120,28 @@ _RUNNERS = (("cargo", _cargo), ("jest", _jest), ("vitest", _vitest), ("go", _go)
 
 
 def counts(text):
-    """(runner, {"passed", "failed", "skipped"}) for a test command's output; the counts
-    are None for a runner whose output carries none (go test without -v), and the result
-    is (None, None) when no known runner's summary is in it."""
+    """(runner, {"passed", "failed", "skipped"}) for a test command's output, the counts
+    summed over EVERY runner whose summary is in it: a chained command (`pytest tests/a
+    && pytest tests/b`, `python -m unittest && pytest`) is counted whole. The name is the
+    first runner found, the one whose timings() reads the output. A runner found with
+    counts None (go test without -v) adds nothing, and the counts are None when every
+    found runner has none; the result is (None, None) when no known runner's summary is
+    in the text."""
     t = text or ""
-    for name, fn in _RUNNERS:
+    name, total, counted = None, _zero(), False
+    for runner_name, fn in _RUNNERS:
         found, c = fn(t)
-        if found:
-            return name, c
-    return None, None
+        if not found:
+            continue
+        if name is None:
+            name = runner_name
+        if c is not None:
+            for k in total:
+                total[k] += c[k]
+            counted = True
+    if name is None:
+        return None, None
+    return name, (total if counted else None)
 
 
 def timings(runner, text):

@@ -185,11 +185,11 @@ reused from the cache. Exit 130 or a crash: `qwen-swarm --resume RUN` too. On re
 An optimize run may go all night; check its bench first, so it cannot stop at round 1
 after everyone has gone to bed.
 
-1. Pick `measure`: the narrowest command that exercises the slow part. Run it yourself and
-   read where the time goes.
+1. Pick `measure`: the narrowest command that exercises the slow part; run it, read where the time goes.
 2. Pick `guard`: the command that must still pass (usually the whole suite).
-3. **run measure twice and guard once** on the unchanged tree; both must pass. Note the
-   spread of the two measure times: that is the noise.
+3. **run measure twice and guard once** the way the run will: a clean clone of HEAD, no
+   uncommitted changes and no git-ignored dependencies (`node_modules`, `.venv`); the command
+   installs what it needs or uses tools on `PATH`. Both must pass; note the noise spread.
 4. Set `focus` to the files the slow part lives in (the profile says which), `target` well
    above the noise (a 3 s command with 0.3 s spread cannot aim for -5%), and `keep` in one sentence.
 5. Start: `qwen-swarm optimize "GOAL" --target REPO --out RUN_DIR --set bench=bench.json --depth overnight`.

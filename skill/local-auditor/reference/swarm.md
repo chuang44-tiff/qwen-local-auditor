@@ -529,29 +529,43 @@ bench file:
 | `"target"` | optional, `-N%` or `Ns` on measure: reached = the rounds stop |
 | `"keep"` | what reviewers judge each patch against |
 
+Focus globs use `fnmatch`, where `*` also crosses `/`: `tests/*.py` matches `tests/a/b.py`.
+
 `--set tests=CMD` without a bench times the whole suite with no focus and no target.
 Any runner works: the wrapper times the command itself; pytest, unittest, jest, vitest,
 `go test -v` and cargo test also give a pass count (a patch must keep it) and pytest and jest
 a per-file profile (go a per-test one). Another runner is judged by its exit code alone, and the report
-says "pass count not checked".
+says "pass count not checked". A pass count adds up every test summary in the output, so a
+chained command (`pytest tests/a && pytest tests/b`, `python -m unittest && pytest`) is
+counted whole.
+
+`measure` and `guard` run in a fresh sandbox: a clone of `--target`'s HEAD, the candidate
+patch applied on top. Uncommitted changes are not in that clone, and neither are
+git-ignored dependencies (`node_modules`, `.venv`): a bench command must find its tools on
+`PATH` or install what it needs itself.
 
 The checker and the reviewers default to `medium` effort; on a run, `--effort` and
 `--role-effort` override that.
 
 The run checks the bench before round 1 (measure passes twice, guard passes and runs at
-least as many tests, the profile reaches focus, the target is above the timing noise) and
-a checker agent may report a problem, quoting the output. A failed check stops the run:
+least as many tests, the target is above the timing noise) and a checker agent may report
+a problem, quoting the output. The "profile reaches focus" check is advisory: it is
+reported, it never stops the run. A failed check stops the run:
 exit 4, `report.md` starts with `bench: problem (see bench-review.md): <reason>`, and
 `bench-review.md` holds the evidence. The local model never changes the bench; its
 suggestion goes to `bench-suggested.json` and is not run. The same stop happens mid-run when
 measure fails twice on the unchanged tree, when its timing drifts past 3x the noise twice,
 or when a round's ideas all fall outside focus; approved patches so far stay in `patches/`.
+The rounds end early when a round adds no new idea that passes its checks, or no speed-up
+to the stack: the run then finishes and reports what it has.
 
 Every claim a local agent makes is checked: an idea names a real `path:line` inside focus
 and quotes a real profile line; speed is measured by the engine, never taken from the
 agent; a reviewer's verdict counts only when the diff lines it cites are in the patch.
-Approved patches are stacked when the stack gets faster by more than the noise; the guard
-then runs once on the stack, dropping patches from the end until it passes.
+A test patch that weakens an assertion but keeps the pass count is caught only by the
+reviewer vote (`quick` has one voter). Approved patches are stacked when the stack gets
+faster by more than the noise; the guard then runs once on the stack, dropping patches
+from the end until it passes.
 
 Output: `patches/stacked.diff` (apply it yourself; `--target` is never written),
 `patches/<n>-<id>.diff`, `bench-review.md`, `report.md`. Exit 0 when a stack was kept,

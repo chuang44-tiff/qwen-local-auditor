@@ -56,6 +56,82 @@ def test_go_without_v_is_known_but_uncounted():
     assert R.counts(GO_QUIET) == ("go", None)
 
 
+def test_two_pytest_summaries_sum():
+    text = "============================= 2 passed in 0.10s ==============================\n" \
+           "======================== 4 passed, 1 skipped in 0.20s =========================\n"
+    assert R.counts(text) == ("pytest", {"passed": 6, "failed": 0, "skipped": 1})
+
+
+def test_unittest_then_pytest_sum():
+    text = "Ran 2 tests in 0.02s\n\nOK\n============================= 3 passed in 0.30s =====\n"
+    assert R.counts(text) == ("unittest", {"passed": 5, "failed": 0, "skipped": 0})
+
+
+def test_two_unittest_runs_sum():
+    text = ("Ran 4 tests in 0.10s\n\nFAILED (failures=1)\n"
+            "----------------------------------------------------------------------\nRan 2 tests in 0.05s\n\nOK\n")
+    assert R.counts(text) == ("unittest", {"passed": 5, "failed": 1, "skipped": 0})
+
+
+def test_two_jest_runs_sum():
+    text = ("Tests:       1 failed, 2 skipped, 10 passed, 13 total\nTime:        6.2 s\n"
+            "Tests:       3 passed, 3 total\nTime:        1.0 s\n")
+    assert R.counts(text) == ("jest", {"passed": 13, "failed": 1, "skipped": 2})
+
+
+def test_two_vitest_runs_sum():
+    text = " Test Files  2 passed (2)\n      Tests  1 failed | 9 passed (10)\n" \
+           " Test Files  1 passed (1)\n      Tests  2 passed (2)\n"
+    assert R.counts(text) == ("vitest", {"passed": 11, "failed": 1, "skipped": 0})
+
+
+def test_each_unittest_run_pairs_only_with_its_own_result():
+    # the OK belongs to the first run and cannot leak to the second: pairing is by order
+    text = "Ran 3 tests in 0.10s\n\nOK\nRan 2 tests in 0.10s\n\nFAILED (failures=1)\n"
+    assert R.counts(text) == ("unittest", {"passed": 4, "failed": 1, "skipped": 0})
+
+
+def test_unittest_pair_detail_words_keep_the_old_formula():
+    text = ("Ran 6 tests in 0.10s\n\nFAILED (failures=1, errors=1, skipped=1,"
+            " expected failures=1, unexpected successes=1)\n")
+    assert R.counts(text) == ("unittest", {"passed": 1, "failed": 3, "skipped": 2})
+
+
+def test_a_thousand_chained_pytest_summaries_still_sum():
+    text = "no tests ran in 0.01s\n" + "".join("2 passed in 0.01s\n" for _ in range(1000))
+    assert R.counts(text) == ("pytest", {"passed": 2000, "failed": 0, "skipped": 0})
+
+
+def test_a_cargo_summary_is_counted_once_even_with_finished_in():
+    # cargo's real line ends "finished in 0.02s" and holds "5 passed": the loose pytest
+    # line test must not claim it, or one cargo suite counts twice
+    line = ("test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out;"
+            " finished in 0.02s\n")
+    assert R.counts(line) == ("cargo", {"passed": 5, "failed": 0, "skipped": 1})
+    assert R.counts(line + "5 passed in 0.30s\n") == ("cargo", {"passed": 10, "failed": 0,
+                                                                "skipped": 1})
+
+
+def test_a_chained_no_tests_ran_line_adds_zero_like_before():
+    text = "no tests ran in 0.01s\n4 passed in 0.20s\n"
+    assert R.counts(text) == ("pytest", {"passed": 4, "failed": 0, "skipped": 0})
+    assert R.counts("no tests ran in 0.01s\n") == ("pytest", {"passed": 0, "failed": 0, "skipped": 0})
+
+
+def test_a_runner_without_counts_adds_nothing_to_a_sum():
+    # go test without -v is found but counted None: it joins the run as the timing parser
+    # (it is found first) while the unittest pair carries the whole count
+    text = "Ran 2 tests in 0.01s\n\nOK\nok  \texample.com/p\t0.1s\n"
+    assert R.counts(text) == ("go", {"passed": 2, "failed": 0, "skipped": 0})
+
+
+def test_hiding_tests_in_the_first_of_two_chained_suites_changes_the_count():
+    # the B2 trap the old last-summary-only parse set: one suite alone vs two chained
+    assert R.counts("1 passed in 0.10s\n")[1] == {"passed": 1, "failed": 0, "skipped": 0}
+    assert R.counts("1 passed in 0.10s\n4 passed in 0.20s\n")[1] == {
+        "passed": 5, "failed": 0, "skipped": 0}
+
+
 def test_unknown_runner_gives_rc_only():
     assert R.counts("all good\n") == (None, None)
     out = R.summary("all good\n", 0, 1.5)

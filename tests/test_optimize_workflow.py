@@ -330,7 +330,7 @@ def test_one_drifting_recheck_does_not_stop_the_run():
 def test_conflicting_patches_stack_only_the_first():
     W = _wf_module()
     bl = {"base": 10.0, "noise": 0.2, "passed": 3}
-    st = {"stack": "", "best": 10.0, "kept": [], "patches": {"P1": "diff A\n", "P2": "CONFLICT\n"}}
+    st = {"stack": "", "best": 10.0, "kept": [], "times": {}, "patches": {"P1": "diff A\n", "P2": "CONFLICT\n"}}
     new = [{"id": "P1", "approved": True, "seconds": 5.0}, {"id": "P2", "approved": True, "seconds": 6.0}]
     fake = FakeWF([5.0, 5.0])                     # P1 stacked: two runs at 5.0; P2 never applies
     added = W._grow_stack(fake, {"measure": "m"}, bl, st, new)
@@ -341,11 +341,64 @@ def test_conflicting_patches_stack_only_the_first():
 def test_a_dropped_patch_falls_back_when_there_is_no_why():
     W = _wf_module()
     bl = {"base": 10.0, "noise": 0.2, "passed": 4}      # the stack trial passes 3 of the 4
-    st = {"stack": "", "best": 10.0, "kept": [], "patches": {"P1": "diff A\n"}}
+    st = {"stack": "", "best": 10.0, "kept": [], "times": {}, "patches": {"P1": "diff A\n"}}
     new = [{"id": "P1", "approved": True, "seconds": 5.0}]
     assert not W._grow_stack(FakeWF([5.0, 5.0]), {"measure": "m"}, bl, st, new)
     assert new[0]["why"] == ("approved; not added to the stack: not faster than "
                              "the stack by more than the noise")
+
+
+class NoSummaryWF:
+    """A wf whose run_cmd runs clean but prints no recognisable test summary (passed None)."""
+
+    def __init__(self):
+        self.logs = []
+        self.steps = self
+
+    def run_cmd(self, cmd, patch=None, timeout=0):
+        res = {"rc": 0, "wall": 1.0, "runner": None, "files": None,
+               "passed": None, "failed": None, "skipped": None}
+        return {"applied": True, "rc": 0, "timed_out": False,
+                "output_tail": "all good, no summary\nQLA_RESULT " + json.dumps(res) + "\n"}
+
+    def log(self, msg):
+        self.logs.append(msg)
+
+
+def test_guard_output_without_a_summary_drops_the_patch():
+    # the baseline guard had a count (3 passed); on the stack its output has none: an
+    # unreadable count is not a pass, so the patch is dropped rather than kept on trust
+    W = _wf_module()
+    bl = {"g": {"passed": 3, "wall": 1.0}, "noise": 0.2}
+    st = {"stack": "x", "best": 5.0, "kept": ["P1"], "times": {"P1": 5.0}, "patches": {"P1": "diff A\n"}}
+    line, warn = W._final_guard(NoSummaryWF(), {"measure": "m", "guard": "g"}, bl, st)
+    assert line == "guard: failed with every stack; nothing kept (P1)"
+    assert st["kept"] == [] and st["stack"] == "" and st.get("guard_dropped_all") is True
+
+
+def test_a_guard_that_was_never_counted_still_passes_without_a_count():
+    # the other side of the tightened condition: gp None (an unknown runner baseline)
+    # must not turn into a never-passing guard just because the stack output has no count
+    W = _wf_module()
+    bl = {"g": {"passed": None, "wall": 1.0}, "noise": 0.2}
+    st = {"stack": "", "best": 5.0, "kept": ["P1"], "times": {"P1": 5.0}, "patches": {"P1": "diff A\n"}}
+    line, warn = W._final_guard(NoSummaryWF(), {"measure": "m", "guard": "g"}, bl, st)
+    assert line.startswith("guard: passed on the stack (pass count not checked)")
+    assert st["kept"] == ["P1"] and st["stack"] == "diff A\n" and not st.get("guard_dropped_all")
+
+
+def test_a_failed_final_remeasure_keeps_the_last_kept_patch_time():
+    # P2 fails the guard and is dropped; the re-measure of the reduced stack then fails:
+    # best falls back to P1's own stacked time, not to the old best that included P2
+    W = _wf_module()
+    bl = {"g": {"passed": 3, "wall": 10.0}, "noise": 0.2, "passed": 3}
+    st = {"stack": "x", "best": 4.0, "kept": ["P1", "P2"], "times": {"P1": 6.0, "P2": 4.0},
+          "patches": {"P1": "diff A\n", "P2": "diff B\n"}}
+    fake = FakeWF([None, 1.0, None])       # guard P1+P2 fails; guard P1 passes; re-measure fails
+    line, warn = W._final_guard(fake, {"measure": "m", "guard": "g"}, bl, st)
+    assert st["kept"] == ["P1"] and st["best"] == 6.0
+    assert "dropped from the stack because guard failed with them: P2" in line
+    assert any("final measure" in m for m in fake.logs)
 
 
 PROFILER_TWO_EDITS = r'''
@@ -425,6 +478,47 @@ def test_writer_tool_call_answer_gets_the_report_repair(tmp_path, team):
     assert "complete markdown report" in repair
     assert "answered with a tool call" in repair         # the {why} WRITE_REPAIR carries
     assert "slow.py sleeps less, repaired." in report(run)
+
+
+def test_parse_ideas_raises_with_three_reasons_when_all_are_dropped():
+    W = _wf_module()
+    ideas = [{"location": "x%d.py:1" % i, "profile_line": "invented profile line %d" % i,
+              "change": "change %d" % i} for i in range(5)]
+    parse = W.parse_ideas(3, set(), None, [], ["the real profile"])
+    with pytest.raises(ValueError) as e:
+        parse(json.dumps({"ideas": ideas, "outside_focus": None}))
+    assert str(e.value).count("profile_line not found in the profile") == 3
+
+
+def test_parse_ideas_lists_only_the_non_outside_focus_reasons():
+    W = _wf_module()
+    ideas = [{"location": "a.py:1", "profile_line": "invented one here", "change": "c1"},
+             {"location": "far.py:1", "profile_line": "a real profile line", "change": "c2"}]
+    parse = W.parse_ideas(3, set(), None, ["a.py"], ["the real profile\na real profile line\n"])
+    with pytest.raises(ValueError) as e:
+        parse(json.dumps({"ideas": ideas, "outside_focus": None}))
+    msg = str(e.value)
+    assert "profile_line not found in the profile" in msg
+    assert "outside focus" not in msg            # that drop stays today's behaviour
+
+
+def test_parse_ideas_keeps_todays_answer_when_every_drop_is_outside_focus():
+    W = _wf_module()
+    ideas = [{"location": "far.py:1", "profile_line": "a real profile line", "change": "c1"}]
+    parse = W.parse_ideas(3, set(), None, ["a.py"], ["the real profile\na real profile line\n"])
+    out = parse(json.dumps({"ideas": ideas, "outside_focus": None}))
+    assert out["ideas"] == [] and [d["why"].startswith("outside focus") for d in out["dropped"]]
+
+
+def test_parse_ideas_does_not_raise_while_one_idea_survives():
+    # the raise is for an EMPTY round only: one good idea plus misquoted ones answers
+    W = _wf_module()
+    good = {"location": "a.py:1", "profile_line": "a real profile line", "change": "c1"}
+    bad = {"location": "a.py:1", "profile_line": "invented line nope", "change": "c2"}
+    parse = W.parse_ideas(3, set(), None, ["a.py"], ["the real profile\na real profile line\n"])
+    out = parse(json.dumps({"ideas": [good, bad], "outside_focus": None}))
+    assert [i["change"] for i in out["ideas"]] == ["c1"]
+    assert [d["why"] for d in out["dropped"]] == ["profile_line not found in the profile"]
 
 
 def test_parse_review_downgrades_uncited_verdicts():
@@ -518,3 +612,98 @@ def test_every_idea_outside_focus_stops_the_run(tmp_path, team):
     assert report(run).splitlines()[0].startswith(
         "bench: problem (see bench-review.md): round 1: every idea was outside focus")
     assert "round 1" in (run / "bench-review.md").read_text(encoding="utf-8")
+
+
+PROFILER_INVENTS_FIRST = r'''
+import json
+def answer(p, r):
+    # first answer: a profile line that is nowhere in the profile; the repair answer
+    # quotes a line that is always there
+    line = "OUTPUT TAIL:" if r else "0.99s call tests/test_slow.py::test_work_invented"
+    return 0, "```json\n" + json.dumps({"ideas": [
+        {"location": "slow.py:2", "profile_line": line, "change": "lower DELAY",
+         "why": "sleep", "saving": "0.3s"}], "outside_focus": None}) + "\n```"
+'''
+
+
+def test_a_misquoted_profile_line_gets_a_repair_round(tmp_path, team):
+    # one round of slightly misquoted ideas must not end the run with no repair: the
+    # parse raises, the repair round re-answers correctly, the candidate is measured
+    write_fakes(team, profiler=PROFILER_INVENTS_FIRST)
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
+    assert rc == 0, report(run)
+    cands = json.loads((run / "candidates.json").read_text(encoding="utf-8"))
+    assert len(cands) == 1 and cands[0]["seconds"] is not None and cands[0]["approved"]
+    log = (run / "run.log").read_text(encoding="utf-8").splitlines()
+    assert any(l.split("\t")[0] == "profile-1" and l.endswith("\trepaired") for l in log)
+    repair = (run / "agents" / "profile-1.repair.md").read_text(encoding="utf-8")
+    assert "profile_line not found in the profile" in repair      # the reason to fix
+
+
+PROFILER_ALWAYS_BAD = r'''
+import json
+def answer(p, r):
+    # every answer, the repair included, quotes a line nowhere in the profile
+    return 0, "```json\n" + json.dumps({"ideas": [
+        {"location": "slow.py:2", "profile_line": "9.99s call tests/test_slow.py::test_work_invented",
+         "change": "lower DELAY", "why": "sleep", "saving": "0.3s"}], "outside_focus": None}) + "\n```"
+'''
+
+
+def test_a_repair_that_still_misquotes_drops_the_unit_and_converges(tmp_path, team):
+    # the raise buys one repair round, not a loop: a profiler that never fixes the quote
+    # is dropped, the round counts as "no new idea", and the run ends with the plain
+    # no-patch reason (NOT the guard-dropped-all one)
+    write_fakes(team, profiler=PROFILER_ALWAYS_BAD)
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, guard=MEASURE))
+    assert rc == 4, report(run)
+    assert report(run).splitlines()[1] == "result: no approved patch made measure faster"
+    assert "answer still unusable after one repair" in (run / "run.log").read_text(encoding="utf-8")
+    assert "guard: not run (nothing stacked)" in report(run)
+    assert not (run / "candidates.json").exists()
+
+
+def test_guard_failing_on_the_stack_says_so_in_the_result(tmp_path, team):
+    # an in-repo assertion ties guard to the constant the patch lowers: the guard fails
+    # with every stack, and the result line says the guard dropped all, not "no patch
+    # made measure faster" (the patch did -- the guard would not carry it)
+    repo = git_repo(tmp_path / "repo", dict(SLOW, **{"test_other.py":
+        "import slow\n\n\ndef test_other():\n    assert 1 + 1 == 2\n"
+        "\n\ndef test_delay():\n    assert slow.DELAY == 0.4\n"}))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
+    assert rc == 4, report(run)
+    assert report(run).splitlines()[1] == \
+        "result: the guard failed with every stack, so nothing was kept"
+    assert "guard: failed with every stack; nothing kept" in report(run)
+    assert not (run / "patches" / "stacked.diff").exists()
+
+
+IMPLEMENTER_OUTSIDE = r'''
+import json, pathlib, re
+def answer_cwd(p, r, cwd):
+    iid = re.search(r"^- (I\d+):", p, re.M).group(1)
+    d = pathlib.Path(cwd)
+    s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.4", "DELAY = 0.01")
+    (d / "slow.py").write_text(s, encoding="utf-8", newline="\n")
+    other = d / "test_other.py"
+    other.write_text(other.read_text(encoding="utf-8") + "# touched\n",
+                     encoding="utf-8", newline="\n")
+    return 0, "```json\n" + json.dumps({"id": iid, "done": True, "summary": "did it", "note": ""}) + "\n```"
+'''
+
+
+def test_patch_editing_outside_focus_is_not_measured(tmp_path, team):
+    # the idea is in focus (slow.py:2); the implementer's patch also edits test_other.py,
+    # which focus ["slow.py"] forbids: the candidate is never measured
+    write_fakes(team, profiler=PROFILER_OUTSIDE, implementer=IMPLEMENTER_OUTSIDE)
+    repo = git_repo(tmp_path / "repo", SLOW)
+    rc, run = optimize(tmp_path, repo,
+                       "--set", "bench=%s" % bench_file(tmp_path, focus=["slow.py"]))
+    cands = json.loads((run / "candidates.json").read_text(encoding="utf-8"))
+    assert len(cands) == 1, cands
+    c = cands[0]
+    assert c["why"].startswith("changes files outside focus:") and "test_other.py" in c["why"]
+    assert c["seconds"] is None and c["runs"] == [] and c["passed"] is None and not c["ok"]
+    assert rc == 4 and "no approved patch made measure faster" in report(run)

@@ -391,6 +391,11 @@ def parse_ideas(n, seen, root, focus, texts):
                 ideas.append(idea)
         if data["ideas"] and not ideas and not dropped:
             raise ValueError("no usable new idea (each needs a location and a change, not repeating earlier ones)")
+        bad = [d["why"] for d in dropped if not d["why"].startswith("outside focus")]
+        if not ideas and bad:
+            # one round of slightly misquoted ideas is a slip, not the profiler running
+            # dry: raise so the swarm's repair round re-asks, with these reasons to fix
+            raise ValueError("every idea was dropped: %s" % "; ".join(bad[:3]))
         note = data.get("outside_focus")
         out = None
         if isinstance(note, dict):
@@ -515,6 +520,7 @@ def _grow_stack(wf, b, bl, st, new):
         if m["ok"] and _same_count(bl, m) and m["seconds"] is not None and m["seconds"] <= st["best"] - bl["noise"]:
             st["stack"], st["best"] = trial, m["seconds"]
             st["kept"].append(c["id"])
+            st["times"][c["id"]] = m["seconds"]
             added = True
             wf.log("stack: kept %s -> %.2fs" % (c["id"], st["best"]))
         else:
@@ -604,11 +610,17 @@ def _final_guard(wf, b, bl, st):
         for cid in st["kept"]:
             stack = _join(stack, st["patches"][cid])
         g = _run(wf, b["guard"], "guard final %s" % "+".join(st["kept"]), stack)
-        if g["ok"] and (gp is None or g["passed"] is None or g["passed"] >= gp):
+        # an unreadable count (gp known, g's None) is NOT a pass: the guard must show it
+        if g["ok"] and (gp is None or (g["passed"] is not None and g["passed"] >= gp)):
             st["stack"] = stack
             if dropped:
                 m = _measure(wf, b["measure"], stack, "measure final %s" % "+".join(st["kept"]), float("inf"))
-                st["best"] = m["seconds"] if m["ok"] and m["seconds"] is not None else st["best"]
+                if m["ok"] and m["seconds"] is not None:
+                    st["best"] = m["seconds"]
+                else:
+                    st["best"] = st["times"][st["kept"][-1]]
+                    wf.log("final measure of the reduced stack failed (%s); the stacked time "
+                           "stays %.2fs, measured when %s joined" % (m["why"], st["best"], st["kept"][-1]))
             line = "guard: passed on the stack (%s) in %.2fs; baseline %.2fs" % (_count(g), g["wall"], gw)
             if dropped:
                 line += "; dropped from the stack because guard failed with them: %s" % ", ".join(dropped)
@@ -620,12 +632,14 @@ def _final_guard(wf, b, bl, st):
         wf.log("guard failed (%s); dropping %s" % (benchlib.why(g) if not g["ok"] else "fewer tests", dropped[-1]))
     st["stack"] = ""
     if dropped:
+        st["guard_dropped_all"] = True
         return "guard: failed with every stack; nothing kept (%s)" % ", ".join(dropped), None
     return "guard: not run (nothing stacked)", None
 
 
 def _rounds_and_finish(wf, b, bl):
-    st = {"cands": [], "ideas": [], "stack": "", "best": bl["base"], "kept": [], "patches": {}, "notes": []}
+    st = {"cands": [], "ideas": [], "stack": "", "best": bl["base"], "kept": [], "patches": {},
+          "times": {}, "notes": []}
     bar = min(bl["base"] * (1 - wf.knob("min_gain")), bl["base"] - 2 * bl["noise"])
     target = benchlib.target_seconds(b, bl["base"])
     reason, last = None, 1
@@ -681,7 +695,8 @@ def _finish(wf, b, bl, st, target, reason, last):
         stacked = "(nothing stacked)"
     unmet = None
     if not st["kept"]:
-        unmet = "no approved patch made measure faster"
+        unmet = ("the guard failed with every stack, so nothing was kept"
+                 if st.get("guard_dropped_all") else "no approved patch made measure faster")
     elif target is not None and st["best"] > target:
         unmet = "target %s not reached: %.2fs (needed %.2fs)" % (b["target"], st["best"], target)
     if unmet:
