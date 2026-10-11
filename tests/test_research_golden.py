@@ -1,7 +1,10 @@
 """Byte-identity guard: a one-round research run (quick, standard) must produce the same
 run folder, unit names, cache keys, phase files, report and stdout as the released
 qwen-deep-research did before the swarm-engine port. Written to pass on that code first;
-it must keep passing."""
+it must keep passing. The one settled change since: the fan-out roles (searcher, reader,
+verifier) gained a manifest default effort of "medium", and a unit's key holds its effort,
+so those keys carry "medium" where the released run computed none; every other byte is
+still pinned."""
 import hashlib
 import json
 import pathlib
@@ -130,24 +133,26 @@ def test_one_round_run_folder_matches_the_released_one(tmp_path, env, capsys, de
 
 def test_one_round_cache_keys_match_the_released_ones(tmp_path, env):  # noqa: F811
     # the fence flags and the key blob are unchanged and no research role is deep
-    # (DEEP_ROLES is empty: the fan-out roles opt out, the rest are fence "none"), so a
-    # run folder the released command wrote resumes with every unit still a cache hit
+    # (DEEP_ROLES is empty: the fan-out roles opt out, the rest are fence "none"). The
+    # fan-out roles' manifest default effort ("medium") is the one field their keys now
+    # carry that a released run's did not; the fence-"none" roles name no effort, so
+    # their keys stay byte-identical to the released ones
     rc, run = _run(tmp_path, "quick")
     assert rc == 0
     agents = run / "agents"
     mcp_text = (run / "mcp.json").read_text(encoding="utf-8")
-    fences = {"scope": ("scoper", "none", "", False, ""),
-              "search": ("searcher", "none", "mcp__search__search", False, mcp_text),
-              "fetch": ("reader", "none", "mcp__search__search", True, mcp_text),
-              "verify": ("verifier", "none", "mcp__search__search", True, mcp_text),
-              "synth": ("synthesizer", "none", "", False, "")}
+    fences = {"scope": ("scoper", "none", "", False, "", None),
+              "search": ("searcher", "none", "mcp__search__search", False, mcp_text, "medium"),
+              "fetch": ("reader", "none", "mcp__search__search", True, mcp_text, "medium"),
+              "verify": ("verifier", "none", "mcp__search__search", True, mcp_text, "medium"),
+              "synth": ("synthesizer", "none", "", False, "", None)}
     for rec in sorted(agents.glob("*.json")):
         name = rec.name[:-len(".json")]
-        role, toolset, grants, web, mcp = fences[name.split("-")[0]]
+        role, toolset, grants, web, mcp, effort = fences[name.split("-")[0]]
         role_text = (rs.ROLES / ("%s.md" % role)).read_text(encoding="utf-8")
         prompt = (agents / ("%s.prompt.md" % name)).read_text(encoding="utf-8")
         # no research role is deep, so no key carries the switch suffix (DEEP_ROLES)
-        want = _part_b_key(role_text, prompt, toolset, grants, web, mcp, None,
+        want = _part_b_key(role_text, prompt, toolset, grants, web, mcp, effort,
                            DEEP_ROLES.get(role, ""))
         assert json.loads(rec.read_text(encoding="utf-8"))["key"] == want, name
 

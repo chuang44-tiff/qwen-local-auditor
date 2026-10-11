@@ -44,6 +44,12 @@ def test_valid_manifest_loads(tmp_path):
      "budget_weight"),
     ({"roles": {"worker": {"file": "roles/worker.md", "fence": "none", "effort": "very high"}}},
      "effort"),
+    # a unicode lookalike of a refused level never reaches the thinking-off check:
+    # the charset rule refuses it first
+    ({"roles": {"worker": {"file": "roles/worker.md", "fence": "none", "effort": "Ｏff"}}},
+     "effort"),
+    ({"roles": {"worker": {"file": "roles/worker.md", "fence": "none", "effort": "０"}}},
+     "effort"),
     ({"roles": {"worker": {"file": "roles/worker.md", "fence": "none", "tools": "Bash"}}},
      "unknown key"),
     ({"roles": {"worker": {"file": "roles/worker.md", "fence": "sandbox"}}}, "target"),
@@ -57,6 +63,38 @@ def test_each_rule_names_its_field(tmp_path, changes, needle):
     with pytest.raises(manifest.ManifestError) as e:
         load(tmp_path, **changes)
     assert needle in str(e.value)
+
+
+@pytest.mark.parametrize("level", ["off", "OFF", "none", "None", "0", "disabled", "DISABLED"])
+def test_effort_that_turns_thinking_off_is_refused(tmp_path, level):
+    # qwen-agent has no level that turns thinking off today; the engine refuses one
+    # anyway, so no role can ever run without thinking
+    with pytest.raises(manifest.ManifestError, match="roles.worker.effort") as e:
+        load(tmp_path, roles={"worker": {"file": "roles/worker.md", "fence": "none",
+                                         "effort": level}})
+    assert "thinking off" in str(e.value)
+    # "default" names qwen-agent's own default, not thinking turned off: it stays allowed
+    assert load(tmp_path, roles={"worker": {"file": "roles/worker.md", "fence": "none",
+                                            "effort": "default"}}).roles["worker"].effort \
+        == "default"
+
+
+@pytest.mark.parametrize("level", ["off-high", "no", "0x", "off_", "office", "disableds"])
+def test_levels_that_only_contain_a_refused_word_are_allowed(tmp_path, level):
+    # the refusal matches the level, not a substring of it: a level that merely
+    # contains a refused word is nobody's business and still loads
+    assert load(tmp_path, roles={"worker": {"file": "roles/worker.md", "fence": "none",
+                                            "effort": level}}).roles["worker"].effort == level
+
+
+@pytest.mark.parametrize("bad", [0, False, 2.5])
+def test_manifest_effort_that_is_not_a_string_is_still_refused(tmp_path, bad):
+    # the existing charset rule catches it first; the thinking-off check no-ops on it
+    with pytest.raises(manifest.ManifestError, match="level name"):
+        load(tmp_path, roles={"worker": {"file": "roles/worker.md", "fence": "none",
+                                         "effort": bad}})
+    assert not manifest.turns_thinking_off(0) and manifest.turns_thinking_off("0")
+    assert not manifest.turns_thinking_off(None)
 
 
 def test_a_browser_role_needs_neither_target_nor_mcp(tmp_path):

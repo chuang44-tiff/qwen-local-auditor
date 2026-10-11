@@ -165,8 +165,8 @@ qwen-deep-research --check                                     # preflight only,
 | `--retries N` | `QWEN_DR_RETRIES` | the depth preset's | a unit is retried only when its last failure was qwen-agent exit 5 (a timeout), exit 3 or 4 after the backoff wait before re-spawning it (`QWEN_DR_BACKOFF` — seconds before re-spawning an agent after a server error (exit 3 or 4); 30), an empty result (exit 6, including on the repair call), or an unusable answer (after its repair round, or with no session to repair); any other exit code (1, 2, 7, 8, a negative/signal exit) drops the unit at once. Each try gets double the previous timeout (up to the 4 h cap); the repair call keeps its attempt's timeout, and only the final failure counts as dropped. N >= 0. A unit stopped by a stopping swarm, and a cached finished unit, are never retried. Every spawn of a re-spawned unit counts its tokens, so `run.log`'s token column and the report's token total cover all of them |
 | `--hours H` | `QWEN_DR_HOURS` | 8 for `overnight`, none otherwise | hard stop for the whole run, H > 0: a deadline H hours from the first start, stored in `config.json` as an absolute UTC time (and in `hours`). Once it passes, no new wave and no new unit starts — running units finish, queued units of the current wave are not started — every item not run gets a `deadline` line in `run.log` (not a drop), the phase continues with what it has and its phase file is **not** written, so a later `--resume` finishes the work; synthesis always runs. The report's Run table gains a "stopped at deadline" row, stderr names the count, and the exit code is 4 when anything was not run. Each agent is capped at 4 h; --hours bounds the whole run. On `--resume` the stored deadline stands unless `--hours` is given again, which sets a new deadline from then |
 | `--rounds N\|until` | | the depth preset's | rounds of research (above); `until` runs until the deadline or convergence and needs `--hours` |
-| `--effort LEVEL` | | qwen-agent's own | reasoning effort for every role, passed to qwen-agent as `-e LEVEL`; qwen-agent validates the level |
-| `--role-effort ROLE=LEVEL[,ROLE=LEVEL...]` | | none | effort for single roles: `ROLE=LEVEL[,ROLE=LEVEL...]` with ROLE one of scoper, searcher, reader, verifier, planner, synthesizer; beats `--effort`. An unknown role, a pair without `=` or an empty level is a usage error (exit 2). Stored in `config.json` (reused on resume unless given again, when it merges into the stored dict — later wins) and part of each agent's cache key |
+| `--effort LEVEL` | | searcher, reader and verifier at `medium`, the other roles at qwen-agent's own | reasoning effort for every role, passed to qwen-agent as `-e LEVEL`; it overrides those defaults, and qwen-agent validates the level. A level that would turn thinking off (`off`, `none`, `0`, `disabled`, in any case) is a usage error (exit 2): no role may run without thinking |
+| `--role-effort ROLE=LEVEL[,ROLE=LEVEL...]` | | none | effort for single roles: `ROLE=LEVEL[,ROLE=LEVEL...]` with ROLE one of scoper, searcher, reader, verifier, planner, synthesizer; beats `--effort`, and beats the `medium` those three roles default to. An unknown role, a pair without `=` or an empty level is a usage error (exit 2), and so is a level that would turn thinking off (`off`, `none`, `0`, `disabled`, in any case). Stored in `config.json` (reused on resume unless given again, when it merges into the stored dict — later wins) and part of each agent's cache key |
 | `--out DIR` | | `./deep-research/<UTC timestamp>-<slug>` | the run folder |
 
 Flags beat the environment. `--check` is the same preflight every run starts with: the model
@@ -218,7 +218,7 @@ what follows it is leads, not conclusions.
 |---|---|
 | 0 | report written |
 | 4 | report written, but some agents were dropped or the deadline left items unrun: `run.log` says which and why |
-| 2 | usage (`--max-agents` below the voters per claim, an empty question, a bad flag, a negative `--retries`, a non-positive `--hours`, a malformed `--role-effort`, a `QWEN_DR_MAX_UNIT_SECONDS` below 1 or non-numeric, reusing a run folder without `--resume`) |
+| 2 | usage (`--max-agents` below the voters per claim, an empty question, a bad flag, a negative `--retries`, a non-positive `--hours`, a malformed `--role-effort`, an effort level that turns thinking off (given, or stored in a resumed run's `config.json`), a `QWEN_DR_MAX_UNIT_SECONDS` below 1 or non-numeric, reusing a run folder without `--resume`) |
 | 3 | preflight failed — the message says whether it was the model or the search |
 | 5 | a phase produced nothing usable (no angles, no sources, no claims); no report |
 | 8 | internal error — the message is on stderr; when a run folder exists, its `error.log` has the traceback |
@@ -248,7 +248,10 @@ keep the budget they ran under. `--effort` and `--role-effort` are reused from t
 unless given again; given again, `--effort` replaces the stored global level and
 `--role-effort` merges into the stored per-role dict (later wins; a role it does not name
 keeps its stored level), and they change what the unfinished agents run at — they are part
-of each unit's cache key, so agents finished at another effort re-run.
+of each unit's cache key, so agents finished at another effort re-run. A stored level is
+checked as a given one is: a `config.json` hand-edited to carry a level that turns thinking
+off (`off`, `none`, `0`, `disabled`) is a usage error (exit 2) naming it, and the file is
+left exactly as the interrupted run left it.
 
 ## The fence
 

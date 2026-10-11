@@ -316,7 +316,9 @@ REVIEW_P = """# Goal
 # Your task
 
 For each patch: does it keep what the tests check? Cite the diff lines your verdict rests on,
-copied exactly from the patch. Answer with:
+copied exactly from the patch. A patch whose summary or diff loosens, skips, removes or widens
+a check, a threshold, a target or an expected value is "weakens": cite the diff line that
+makes that change, and quote the summary's own words in "reason". Answer with:
 
 {fence}json
 [{{"patch": "P1", "verdict": "keeps|weakens|unclear", "lines": ["a diff line copied from the patch"], "reason": "one sentence"}}]
@@ -401,7 +403,7 @@ def parse_impl(text, batch, patch):
     if not isinstance(data, dict):
         raise ValueError('expected {"id": ..., "done": ..., "summary": ...}')
     return [{"id": batch[0]["id"], "done": data.get("done") is True,
-             "summary": _text(data.get("summary"), 800), "note": _text(data.get("note"), 500),
+             "summary": _text(data.get("summary"), 1500), "note": _text(data.get("note"), 500),
              "patch": patch or ""}]
 
 

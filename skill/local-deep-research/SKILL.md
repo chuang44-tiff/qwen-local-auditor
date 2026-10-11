@@ -59,10 +59,13 @@ and synthesis always runs. Each agent is capped at 4 h; --hours bounds the whole
 `--resume RUN --hours H` sets a new deadline from then; without `--hours` a resume keeps
 the stored deadline.
 `--effort LEVEL` sets the reasoning effort of every role (qwen-agent validates
-the level), and `--role-effort ROLE=LEVEL[,ROLE=LEVEL...]` — roles scoper, searcher, reader,
-verifier, planner, synthesizer — beats it for single roles; both are stored with the run and are part
-of each agent's cache key. `--out DIR` picks the run folder; an existing run folder cannot be reused
-without `--resume`.
+the level); with neither flag searcher, reader and verifier run at `medium` and the other
+roles at qwen-agent's own default, and `--role-effort ROLE=LEVEL[,ROLE=LEVEL...]` — roles
+scoper, searcher, reader, verifier, planner, synthesizer — beats `--effort` for single
+roles. A level that turns thinking off (`off`, `none`, `0`, `disabled`) is refused with
+exit 2, and so is one a hand-edited `config.json` carries into a `--resume`. Both are
+stored with the run and are part of each agent's cache key. `--out DIR` picks the run
+folder; an existing run folder cannot be reused without `--resume`.
 
 `--check` failing with "search:" means no backend is configured: point the user to
 `local-auditor`'s `reference/deep-research.md` (SearXNG one-liner, or QWEN_SEARCH_KEY for

@@ -1119,8 +1119,24 @@ def test_effort_and_role_effort_reach_argv(tmp_path, env):
     assert cfg["effort"] == "low" and cfg["role_effort"] == {"verifier": "medium"}
     (env / "calls.jsonl").unlink()
     assert main_out(tmp_path, "run2", "--depth", "quick", "--max-agents", "1", "q") == 0
-    for argv in calls(env):                # no effort given: qwen-agent's own default stands
-        assert "-e" not in argv
+    for argv in calls(env):                # no effort given: the manifest's role defaults stand
+        role = pathlib.Path(argv[argv.index("--role-file") + 1]).stem
+        if role in ("searcher", "reader", "verifier"):
+            assert argv[argv.index("-e") + 1] == "medium"        # the extraction roles' default
+        else:
+            assert "-e" not in argv                              # qwen-agent's own default
+
+
+def test_extraction_roles_default_to_medium_effort():
+    # a research run's token cost was mostly the extraction roles running at the
+    # server's top effort; they now carry a manifest default of medium, and the
+    # rest keep qwen-agent's own default (--effort/--role-effort still override,
+    # pinned by test_effort_and_role_effort_reach_argv)
+    import lib.swarm_engine.manifest as manifest
+    m = manifest.load(runner.BUILTIN / "research")
+    assert {r: m.roles[r].effort for r in m.roles} == {
+        "scoper": None, "searcher": "medium", "reader": "medium", "verifier": "medium",
+        "planner": None, "synthesizer": None}
 
 
 @pytest.mark.parametrize("bad", ["bogus=low", "verifier", "verifier=", "=low", ""])
@@ -1130,6 +1146,36 @@ def test_bad_role_effort_is_usage(tmp_path, env, capsys, bad):
     assert not (tmp_path / "run").exists()
     assert main(tmp_path, "--effort", "", "q") == 2             # an empty level is one too
     assert "--effort" in capsys.readouterr().err
+
+
+def test_deep_research_compat_refuses_a_level_that_turns_thinking_off(tmp_path, env, capsys):
+    # the old front door refuses a thinking-off level before it touches the model,
+    # on a fresh run and on a resume of one
+    assert rs.main(["--agent", sys.executable, "--agent", str(FAKE),
+                    "--effort", "OFF", "q"]) == 2
+    assert "thinking off" in capsys.readouterr().err
+    assert main(tmp_path, "q") == 0
+    capsys.readouterr()
+    assert rs.main(["--agent", sys.executable, "--agent", str(FAKE),
+                    "--resume", str(tmp_path / "run"), "--effort", "none"]) == 2
+    assert "thinking off" in capsys.readouterr().err
+
+
+def test_deep_research_compat_refuses_a_stored_level_that_turns_thinking_off(tmp_path, env,
+                                                                             capsys):
+    """qwen-deep-research is a shim over the engine's runner, so the resume refusal its
+    reference doc names (an effort level in a resumed run's config.json) answers here too."""
+    assert main(tmp_path, "q") == 0
+    capsys.readouterr()
+    run = tmp_path / "run"
+    cfg = runner.load_json(run / "config.json")
+    cfg["effort"] = "off"
+    runner.save_json(run / "config.json", cfg)
+    assert rs.main(["--agent", sys.executable, "--agent", str(FAKE),
+                    "--resume", str(run)]) == 2
+    err = capsys.readouterr().err
+    assert "thinking off" in err and "'off'" in err
+    assert runner.load_json(run / "config.json")["effort"] == "off"      # left as found
 
 
 def test_effort_changes_cache_key(tmp_path, env):

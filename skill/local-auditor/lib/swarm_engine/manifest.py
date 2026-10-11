@@ -35,6 +35,11 @@ RESERVED = ENGINE_KNOBS + ("workflow", "workflow_dir", "goal", "question", "dept
 _NAME = re.compile(r"[a-z][a-z0-9-]*")
 _IDENT = re.compile(r"[a-z][a-z0-9_]*")
 _EFFORT = re.compile(r"[A-Za-z0-9_-]+")
+# levels that would turn thinking off: qwen-agent has no such level today, and the server
+# may grow one tomorrow, so the engine refuses these wherever a level enters -- a manifest
+# role effort, --effort, --role-effort, or the levels given on --resume. "default" stays
+# allowed: it names qwen-agent's own default, not thinking turned off.
+NO_THINKING = ("off", "none", "0", "disabled")
 _TRUE, _FALSE = ("1", "true", "yes", "on"), ("0", "false", "no", "off")
 
 
@@ -64,6 +69,12 @@ def _is_int(v):
 
 def _is_num(v):
     return (_is_int(v) or isinstance(v, float)) and math.isfinite(v)
+
+
+def turns_thinking_off(level):
+    """True for an effort level that names turning thinking off (case-insensitive, and
+    surrounding whitespace ignored: " off" and "Off\\n" are the same level as "off")."""
+    return isinstance(level, str) and level.strip().lower() in NO_THINKING
 
 
 def check_value(kind, v):
@@ -188,6 +199,10 @@ def validate(data, folder):
         effort = spec.get("effort")
         if effort is not None and not (isinstance(effort, str) and _EFFORT.fullmatch(effort)):
             raise ManifestError("%s.effort must be a level name such as low or high" % where)
+        if turns_thinking_off(effort):
+            raise ManifestError("%s.effort %r turns thinking off: no role may run without "
+                                "thinking (pick a level like low, medium or high)"
+                                % (where, effort))
         # depth is the default: only an explicit "deep": false opts a role out
         # (and on fence "none" the default is no switches -- there is no review round there)
         deep = spec.get("deep", True)

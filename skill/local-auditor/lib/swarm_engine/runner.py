@@ -201,6 +201,9 @@ def role_efforts(text, roles):
         if not sep or role not in roles or not level:
             raise Usage("--role-effort: %r is not ROLE=LEVEL with ROLE one of %s"
                         % (pair, ", ".join(roles)))
+        if manifest.turns_thinking_off(level):
+            raise Usage("--role-effort: %r turns thinking off: no role may run without "
+                        "thinking" % pair)
         out[role] = level
     return out
 
@@ -409,6 +412,9 @@ def _main(o, compat):
         del words[:]        # the released command: --stdin wins and the question word is ignored
     if o.effort is not None and not o.effort:
         raise Usage("--effort needs a level")
+    if manifest.turns_thinking_off(o.effort):
+        raise Usage("--effort %r turns thinking off: no role may run without thinking"
+                    % o.effort)
     if o.hours is not None and not _hours_fits(o.hours):
         raise Usage("--hours must be a positive number of hours")
     if o.retries is not None and o.retries < 0:
@@ -612,12 +618,16 @@ def _resume(o, compat, wf_spec, words):
     if o.rounds is not None:
         cfg["rounds"] = _rounds_arg(o.rounds)
     if o.effort is not None:
+        if manifest.turns_thinking_off(o.effort):
+            raise Usage("--resume --effort %r turns thinking off: no role may run without "
+                        "thinking" % o.effort)
         cfg["effort"] = o.effort
     if o.role_effort is not None:
         stored = cfg.get("role_effort")
         stored = dict(stored) if isinstance(stored, dict) else {}
         stored.update(efforts)
         cfg["role_effort"] = stored
+    _check_stored_efforts(cfg, run)
     if getattr(o, "shallow", None) is not None:
         stored = cfg.get("shallow")
         stored = set(stored) if isinstance(stored, list) else set()
@@ -664,6 +674,24 @@ def _resume(o, compat, wf_spec, words):
         raise
     return _post_release(run, mod, _start(o, m, mod, cfg, run, seats, web_seats, max_unit,
                                           new=False, locked=True))
+
+
+def _check_stored_efforts(cfg, run):
+    """The effort levels a resumed run will use, once its stored config and this resume's
+    flags are merged. A hand-edited config.json is not a way back in: the levels it carries
+    meet the same refusal as one given on the command line, so none of them reaches
+    qwen-agent."""
+    level = cfg.get("effort")
+    if manifest.turns_thinking_off(level):
+        raise Usage("--resume: config.json in %s has effort %r, which turns thinking off: "
+                    "no role may run without thinking" % (run, level))
+    efforts = cfg.get("role_effort")
+    if isinstance(efforts, dict):
+        for role in sorted(efforts):
+            if manifest.turns_thinking_off(efforts[role]):
+                raise Usage("--resume: config.json in %s has role_effort %s=%r, which turns "
+                            "thinking off: no role may run without thinking"
+                            % (run, role, efforts[role]))
 
 
 def _fill_knobs(m, cfg, run):

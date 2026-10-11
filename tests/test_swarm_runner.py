@@ -967,3 +967,192 @@ def test_a_notice_sees_only_a_deep_copy_and_a_non_string_answer_is_ignored(tmp_p
     assert "notice:" not in capsys.readouterr().err
     assert runner.load_json(run / "seen.json") == {"goal": "g", "role_effort": {}}
     assert "notice returned list, ignored" in (run / "run.log").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- effort levels
+
+OFF_LEVELS = ["off", "OFF", "None", "0", "disabled"]
+
+
+@pytest.mark.parametrize("level", OFF_LEVELS)
+def test_effort_off_is_refused_on_the_command_line(tmp_path, fake, capsys, level):
+    # qwen-agent has no level that turns thinking off today; the engine refuses one
+    # anyway, so no role can ever run without thinking
+    assert swarm_main(echo(tmp_path), "g", "--effort", level,
+                      "--out", str(tmp_path / "run")) == 2
+    err = capsys.readouterr().err
+    assert "--effort" in err and "thinking off" in err
+    assert not (tmp_path / "run").exists()
+
+
+@pytest.mark.parametrize("level", OFF_LEVELS)
+def test_role_effort_off_is_refused(tmp_path, fake, capsys, level):
+    assert swarm_main(echo(tmp_path), "g", "--role-effort", "worker=%s" % level,
+                      "--out", str(tmp_path / "run")) == 2
+    err = capsys.readouterr().err
+    assert "--role-effort" in err and "thinking off" in err
+    assert not (tmp_path / "run").exists()
+
+
+def test_role_effort_off_is_refused_inside_a_csv(tmp_path, fake, capsys):
+    # ROLE=LEVEL[,ROLE=LEVEL...]: every pair passes the check, not just the first
+    assert swarm_main(echo(tmp_path), "g", "--role-effort", "worker=high,worker=off",
+                      "--out", str(tmp_path / "run")) == 2
+    err = capsys.readouterr().err
+    assert "--role-effort" in err and "thinking off" in err
+    assert not (tmp_path / "run").exists()
+
+
+def test_effort_off_with_whitespace_is_refused(tmp_path, fake, capsys):
+    # the last entry below pads with a non-breaking space (U+00A0), not a plain one
+    # the level is compared stripped, so a padded spelling is the same level: a server
+    # that grows "off" cannot be reached with " off", "off " or "Off\n"
+    run = tmp_path / "run"
+    for level in (" off", "off ", "Off\n", "\toff ", " Disabled ", " off"):
+        assert swarm_main(echo(tmp_path), "g", "--effort", level, "--out", str(run)) == 2
+        err = capsys.readouterr().err
+        assert "--effort" in err and "thinking off" in err
+        assert swarm_main(echo(tmp_path), "g", "--role-effort", "worker=%s" % level,
+                          "--out", str(run)) == 2
+        err = capsys.readouterr().err
+        assert "--role-effort" in err and "thinking off" in err
+    assert not run.exists()
+
+
+def test_effort_off_with_whitespace_is_refused_on_a_resume(tmp_path, fake, capsys):
+    # the same stripped comparison answers for the flags a resume takes
+    run = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(run)) == 0
+    capsys.readouterr()
+    assert swarm_main("--resume", str(run), "--effort", "Off\n") == 2
+    assert "thinking off" in capsys.readouterr().err
+    assert swarm_main("--resume", str(run), "--role-effort", "worker= off") == 2
+    assert "thinking off" in capsys.readouterr().err
+    cfg = runner.load_json(run / "config.json")
+    assert cfg["effort"] is None and cfg["role_effort"] == {}           # nothing was written
+
+
+def test_an_effort_level_holding_an_off_name_is_still_a_level(tmp_path, fake):
+    # the refusal matches a level, never a substring of one: a level that only holds
+    # "off", "none" or "0" is qwen-agent's to accept or refuse, not the engine's
+    for n, level in enumerate(("low", "xhigh", "default", "0x", "off-grid", "none-zero",
+                                  "Disabled-2", "\toff-grid")):
+        run = tmp_path / ("run%d" % n)
+        assert swarm_main(echo(tmp_path), "g", "--effort", level, "--out", str(run)) == 0
+        assert runner.load_json(run / "config.json")["effort"] == level
+
+
+def test_a_resume_can_replace_a_stored_level_that_turns_thinking_off(tmp_path, fake, capsys):
+    """The stored check runs on the merged config, so a resume that overrides the bad
+    stored level runs, and the good level is what lands back in config.json."""
+    run = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(run)) == 0
+    capsys.readouterr()
+    cfg = runner.load_json(run / "config.json")
+    cfg["effort"] = "off"
+    runner.save_json(run / "config.json", cfg)
+    assert swarm_main("--resume", str(run), "--effort", "low") == 0
+    assert runner.load_json(run / "config.json")["effort"] == "low"
+    cfg = runner.load_json(run / "config.json")
+    cfg["role_effort"] = {"worker": "off"}
+    runner.save_json(run / "config.json", cfg)
+    assert swarm_main("--resume", str(run)) == 2                # stored, so refused
+    assert "worker" in capsys.readouterr().err
+    assert swarm_main("--resume", str(run), "--role-effort", "worker=high") == 0
+    assert runner.load_json(run / "config.json")["role_effort"] == {"worker": "high"}
+
+
+def test_a_stored_level_is_refused_on_a_run_that_never_finished(tmp_path, fake, capsys):
+    """An interrupted run takes the same refusal, whatever its config says besides the
+    level: a CRLF-padded hand edit ("off\\r\\n", what a Windows editor leaves) is the same
+    level, and one complaint does not swallow another -- a config that also breaks the
+    older "--rounds until needs --hours" rule still hears that one once the level is gone."""
+    run = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(run)) == 0
+    capsys.readouterr()
+    cfg = runner.load_json(run / "config.json")
+    cfg["effort"], cfg["hours"], cfg["deadline"] = "Off", None, None
+    runner.save_json(run / "config.json", cfg)
+    assert swarm_main("--resume", str(run)) == 2
+    assert "'Off'" in capsys.readouterr().err
+    cfg["effort"] = "off\r\n"                                   # a CRLF-padded hand edit
+    runner.save_json(run / "config.json", cfg)
+    assert swarm_main("--resume", str(run)) == 2
+    assert "thinking off" in capsys.readouterr().err
+    cfg["effort"], cfg["rounds"] = None, "until"                # no deadline either
+    runner.save_json(run / "config.json", cfg)
+    assert swarm_main("--resume", str(run)) == 2
+    assert "needs --hours" in capsys.readouterr().err
+
+
+def test_resume_effort_off_is_refused(tmp_path, fake, capsys):
+    run = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(run)) == 0
+    capsys.readouterr()
+    assert swarm_main("--resume", str(run), "--effort", "off") == 2
+    assert "thinking off" in capsys.readouterr().err
+    assert swarm_main("--resume", str(run), "--role-effort", "worker=none") == 2
+    assert "thinking off" in capsys.readouterr().err
+    cfg = runner.load_json(run / "config.json")
+    assert cfg["effort"] is None and cfg["role_effort"] == {}         # nothing was written
+
+
+def test_effort_default_is_allowed(tmp_path, fake):
+    # "default" names qwen-agent's own default, not thinking turned off: the run takes it
+    assert swarm_main(echo(tmp_path), "g", "--effort", "default", "--role-effort",
+                      "worker=default", "--out", str(tmp_path / "run")) == 0
+    cfg = runner.load_json(tmp_path / "run" / "config.json")
+    assert cfg["effort"] == "default" and cfg["role_effort"] == {"worker": "default"}
+    wf = make_workflow(tmp_path / "wfs2",
+                       manifest={"roles": {"worker": {"file": "roles/worker.md",
+                                                      "fence": "none",
+                                                      "effort": "default"}}})
+    assert swarm_main(str(wf), "g", "--out", str(tmp_path / "run2")) == 0
+
+
+def test_empty_effort_level_is_still_a_usage_error(tmp_path, fake, capsys):
+    # "" names no level at all: the older, plainer complaint answers, not the
+    # thinking-off one
+    assert swarm_main(echo(tmp_path), "g", "--effort", "", "--out",
+                      str(tmp_path / "run")) == 2
+    assert "--effort needs a level" in capsys.readouterr().err
+    assert not (tmp_path / "run").exists()
+
+
+def test_resume_effort_default_is_allowed_and_role_off_refused(tmp_path, fake, capsys):
+    # resume takes "default" like a fresh run does, and still refuses a level that
+    # would turn thinking off
+    run = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(run)) == 0
+    capsys.readouterr()
+    assert swarm_main("--resume", str(run), "--effort", "default") == 0
+    assert runner.load_json(run / "config.json")["effort"] == "default"
+    assert swarm_main("--resume", str(run), "--role-effort", "worker=OFF") == 2
+    assert "thinking off" in capsys.readouterr().err
+
+
+def test_resume_refuses_a_stored_effort_that_turns_thinking_off(tmp_path, fake, capsys):
+    """The flags are not the only way a level reaches a resumed run: config.json is read
+    as written, so a hand-edited level that turns thinking off is refused there too, and
+    config.json is left exactly as it was found."""
+    run = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(run)) == 0
+    capsys.readouterr()
+    cfg = runner.load_json(run / "config.json")
+    cfg["effort"] = "off"
+    runner.save_json(run / "config.json", cfg)
+    assert swarm_main("--resume", str(run)) == 2
+    err = capsys.readouterr().err
+    assert "thinking off" in err and "'off'" in err
+    assert runner.load_json(run / "config.json")["effort"] == "off"     # not rewritten
+    cfg["effort"] = None
+    cfg["role_effort"] = {"worker": " None "}
+    runner.save_json(run / "config.json", cfg)
+    assert swarm_main("--resume", str(run)) == 2
+    err = capsys.readouterr().err
+    assert "thinking off" in err and "worker" in err and "' None '" in err
+    assert runner.load_json(run / "config.json")["role_effort"] == {"worker": " None "}
+    # a stored level that only names qwen-agent's own default stays acceptable
+    cfg["role_effort"] = {"worker": "default"}
+    runner.save_json(run / "config.json", cfg)
+    assert swarm_main("--resume", str(run)) == 0

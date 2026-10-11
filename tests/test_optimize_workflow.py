@@ -420,6 +420,66 @@ def test_parse_review_downgrades_uncited_verdicts():
     assert rows[0]["verdict"] == "unclear"
 
 
+def test_reviewer_prompt_treats_a_described_loosening_as_weakens():
+    # a live run: three reviewers read "Loosened the one input that sets the floor:
+    # target -20% -> -30%" in a summary and voted keeps. The prompt and the role text
+    # must call such a patch weakens, rest it on a diff line (an uncited verdict counts
+    # as unclear) and hold the summary's own words in "reason".
+    W = _wf_module()
+    role = (pathlib.Path(__file__).resolve().parent.parent / "skill" / "local-auditor" /
+            "lib" / "workflows" / "optimize" / "roles" / "reviewer.md").read_text(encoding="utf-8")
+    for text in (W.REVIEW_P, role):
+        for needle in ("loosens", "skips", "removes", "widens", "a check", "threshold",
+                       "target", "expected value", "weakens"):
+            assert needle in text, needle
+        assert "summary" in text and "diff line" in text and "reason" in text, needle
+
+
+def test_checker_and_reviewer_default_to_medium_effort():
+    # the bench checker and the reviewers only read and judge; they run at medium so
+    # a round does not spend top effort on every review vote (--effort/--role-effort
+    # still beat the manifest default, as the engine tests pin)
+    from lib.swarm_engine import manifest
+    m = manifest.load(pathlib.Path(__file__).resolve().parent.parent / "skill" /
+                      "local-auditor" / "lib" / "workflows" / "optimize")
+    assert {r: m.roles[r].effort for r in m.roles} == {
+        "checker": "medium", "profiler": None, "implementer": None,
+        "reviewer": "medium", "writer": None}
+
+
+def test_impl_summary_keeps_1500_characters():
+    W = _wf_module()
+    rows = W.parse_impl(json.dumps({"id": "I1", "done": True, "summary": "s" * 2000,
+                                    "note": ""}), [{"id": "I1"}], "")
+    assert rows[0]["summary"] == "s" * 1500
+    rows = W.parse_impl(json.dumps({"id": "I1", "done": True, "summary": "s" * 1400,
+                                    "note": ""}), [{"id": "I1"}], "")
+    assert rows[0]["summary"] == "s" * 1400
+    for n, want in ((1500, 1500), (1501, 1500)):                # the boundary itself
+        rows = W.parse_impl(json.dumps({"id": "I1", "done": True, "summary": "s" * n,
+                                        "note": ""}), [{"id": "I1"}], "")
+        assert len(rows[0]["summary"]) == want
+    # whitespace is squashed before the clip, so newlines cost nothing to the 1500
+    rows = W.parse_impl(json.dumps({"id": "I1", "done": True,
+                                    "summary": "Loosened the  one\ninput", "note": ""}),
+                        [{"id": "I1"}], "")
+    assert rows[0]["summary"] == "Loosened the one input"
+    # a long summary and a long note clip on their own limits: 1500 and 500
+    rows = W.parse_impl(json.dumps({"id": "I1", "done": True,
+                                    "summary": "Loosened the floor " + "y" * 1600,
+                                    "note": "n" * 600}), [{"id": "I1"}], "patch")
+    assert len(rows[0]["summary"]) == 1500 and len(rows[0]["note"]) == 500
+
+
+def test_review_p_formats_with_a_fenced_patch():
+    # the new rule text adds no braces: the prompt still formats, with a fenced
+    # patch item inside
+    out = _wf_module().REVIEW_P.format(
+        goal="g", keep="keep", measure="m", fence="```",
+        items="- P1 (idea I1, 1.00s -> 0.50s): loosened\n````diff\n+x\n````")
+    assert "loosens, skips, removes or widens" in out and "quote the summary" in out
+
+
 PROFILER_OUTSIDE = r'''
 import json, re
 def answer(p, r):

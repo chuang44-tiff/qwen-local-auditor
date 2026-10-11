@@ -31,7 +31,7 @@ my-workflow/
   "target": "none",
   "roles": {
     "worker": {"file": "roles/worker.md", "fence": "none"},
-    "reader": {"file": "roles/reader.md", "fence": "web", "budget_weight": 2, "effort": "high"}
+    "reader": {"file": "roles/reader.md", "fence": "web", "budget_weight": 2, "effort": "medium"}
   },
   "knobs": {"items": "int", "voters": "int", "label": "str"},
   "presets": {
@@ -52,7 +52,7 @@ my-workflow/
 | `roles.R.file` | a file inside the folder (no `..`, no absolute path) |
 | `roles.R.fence` | `none`, `browser`, `browser-probe`, `search`, `web`, `read` or `sandbox` (below); `read` and `sandbox` need `"target": "required"` |
 | `roles.R.budget_weight` | number >= 1 (default 1): the per-item budget multiplier |
-| `roles.R.effort` | optional default effort; `--effort` and `--role-effort` beat it |
+| `roles.R.effort` | optional default effort level; the level must be one the server accepts, and one that would turn thinking off (`off`, `none`, `0`, `disabled`, any case) is refused — no role may run without thinking. On a run, `--effort` and `--role-effort` override these role defaults. A role with no effort anywhere runs at qwen-agent's own default (`QWEN_EFFORT`), which the engine does not check: set `QWEN_EFFORT_ALLOWED` in qwen-agent's config to restrict it |
 | `roles.R.deep` | optional, and **the default is depth**: no `deep` field (or `true`) gives the role both switches — on every fence but `none`, which never gets the review round: it has no tools, so `true` or absent gives it no switches at all and a list may name `"subagents"`/`"subagents_push"` only (naming `"review_round"` there is a manifest error) — `"deep": false` is the shallow opt-out, and on a fence with tools a list of `"review_round"` (qwen-agent `--review-round`), `"subagents"` (`--subagents-nudge`) and `"subagents_push"` (`--subagents-push`, the delegation mandate that replaces the nudge when a list names both) picks the list's own; nudging stays the default a `true` or absent field gives. `"probe"` is refused: a `sandbox` role already has a shell. `--deep ROLE` forces both on a tool-bearing role (on a fence-`none` one, only its subagent switch, with one note on stderr); `--shallow ROLE` forces none. The switches are part of each unit's cache key (a shallow unit's key is the one the released command computed), and a repair round never carries them |
 | `knobs` | name -> `int` (>= 0), `float`, `str` or `bool`; a name may not shadow a config key (`depth`, `goal`, `budget`, ...); `--set` also takes the engine knobs `budget`, `retries`, `rounds` and `hours` without their being declared |
 | `presets.D` | may name only declared knobs and the engine knobs, and must set every declared knob plus `budget` (int >= 1, seconds per item), `retries` (int >= 0) and `rounds` (int >= 1 or `"until"`); `hours` is optional (> 0; required with `"until"`) |
