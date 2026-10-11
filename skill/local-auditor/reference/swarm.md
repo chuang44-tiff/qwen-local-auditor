@@ -8,6 +8,9 @@ one repair round for an unusable answer, retries for timeouts, every
 answer cached in the run folder so `--resume` continues where a run stopped, and a hard
 `--hours` deadline. The short version your session loads is `skill/local-swarm/SKILL.md`.
 
+Set `--seats` (or `QWEN_SWARM_SEATS`) to your server's concurrent sequence limit (for
+vLLM, `--max-num-seqs`); more seats than that only queue on the server.
+
 Built-ins: `research` (this is `qwen-deep-research`; see [deep-research.md](deep-research.md)),
 `debug`, `ui-test` (a scripted UI suite) and `optimize` (a faster test suite), each documented
 under its own heading below. `qwen-swarm --list` prints them.
@@ -336,6 +339,16 @@ timeout one unit's budget, but never less than 300 s (nor more than the unit's o
 timeout); `qwen-deep-research` takes neither flag. Because the depth switches are part of
 each unit's cache key, a `--resume` of a run started before depth became the default
 re-runs the roles that are now deep.
+
+What re-runs on a `--resume` follows from what the cache key holds: a unit's cache key
+includes its role's depth switches, effort, tool grants and the MCP config. So (a)
+changing `--deep`/`--shallow`/`--effort`/`--role-effort` on `--resume` re-runs that role
+and every later unit whose prompt depends on its output; and (b) a run folder made by an
+earlier version re-runs, on resume, the tool-less roles that used to get the review round
+(research's scoper, planner when its plan is missing, and synthesizer; debug's planner
+and writer), the roles whose default effort changed (research's searcher, reader and
+verifier; optimize's checker and reviewer), and every web-fence unit (its grants now
+include the `page` tool).
 
 ## The run folder
 

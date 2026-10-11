@@ -54,7 +54,9 @@ FLAGS
                        (default 8; env QWEN_SWARM_MAX_AGENTS)
   --max-items N        most items one agent holds (default 10; env QWEN_SWARM_MAX_ITEMS)
   --seats N            agents running at once -- the only concurrency limit
-                       (default 4; env QWEN_SWARM_SEATS)
+                       (default 4; env QWEN_SWARM_SEATS). Set it to your server's
+                       concurrent sequence limit (for vLLM, --max-num-seqs); more
+                       seats than that only queue on the server
   --web-seats N        web agents running at once (default --seats; env QWEN_SWARM_WEB_SEATS)
   --timeout SECONDS    per-item budget (default: the preset's budget; env QWEN_SWARM_TIMEOUT)
   --retries N          re-runs of a unit that timed out or answered unusably (default:

@@ -354,6 +354,50 @@ def _flat(text):
     return " ".join(text.split())
 
 
+def _swarm_help():
+    import os
+    import shutil
+    import subprocess
+    swarm = ROOT / "skill" / "local-auditor" / "qwen-swarm.sh"
+    bash = os.environ.get("TEST_BASH") or shutil.which("bash")
+    return subprocess.run([bash, str(swarm).replace("\\", "/"), "--help"],
+                          capture_output=True, encoding="utf-8").stdout
+
+
+def test_swarm_doc_says_seats_should_match_the_server():
+    # both pages that describe --seats must say to match it to the server's concurrent
+    # sequence limit (for vLLM, --max-num-seqs): extra seats only queue on the server
+    ref = SW_REF.read_text(encoding="utf-8")
+    help_text = _swarm_help()
+    seats_help = help_text[help_text.index("  --seats N"):help_text.index("--web-seats")]
+    paras = [p for p in ref.split("\n\n") if "concurrent sequence limit" in p]
+    assert paras, "swarm.md has no seats paragraph"
+    seats_ref = paras[0]
+    for name, text in (("qwen-swarm --help --seats", _flat(seats_help)),
+                       ("swarm.md", _flat(seats_ref))):
+        for needle in ("`--seats`" if name == "swarm.md" else "--seats",
+                       "QWEN_SWARM_SEATS", "concurrent sequence limit",
+                       "--max-num-seqs", "only queue"):
+            assert needle in text, "%s: %s" % (name, needle)
+
+
+def test_swarm_doc_explains_resume_rekeying():
+    # the resume paragraph names what joins a unit's cache key, and lists the roles an
+    # older run folder re-runs because those inputs moved
+    t = SW_REF.read_text(encoding="utf-8")
+    paras = [p for p in t.split("\n\n") if "used to get the review round" in p]
+    assert paras, "swarm.md has no paragraph on what a --resume re-keys"
+    flat = _flat(paras[0])
+    for needle in ("cache key", "depth switches", "effort", "tool grants", "MCP config",
+                   "`--deep`", "`--shallow`", "`--effort`", "`--role-effort`",
+                   "every later unit whose prompt depends on its output",
+                   "an earlier version", "default effort changed", "web-fence",
+                   "`page` tool", "research's scoper", "planner when its plan is missing",
+                   "synthesizer", "debug's planner", "writer", "searcher", "reader",
+                   "verifier", "optimize's checker", "reviewer"):
+        assert needle in flat, needle
+
+
 def test_safety_docs_describe_the_default_depth():
     # Wherever a bare run is described, the sandbox shell of default depth and the way
     # back to the strict fence are named with it.
