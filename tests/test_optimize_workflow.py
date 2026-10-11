@@ -13,7 +13,9 @@ from swarm_fixtures import agent_args, git_repo
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 
 PY = pathlib.Path(sys.executable).as_posix()
-SLOW = {"slow.py": "import time\nDELAY = 0.4\n\n\ndef work():\n    time.sleep(DELAY)\n    return 42\n",
+# DELAY 0.8, not less: a patched run is mostly pytest start-up (~0.2-0.3s on a slow CI
+# runner), and the base must sit well clear of it once 2x the timing noise is taken off
+SLOW = {"slow.py": "import time\nDELAY = 0.8\n\n\ndef work():\n    time.sleep(DELAY)\n    return 42\n",
         "test_slow.py": "import slow\n\n\ndef test_work():\n    assert slow.work() == 42\n",
         "test_other.py": "def test_other():\n    assert 1 + 1 == 2\n"}
 PYTEST = '"%s" -m pytest -q -p no:cacheprovider' % PY
@@ -189,7 +191,7 @@ def answer_cwd(p, r, cwd):
     iid = re.search(r"^- (I\d+):", p, re.M).group(1)
     d = pathlib.Path(cwd)
     if "lower DELAY" in p:
-        s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.4", "DELAY = 0.01")
+        s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.8", "DELAY = 0.01")
         (d / "slow.py").write_text(s, encoding="utf-8", newline="\n")
     elif "drop the assert" in p:
         s = (d / "test_slow.py").read_text(encoding="utf-8").replace("assert slow.work() == 42", "pass")
@@ -234,7 +236,7 @@ def test_a_slow_sleep_gets_a_checked_stacked_patch(tmp_path, team):
     assert "+DELAY = 0.01" in stacked and "assert" not in stacked
     assert "guard: passed" in text
     assert "test_other.py:1" in text                     # the outside-focus note, report only
-    assert (repo / "slow.py").read_text(encoding="utf-8").count("DELAY = 0.4") == 1   # target untouched
+    assert (repo / "slow.py").read_text(encoding="utf-8").count("DELAY = 0.8") == 1   # target untouched
     ideas = json.loads((run / "ideas.json").read_text(encoding="utf-8"))
     assert [i["location"] for i in ideas] == ["slow.py:2", "test_slow.py:5"]   # ghost + invented dropped
 
@@ -265,7 +267,7 @@ def test_patch_outside_focus_is_not_measured(tmp_path, team):
 
 
 def test_target_reached_stops_rounds_early(tmp_path, team):
-    # -50%: the fake implementer drops DELAY 0.4 -> 0.01, so the patched measure runs in
+    # -50%: the fake implementer drops DELAY 0.8 -> 0.01, so the patched measure runs in
     # far under half the base, and the saving is big enough that CI timing noise (2x)
     # never trips B4 the way -20% did on a slow runner
     repo = git_repo(tmp_path / "repo", SLOW)
@@ -421,14 +423,14 @@ def answer_cwd(p, r, cwd):
     iid = re.search(r"^- (I\d+):", p, re.M).group(1)
     new = re.search(r"lower DELAY to ([0-9.]+)", p).group(1)
     d = pathlib.Path(cwd)
-    s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.4", "DELAY = %s" % new)
+    s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.8", "DELAY = %s" % new)
     (d / "slow.py").write_text(s, encoding="utf-8", newline="\n")
     return 0, "```json\n" + json.dumps({"id": iid, "done": True, "summary": "DELAY %s" % new, "note": ""}) + "\n```"
 '''
 REVIEWER_KEEPS_DELAY = r'''
 import json, re
 def answer(p, r):
-    return 0, "```json\n" + json.dumps([{"patch": pid, "verdict": "keeps", "lines": ["-DELAY = 0.4"],
+    return 0, "```json\n" + json.dumps([{"patch": pid, "verdict": "keeps", "lines": ["-DELAY = 0.8"],
                                          "reason": "only the sleep constant changes"}
                                         for pid in re.findall(r"^- (P\d+) ", p, re.M)]) + "\n```"
 '''
@@ -676,7 +678,7 @@ def test_guard_failing_on_the_stack_says_so_in_the_result(tmp_path, team):
     # made measure faster" (the patch did -- the guard would not carry it)
     repo = git_repo(tmp_path / "repo", dict(SLOW, **{"test_other.py":
         "import slow\n\n\ndef test_other():\n    assert 1 + 1 == 2\n"
-        "\n\ndef test_delay():\n    assert slow.DELAY == 0.4\n"}))
+        "\n\ndef test_delay():\n    assert slow.DELAY == 0.8\n"}))
     rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
     assert rc == 4, report(run)
     assert report(run).splitlines()[1] == \
@@ -690,7 +692,7 @@ import json, pathlib, re
 def answer_cwd(p, r, cwd):
     iid = re.search(r"^- (I\d+):", p, re.M).group(1)
     d = pathlib.Path(cwd)
-    s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.4", "DELAY = 0.01")
+    s = (d / "slow.py").read_text(encoding="utf-8").replace("DELAY = 0.8", "DELAY = 0.01")
     (d / "slow.py").write_text(s, encoding="utf-8", newline="\n")
     other = d / "test_other.py"
     other.write_text(other.read_text(encoding="utf-8") + "# touched\n",
