@@ -1,4 +1,5 @@
 import os
+import pathlib
 import shutil
 import subprocess
 import time
@@ -101,8 +102,14 @@ def test_run_cmd_runs_a_long_command_from_a_file(tmp_path):
     assert not (boxes / "long").exists()
     res = sandbox.run_cmd(repo, boxes / "long2", cmd + "exit 7\n")     # a failing long one
     assert res["rc"] == 7 and "done" in res["output_tail"]
+    assert not [p for p in boxes.iterdir() if p.is_file()]   # no script or .out left beside them
     res = sandbox.run_cmd(repo, boxes / "long3", cmd + "sleep 30\n", timeout=1)   # a killed one
     assert res["timed_out"] is True and "done" in res["output_tail"]
+    # on Windows the killed shell's sleep can outlive it holding the output file open, so
+    # that .out may stay until cleanup() sweeps it, as it always has for a killed command
+    for p in boxes.iterdir():
+        if p.is_file():
+            assert os.name == "nt" and p.name.startswith("long3.") and p.suffix == ".out"
     work = tmp_path / "run" / "sandboxes" / "w"               # a long command WITH a patch:
     sandbox.create(repo, work)                                # the patch applies before the
     (work / "new.txt").write_text("patched\n", encoding="utf-8", newline="\n")   # script is
@@ -110,7 +117,7 @@ def test_run_cmd_runs_a_long_command_from_a_file(tmp_path):
     sandbox.remove(repo, work)
     res = sandbox.run_cmd(repo, boxes / "long4", cmd + "cat new.txt\n", patch=patch)
     assert res["applied"] and res["rc"] == 0 and "patched" in res["output_tail"]
-    assert not [p for p in boxes.iterdir() if p.is_file()]   # no script or .out left beside it
+    assert not [p for p in boxes.iterdir() if p.is_file() and not p.name.startswith("long3.")]
 
 
 def test_run_cmd_runs_a_long_command_from_a_path_with_spaces(tmp_path):
@@ -152,7 +159,7 @@ def test_run_cmd_chooses_dash_c_or_a_script_file(tmp_path, monkeypatch):
     assert len(seen) == 2 and len(seen[0]) == 3 and seen[0][1] == "-c"
     assert len(seen[1]) == 2 and seen[1][1] != "-c"          # [bash, script]
     assert os.path.isabs(seen[1][1])                          # a / or C:/ path Git Bash takes
-    assert os.path.dirname(seen[1][1]) == str(boxes.resolve())
+    assert pathlib.Path(os.path.dirname(seen[1][1])) == boxes.resolve()   # C:/ or C:\\ alike
     assert "done" in res["output_tail"] and "long" in res["output_tail"]   # ran in the sandbox
     assert not os.path.exists(seen[1][1])                     # the script died with the run
 
