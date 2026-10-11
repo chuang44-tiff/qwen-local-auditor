@@ -401,6 +401,10 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
     hop_deadline = None                    # set by _fetch_page; None arms nothing
     watchdog = None                        # this hop's timer and fired event, set
     fired = None                           # and started together by an armed connect()
+    watch_sock = None                      # the socket the watchdog shuts once conn.sock
+                                           # is gone: a will-close getresponse clears
+                                           # conn.sock while the response keeps reading
+                                           # the same fd through its own file object
 
     def connect(self):
         last_error = None
@@ -418,6 +422,10 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
                 break
         else:
             raise last_error               # none connected: the last answer's failure
+        self.watch_sock = self.sock        # dated from the connect, so the fd stays the
+                                           # watchdog's to shut even after a will-close
+                                           # getresponse clears conn.sock (its response
+                                           # keeps the fd open through its file object)
         if self.hop_deadline is not None:
             self.watchdog, self.fired = _hop_watchdog(self, self.hop_deadline)
             self.watchdog.start()
@@ -481,8 +489,10 @@ def _hop_watchdog(conn, deadline):
     first, so the hop's except paths can call such an ended read the deadline, not a
     broken connection. _PinnedHTTPConnection calls this as its connect() finishes, so
     the interval -- and with it the deadline -- is dated from the moment the connection
-    is made. A response that will close takes the socket with it, so the fd is read at
-    fire time, and one that vanished mid-fire leaves nothing to kill (OSError ignored);
+    is made. A response that will close clears conn.sock as getresponse hands the socket
+    to it, but the response keeps the same fd open through its own file object, so
+    fire() shuts conn.sock while it stands and the socket stored at connect() once it
+    is gone; a socket that vanished mid-fire leaves nothing to kill (OSError ignored);
     where a blocked read ends with an error instead of the EOF Linux's shutdown gives
     it, the event is what names it. The TLS handshake is not this timer's to bound:
     wrap_socket takes the fd out from under conn.sock, so the handshake ends on the
@@ -494,8 +504,9 @@ def _hop_watchdog(conn, deadline):
     def fire():
         fired.set()
         try:
-            if conn.sock is not None:
-                conn.sock.shutdown(socket.SHUT_RDWR)
+            sock = conn.sock if conn.sock is not None else conn.watch_sock
+            if sock is not None:
+                sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
 
@@ -536,8 +547,10 @@ def _fetch_page(url, env):
                 raise _deadline_error()
             # getresponse() hands the socket to the response when the server asked to
             # close (conn.sock becomes None then), so the socket is taken before it:
-            # settimeout reaches the same socket either way
+            # settimeout reaches the same socket either way, and fire() shuts this one
+            # once conn.sock is cleared
             sock = conn.sock
+            conn.watch_sock = sock
             sock.settimeout(left)                                  # for the header read
             resp = conn.getresponse()
             loc = resp.getheader("Location")
@@ -551,6 +564,17 @@ def _fetch_page(url, env):
                 continue
             if not 200 <= resp.status < 300:
                 raise _page_error("the page returned HTTP %d" % resp.status, resp.status)
+            # the fetch sends no Accept-Encoding and decodes nothing: a body any of
+            # whose content codings is not identity would be cached and shown as bytes
+            # no reader can use -- every header counts, and a comma list splits into
+            # the codings it names, so "identity" first cannot hide "gzip" after it.
+            # The error stays short: 40 characters per coding, 200 in all -- a hostile
+            # 100 x 64 KB header set must not reach the tool's answer whole
+            codings = [e.strip() for head in resp.headers.get_all("Content-Encoding", ())
+                       for e in head.split(",") if e.strip()]
+            enc = ", ".join(c[:40] for c in codings if c.lower() != "identity")[:200]
+            if enc:
+                raise _page_error("the page was sent compressed (%s)" % enc, resp.status)
             body = _read_page_body(sock, resp, deadline)
             if conn.fired.is_set():              # the watchdog ended the body read where
                 raise _deadline_error()          # it stood: truncated bytes are the deadline

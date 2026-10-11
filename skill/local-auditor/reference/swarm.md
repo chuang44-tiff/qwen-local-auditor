@@ -56,7 +56,7 @@ my-workflow/
 | `roles.R.file` | a file inside the folder (no `..`, no absolute path) |
 | `roles.R.fence` | `none`, `browser`, `browser-probe`, `search`, `web`, `read` or `sandbox` (below); `read` and `sandbox` need `"target": "required"` |
 | `roles.R.budget_weight` | number >= 1 (default 1): the per-item budget multiplier |
-| `roles.R.effort` | optional default effort level; the level must be one the server accepts, and one that would turn thinking off (`off`, `none`, `0`, `disabled`, any case) is refused — no role may run without thinking. On a run, `--effort` and `--role-effort` override these role defaults. A role with no effort anywhere runs at qwen-agent's own default (`QWEN_EFFORT`), which the engine does not check: set `QWEN_EFFORT_ALLOWED` in qwen-agent's config to restrict it |
+| `roles.R.effort` | optional default effort level; the level must be one the server accepts, and one that would turn thinking off (`off`, `none`, `0`, `disabled`, any case) is refused — no role may run without thinking. On a run, `--effort` and `--role-effort` override these role defaults. A role with no effort anywhere runs at qwen-agent's own default (`QWEN_EFFORT`): the engine refuses a `QWEN_EFFORT` in the environment that would turn thinking off, at start and on resume; a level set only in qwen-agent's config file stays qwen-agent's own to accept or refuse, and `QWEN_EFFORT_ALLOWED` restricts it there |
 | `roles.R.deep` | optional, and **the default is depth**: no `deep` field (or `true`) gives the role both switches — on every fence but `none`, which never gets the review round: it has no tools, so `true` or absent gives it no switches at all and a list may name `"subagents"`/`"subagents_push"` only (naming `"review_round"` there is a manifest error) — `"deep": false` is the shallow opt-out, and on a fence with tools a list of `"review_round"` (qwen-agent `--review-round`), `"subagents"` (`--subagents-nudge`) and `"subagents_push"` (`--subagents-push`, the delegation mandate that replaces the nudge when a list names both) picks the list's own; nudging stays the default a `true` or absent field gives. `"probe"` is refused: a `sandbox` role already has a shell. `--deep ROLE` forces both on a tool-bearing role (on a fence-`none` one, only its subagent switch, with one note on stderr); `--shallow ROLE` forces none. The switches are part of each unit's cache key (a shallow unit's key is the one the released command computed), and a repair round never carries them |
 | `knobs` | name -> `int` (>= 0), `float`, `str` or `bool`; a name may not shadow a config key (`depth`, `goal`, `budget`, ...); `--set` also takes the engine knobs `budget`, `retries`, `rounds` and `hours` without their being declared |
 | `presets.D` | may name only declared knobs and the engine knobs, and must set every declared knob plus `budget` (int >= 1, seconds per item), `retries` (int >= 0) and `rounds` (int >= 1 or `"until"`); `hours` is optional (> 0; required with `"until"`) |
@@ -94,10 +94,12 @@ included), unspecified, reserved or multicast addresses — IPv4 embedded inside
 address checked too — (a local LLM server on 127.0.0.1 is not reachable through it),
 follows at most 3 redirects while re-checking scheme and address on every hop, and caps
 the body at the search tool's byte limit. Every hop resolves its host once and connects
-to exactly the address that check saw, so a name cannot answer publicly to the check and
-loopback to the connect; proxy environment variables do not reroute it; and 30 seconds
-cover one whole fetch — connect, headers and body together. A refusal or HTTP error comes
-back as a short error text naming `WebFetch` as the fallback — `WebFetch` stays the way to
+only to the addresses that check saw, trying each in turn, so a name cannot answer
+publicly to the check and loopback to the connect; proxy environment variables do not
+reroute it; and 30 seconds cover one whole fetch — connect, headers and body together.
+The DNS lookup itself is not inside that 30-second deadline, so a slow resolver can add
+its own timeout on top. A refusal or HTTP error comes back as a short error text naming
+`WebFetch` as the fallback — `WebFetch` stays the way to
 read a page whole, and the way to fetch what `page` refuses. Errors are not cached. With
 `QWEN_PAGE_CACHE` unset the tool writes nothing at all. `QWEN_PAGE_ALLOW_HOSTS` (a
 comma-separated host list) turns those address refusals off for the hosts it names — it

@@ -477,6 +477,37 @@ def test_tool_call_guard_reads_the_first_non_blank_text(opening):
     sw._refuse_tool_call("here is the report\n" + opening)
 
 
+def test_tool_call_inside_an_opening_fence_is_refused():
+    # an answer may wrap its returned call in a code fence: a fence that OPENS the
+    # answer says what its first content is, and that content is still the call
+    fenced = '```xml\n<tool_call>{"tool": "search"}</tool_call>\n```'
+    with pytest.raises(ValueError):
+        sw._refuse_tool_call(fenced)
+    with pytest.raises(ValueError):                          # no language word, and
+        sw._refuse_tool_call('  ```\n<command name="Bash">ls</command>\n```  ')   # padding
+    with pytest.raises(ValueError):                # a CRLF answer is the same answer
+        sw._refuse_tool_call('```xml\r\n'
+                             '<command name="Bash">ls</command>\r\n```\r')
+
+
+def test_tool_call_in_a_later_fence_parses():
+    # a report that opens with its heading and QUOTES a tool call further down is
+    # ordinary content: neither the fence nor the markup inside it condemns it
+    sw._refuse_tool_call('# Report\n\nRan the check first.\n\n'
+                         '```xml\n<command name="Bash">ls</command>\n```\n')
+    sw._refuse_tool_call('```json\n[5]\n```\n\nI first ran '
+                         '<command name="Bash">ls</command>.')  # the block opens the
+                                                 # answer; the quote after it is text
+    sw._refuse_tool_call('- ran the check, for instance:\n'   # an indented quote with
+                         '  ```xml\n'                          # blank lines inside its
+                         '  <command name="Bash">ls</command>\n'   # fence: no fence
+                         '  \n'                                # opens the answer, so
+                         '  ```\n'                             # none of it is scanned
+                         '\nAfterwards the build passed.')
+    sw._refuse_tool_call('```json\n{"claim": "the parser reads '   # a json answer that
+                         '<command name=\\"Bash\\"> tags"}\n```')   # quotes the tag
+
+
 def test_cache_miss_when_prompt_changes(tmp_path, fake):
     swarm(tmp_path).run_phase([unit(tmp_path, "a")])
     calls = fake / "calls.jsonl"

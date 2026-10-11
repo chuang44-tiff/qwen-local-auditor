@@ -182,6 +182,82 @@ class _H(http.server.BaseHTTPRequestHandler):
             except OSError:
                 pass
             return
+        if u.path == "/dripchunkclose":
+            # a will-close chunked body: Connection: close makes getresponse clear
+            # conn.sock while the response keeps reading the fd through its own file
+            # object, and the next chunk-size line then drips one byte per gap -- only
+            # a watchdog that stored the socket at connect() can still reach the fd
+            self.protocol_version = "HTTP/1.1"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                self.wfile.write(b"5\r\nhello\r\n")
+                self.wfile.flush()
+                for byte in b"dead" * 5:                   # one byte per 0.3 s, ~6 s:
+                    time.sleep(0.3)                        # a chunk-size line that dies
+                    self.wfile.write(bytes([byte]))        # at the deadline only if the
+                    self.wfile.flush()                     # fd itself gets the shutdown
+            except OSError:
+                pass
+            return
+        if u.path == "/gzipped":
+            data = b"\x1f\x8b\x08\x00" + b"<html>pretends to be gzip</html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except OSError:
+                pass
+            return
+        if u.path == "/identity-gzip":
+            # two Content-Encoding headers: "identity" first must not hide the gzip,
+            # and the second one's name is 100 characters long: the echoed coding is
+            # capped, so a 64 KB header line never reaches the tool's answer whole
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Encoding", "identity")
+            self.send_header("Content-Encoding", "gzip-" + "x" * 100)
+            self.send_header("Content-Length", "4")
+            self.end_headers()
+            try:
+                self.wfile.write(b"<p>x")
+            except OSError:
+                pass
+            return
+        if u.path == "/many-codings":
+            # one header naming 100 codings of 55 characters: a per-name cap alone
+            # would still echo ~2 KB, so the whole list is capped as well
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Encoding",
+                             ",".join("gz%d-%s" % (i, "y" * 51) for i in range(100)))
+            self.send_header("Content-Length", "4")
+            self.end_headers()
+            try:
+                self.wfile.write(b"<p>x")
+            except OSError:
+                pass
+            return
+        if u.path == "/identity":
+            data = (b"<html><head><title>Plain</title></head>"
+                    b"<body><p>the revenue was 4.2 million</p></body></html>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Encoding", "Identity")   # case, plus a second
+            self.send_header("Content-Encoding", "")           # header with no value
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except OSError:
+                pass
+            return
         if u.path == "/empty":
             self._send(200, "text/html; charset=utf-8", b"")
             return
@@ -688,6 +764,22 @@ def test_page_gives_up_on_a_slow_drip_header(web, monkeypatch):
     assert left == [], "watchdog timer threads still alive: %r" % left
 
 
+def test_page_deadline_holds_for_a_chunked_body_with_connection_close(web, monkeypatch):
+    # Connection: close makes getresponse() hand the socket to the response and clear
+    # conn.sock; the response keeps reading the fd through its own file object, and a
+    # chunked body dripping its next chunk-size line one byte per gap then runs past
+    # PAGE_DEADLINE if the watchdog only reads conn.sock at fire time -- the socket
+    # stored when the connection was made is the one that reaches the fd
+    monkeypatch.setattr(sm, "PAGE_DEADLINE", 1)               # the drip outlives it
+    t0 = time.monotonic()
+    out = sm.page(_localhost(web) + "/dripchunkclose", "hello", env=_page_env())
+    took = time.monotonic() - t0
+    assert out.startswith("page:") and "did not arrive" in out and "WebFetch" in out
+    assert took < 3, "held the tool for %.1f s" % took        # ~6 s of drip unclosed
+    left = [t for t in threading.enumerate() if isinstance(t, threading.Timer)]
+    assert left == [], "watchdog timer threads still alive: %r" % left
+
+
 def test_page_watchdog_ending_a_body_read_is_still_the_deadline(web, monkeypatch):
     # a body the watchdog ends (EOF or an aborted send, not a per-read timeout) must
     # answer as the deadline too: arm the timer 0.2 s before the per-read timeouts can
@@ -742,6 +834,31 @@ def test_page_turns_unexpected_errors_into_text(web, monkeypatch):
     out = sm.page(_localhost(web) + "/page", env=_page_env())
     assert out.startswith("page:") and "WebFetch" in out
     assert "RuntimeError" in out and "went wrong internally" not in out
+
+
+def test_page_refuses_a_compressed_body(tmp_path, web):
+    # the fetch asks for no encoding and decodes nothing, so a compressed body is
+    # bytes no reader can use: refuse it with the usual short error and cache nothing
+    cache = tmp_path / "pages"
+    url = _localhost(web) + "/gzipped"
+    out = sm.page(url, "4.2 million", env=_page_env(cache))
+    assert out.startswith("page:") and "compressed" in out and "gzip" in out
+    assert "WebFetch" in out
+    key = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    assert not (cache / (key + ".txt")).exists()               # a refusal is never cached
+    rows = [ln.split("\t") for ln in (cache / "log.tsv").read_text(encoding="utf-8").splitlines()]
+    assert [r[2] for r in rows] == ["error"]
+    hid = sm.page(_localhost(web) + "/identity-gzip", env=_page_env(cache))
+    assert "compressed" in hid and "gzip-" in hid       # an identity header cannot
+    assert "x" * 36 not in hid and "x" * 30 in hid      # hide the one after it; the
+                                                        # echoed name stays capped
+    many = sm.page(_localhost(web) + "/many-codings", env=_page_env(cache))
+    assert "compressed" in many and "gz0-" in many      # a comma list splits into all
+    assert "y" * 41 not in many and len(many) < 400     # 100 names, and the whole echo
+                                                        # is capped too, not each alone
+    plain = sm.page(_localhost(web) + "/identity", "4.2 million", env=_page_env(cache))
+    assert "4.2 million" in plain and "WebFetch" not in plain  # "Identity" plus an
+    # empty second header: case, empty value and a second line all take the accept path
 
 
 def test_page_reads_bodies_as_they_are_framed(web):

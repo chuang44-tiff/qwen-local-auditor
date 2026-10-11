@@ -415,6 +415,11 @@ def _main(o, compat):
     if manifest.turns_thinking_off(o.effort):
         raise Usage("--effort %r turns thinking off: no role may run without thinking"
                     % o.effort)
+    # a role with no effort anywhere runs at qwen-agent's default, which it reads from
+    # the environment: a thinking-off level set there must not slip past the refusals
+    if manifest.turns_thinking_off(os.environ.get("QWEN_EFFORT")):
+        raise Usage("QWEN_EFFORT=%r turns thinking off: no role may run without thinking"
+                    % os.environ.get("QWEN_EFFORT"))
     if o.hours is not None and not _hours_fits(o.hours):
         raise Usage("--hours must be a positive number of hours")
     if o.retries is not None and o.retries < 0:
@@ -628,6 +633,11 @@ def _resume(o, compat, wf_spec, words):
         stored.update(efforts)
         cfg["role_effort"] = stored
     _check_stored_efforts(cfg, run)
+    # the same environment check a fresh run makes at start: a resume inherits no
+    # --effort, and an unlevelled role would run at whatever QWEN_EFFORT now says
+    if manifest.turns_thinking_off(os.environ.get("QWEN_EFFORT")):
+        raise Usage("QWEN_EFFORT=%r turns thinking off: no role may run without thinking"
+                    % os.environ.get("QWEN_EFFORT"))
     if getattr(o, "shallow", None) is not None:
         stored = cfg.get("shallow")
         stored = set(stored) if isinstance(stored, list) else set()

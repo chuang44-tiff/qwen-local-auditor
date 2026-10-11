@@ -1156,3 +1156,48 @@ def test_resume_refuses_a_stored_effort_that_turns_thinking_off(tmp_path, fake, 
     cfg["role_effort"] = {"worker": "default"}
     runner.save_json(run / "config.json", cfg)
     assert swarm_main("--resume", str(run)) == 0
+
+
+@pytest.mark.parametrize("level", OFF_LEVELS)
+def test_qwen_effort_off_in_the_environment_is_refused_at_start(tmp_path, fake, capsys,
+                                                                monkeypatch, level):
+    # a role with no effort anywhere runs at qwen-agent's own default, read from the
+    # environment: a thinking-off level set there is refused like one given as --effort
+    monkeypatch.setenv("QWEN_EFFORT", level)
+    assert swarm_main(echo(tmp_path), "g", "--out", str(tmp_path / "run")) == 2
+    err = capsys.readouterr().err
+    assert "QWEN_EFFORT" in err and "thinking off" in err
+    assert not (tmp_path / "run").exists()
+
+
+def test_qwen_effort_in_the_environment_takes_levels_that_keep_thinking(tmp_path, fake,
+                                                                        monkeypatch):
+    # the check is on levels, never on names holding them: an ordinary level, a level
+    # holding "off" as a part, and a blank (which names nothing) all still run
+    for n, level in enumerate(("low", "off-grid", "", "   ")):
+        monkeypatch.setenv("QWEN_EFFORT", level)
+        assert swarm_main(echo(tmp_path), "g", "--out", str(tmp_path / ("run%d" % n))) == 0
+
+
+def test_qwen_effort_off_in_the_environment_is_refused_even_with_explicit_levels(
+        tmp_path, fake, capsys, monkeypatch):
+    # an unlevelled role would still run at the environment's off level, and one role
+    # could be given the level through qwen-agent's own config file: the guard stays
+    monkeypatch.setenv("QWEN_EFFORT", "off")
+    assert swarm_main(echo(tmp_path), "g", "--effort", "high", "--role-effort",
+                      "worker=high", "--out", str(tmp_path / "run")) == 2
+    assert "QWEN_EFFORT" in capsys.readouterr().err
+
+
+def test_qwen_effort_off_in_the_environment_is_refused_on_a_resume(tmp_path, fake, capsys,
+                                                                   monkeypatch):
+    # a resume carries no --effort, and an unlevelled role would run at whatever the
+    # environment says now: the same refusal answers before the run is touched
+    run = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(run)) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("QWEN_EFFORT", "off")
+    assert swarm_main("--resume", str(run)) == 2
+    err = capsys.readouterr().err
+    assert "QWEN_EFFORT='off'" in err and "thinking off" in err      # %r quotes the level
+    assert runner.load_json(run / "config.json")["effort"] is None   # ...nothing was written

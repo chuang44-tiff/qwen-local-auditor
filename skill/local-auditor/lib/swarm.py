@@ -59,18 +59,31 @@ _FENCE_ANY = re.compile(r"```[^\n]*\r?\n(.*?)```", re.S)
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # how a model writes a tool call when it answers with one instead of the result. An
 # answer whose FIRST non-blank text starts with one of these ("<command name=", the
-# tool_call tag, the function= tag, "<invoke ", "<parameter") returned the call, not
-# the report or block asked for (_refuse_tool_call); the same string later in the text
-# is ordinary content -- a quoted command, a code sample -- and parses normally. Built
-# from its tags without the angle bracket so the guard's own source never reads as one.
+# tool_call tag, the function= tag, "<invoke ", "<parameter"), bare or wrapped in a
+# code fence that opens the answer, returned the call, not the report or block asked
+# for (_refuse_tool_call); the same string later in the text -- after real text, or in
+# a fence that does not open the answer -- is ordinary content: a quoted command, a
+# code sample -- and parses normally. Built from its tags without the angle bracket so
+# the guard's own source never reads as one.
 _TOOL_CALL_MARKUP = tuple("<" + t for t in ("command name=", "tool_call", "function=",
                                             "invoke ", "parameter"))
+# an opening code fence at the answer's start: ``` plus an optional language word
+# and the newline that puts the fenced content below it
+_FENCE_OPEN = re.compile(r"```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n")
 
 
 def _refuse_tool_call(text):
-    """ValueError when the answer's first non-blank text is tool-call markup, so the
-    unit takes the repair round; a second such answer fails it the normal way."""
-    if (text or "").lstrip().startswith(_TOOL_CALL_MARKUP):
+    """ValueError when the answer's first non-blank text -- or, if the answer opens
+    with a code fence, the first non-blank text inside it -- is tool-call markup, so
+    the unit takes the repair round; a second such answer fails it the normal way.
+    Markup anywhere else, even deeper inside that opening fence, is quoted content and
+    passes: a json block is the normal answer of most roles, and one may well quote a
+    tag from the code it reads."""
+    body = (text or "").strip()
+    if body.startswith(_TOOL_CALL_MARKUP):
+        raise ValueError("answered with a tool call instead of the result")
+    m = _FENCE_OPEN.match(body)
+    if m and body[m.end():].lstrip().startswith(_TOOL_CALL_MARKUP):
         raise ValueError("answered with a tool call instead of the result")
 
 
