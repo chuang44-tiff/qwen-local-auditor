@@ -168,7 +168,7 @@ def test_role_fences(tmp_path, env):
     assert "--web" not in seen["searcher"] and "--mcp-config" in seen["searcher"]
     for r in ("reader", "verifier"):
         a = seen[r]
-        assert "--web" in a and a[a.index("-t") + 1] == "mcp__search__search"
+        assert "--web" in a and a[a.index("-t") + 1] == "mcp__search__search,mcp__search__page"
     for a in seen.values():
         assert a[a.index("--permission-mode") + 1] == "dontAsk"
 

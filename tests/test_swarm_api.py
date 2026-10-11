@@ -10,7 +10,7 @@ import time
 import pytest
 
 from lib import swarm
-from lib.swarm_engine import api, manifest, steps
+from lib.swarm_engine import api, fences, manifest, steps
 from swarm_fixtures import FAKE, calls, git_repo, make_workflow, unit_names
 
 ROLES = {"worker": {"file": "roles/worker.md", "fence": "none"},
@@ -421,6 +421,35 @@ def test_a_browser_role_runs_at_the_seats_and_needs_no_mcp(tmp_path, fake):
     assert wf.mcp is None
     assert wf.fan_out("ui", "tester", items(1), prompt,
                       lambda text, batch: steps.extract_json(text)).ok
+
+
+# ---------------------------------------------------------------- the web fence's page cache
+SEES_PAGE = r"""
+import json, os
+def answer(p, r):
+    return 0, "```json\n" + json.dumps([{"cache": os.environ.get("QWEN_PAGE_CACHE")}]) + "\n```"
+"""
+
+
+def test_web_units_get_the_page_cache_env_and_mcp_json_stays_path_free(tmp_path, fake, monkeypatch):
+    # The run's page cache dir reaches the search server through the unit's environment
+    # (the `page` tool stores each fetched page under it, once per run). It is NOT in
+    # mcp.json: that file is part of every web unit's cache key and must stay path-free.
+    (fake / "reader.py").write_text(SEES_PAGE, encoding="utf-8")
+    (fake / "worker.py").write_text(SEES_PAGE, encoding="utf-8")
+    monkeypatch.setenv("QWEN_SEARCH_URL", "http://192.0.2.1:8888")
+    wf = workflow(tmp_path)
+    mcp = fences.mcp_config(tmp_path / "run")          # the run's real mcp.json, not "{}"
+    wf.mcp = mcp
+    res = wf.fan_out("read", "reader", items(1), prompt,
+                     lambda text, batch: steps.extract_json(text))
+    assert [r["cache"] for r in res.rows] == [str(tmp_path / "run" / "pages")]
+    assert (tmp_path / "run" / "pages").is_dir()       # made before the unit started
+    plain = wf.fan_out("work", "worker", items(1), prompt,
+                       lambda text, batch: steps.extract_json(text))
+    assert [r["cache"] for r in plain.rows] == [None]  # only a web-fence unit is given it
+    mcp_text = mcp.read_text(encoding="utf-8")
+    assert "QWEN_PAGE_CACHE" not in mcp_text and str(tmp_path / "run") not in mcp_text
 
 
 # ---------------------------------------------------------------- depth by fence

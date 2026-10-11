@@ -1,10 +1,15 @@
 """Byte-identity guard: a one-round research run (quick, standard) must produce the same
 run folder, unit names, cache keys, phase files, report and stdout as the released
 qwen-deep-research did before the swarm-engine port. Written to pass on that code first;
-it must keep passing. The one settled change since: the fan-out roles (searcher, reader,
+it must keep passing. The settled changes since: the fan-out roles (searcher, reader,
 verifier) gained a manifest default effort of "medium", and a unit's key holds its effort,
-so those keys carry "medium" where the released run computed none; every other byte is
-still pinned."""
+so those keys carry "medium" where the released run computed none; and the web fence now
+grants the search server's `page` tool beside `search` while the reader and verifier role
+texts say how to use it -- so a web unit's key carries the wider grants and the new role
+bytes, and a run folder holds one more file: the `pages` cache the page tool stores the
+run's fetched text in (QWEN_PAGE_CACHE reaches the server through the unit's environment,
+and mcp.json, which the key also hashes, stays path-free). Every other byte is still
+pinned."""
 import hashlib
 import json
 import pathlib
@@ -19,8 +24,8 @@ from test_research import FAKE, env  # noqa: F401  (the fixture is used by name)
 # events.jsonl is the one addition since the release: the engine's progress stream
 # (lib/swarm_engine/events.py), written by every workflow's runs
 PART_B_FILES = ["agents", "angles.json", "claims.json", "config.json", "events.jsonl",
-                "fetch_stats.json", "mcp.json", "question.md", "report.md", "run.log",
-                "totals.json", "urls.json", "votes.json"]
+                "fetch_stats.json", "mcp.json", "pages", "question.md", "report.md",
+                "run.log", "totals.json", "urls.json", "votes.json"]
 PART_B_CFG_KEYS = ["question", "depth", "angles", "sources", "claims", "voters", "max_agents",
                    "max_items", "timeout_per_item", "retries", "effort", "role_effort",
                    "hours", "deadline"]
@@ -132,19 +137,19 @@ def test_one_round_run_folder_matches_the_released_one(tmp_path, env, capsys, de
 
 
 def test_one_round_cache_keys_match_the_released_ones(tmp_path, env):  # noqa: F811
-    # the fence flags and the key blob are unchanged and no research role is deep
-    # (DEEP_ROLES is empty: the fan-out roles opt out, the rest are fence "none"). The
-    # fan-out roles' manifest default effort ("medium") is the one field their keys now
-    # carry that a released run's did not; the fence-"none" roles name no effort, so
-    # their keys stay byte-identical to the released ones
+    # no research role is deep (DEEP_ROLES is empty: the fan-out roles opt out, the rest
+    # are fence "none"). Two settled moves since the release reach these keys: the
+    # fan-out roles' manifest default effort ("medium"), and the web fence's wider grants
+    # plus the reader/verifier role texts that name the page tool; the fence-"none"
+    # roles' keys stay byte-identical to the released ones
     rc, run = _run(tmp_path, "quick")
     assert rc == 0
     agents = run / "agents"
     mcp_text = (run / "mcp.json").read_text(encoding="utf-8")
     fences = {"scope": ("scoper", "none", "", False, "", None),
               "search": ("searcher", "none", "mcp__search__search", False, mcp_text, "medium"),
-              "fetch": ("reader", "none", "mcp__search__search", True, mcp_text, "medium"),
-              "verify": ("verifier", "none", "mcp__search__search", True, mcp_text, "medium"),
+              "fetch": ("reader", "none", "mcp__search__search,mcp__search__page", True, mcp_text, "medium"),
+              "verify": ("verifier", "none", "mcp__search__search,mcp__search__page", True, mcp_text, "medium"),
               "synth": ("synthesizer", "none", "", False, "", None)}
     for rec in sorted(agents.glob("*.json")):
         name = rec.name[:-len(".json")]
@@ -169,11 +174,14 @@ def test_the_role_texts_are_pinned():
     # the role text is part of every cache key: editing a role breaks resume of old
     # runs, so its exact bytes are pinned here (universal newlines: a Windows CRLF
     # checkout hashes the same)
-    pinned = {"reader": "47c846f16c7dacd74b5c886e3af978fe9c70a523d07f4cf9f6d7464dc1775996",
+    # reader and verifier re-pinned when their texts told the roles to check a quote or
+    # a number with `page` (the search server's tool that answers with passages, no model
+    # call); the other three texts are the released bytes still
+    pinned = {"reader": "6901ae10e32f50f6ca012127dd74032fc1a1c3bc328fcdcdc414a144a0f31e93",
               "scoper": "a22ea2c378a65fbacb03ab08dab4c8821965a1fd068474790009609774e3118d",
               "searcher": "3508101a0456fb83a98e4b842b3f29b70a5d10082fa72c19f5698bd0fd131dd2",
               "synthesizer": "b10d7ec9ff7e06f857e71cd3d659db089a428727a625f44f5eee6a5a42b9c052",
-              "verifier": "b6320e676fc1e62e3feb36bb6f668b4eb767755e57b8381108775827ec60154d"}
+              "verifier": "ac6933fe0eead94332b4557b4fd3ae0f013f47c13058d874a762a75b2c9f508d"}
     for role, want in pinned.items():
         text = pathlib.Path(rs.ROLES, "%s.md" % role).read_text(encoding="utf-8")
         assert hashlib.sha256(text.encode("utf-8")).hexdigest() == want, role

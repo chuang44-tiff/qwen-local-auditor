@@ -72,9 +72,35 @@ A role's fence is the only way a workflow chooses tools. Every agent also gets
 | `browser` | a real browser: the Playwright tools qwen-agent `--browser` grants | its own empty folder | `--seats` |
 | `browser-probe` | `browser` plus qwen-agent `--browser-eval`: `browser_evaluate` and `browser_network_request` | its own empty folder | `--seats` |
 | `search` | the `search` MCP tool | its own empty folder | `--web-seats` |
-| `web` | `search` + `WebFetch` | its own empty folder | `--web-seats` |
+| `web` | `search` + `page` + `WebFetch` | its own empty folder | `--web-seats` |
 | `read` | Read, Glob, Grep | `--target` | `--seats` |
 | `sandbox` | Read, Edit, Write, Bash, Glob, Grep | a fresh copy of `--target` per agent | `--seats` |
+
+A `web` role gets the search MCP server's second tool as well: `page` fetches a known
+url once and answers with its title plus up to 5 passages of about 600 characters around
+each case-insensitive match of `find` (with no `find`, or no match, the first 3000
+characters of the text) — plain text, **no model call**, where `WebFetch` runs one model
+call per page. The run shares one copy of every page: each web unit is given
+`QWEN_PAGE_CACHE=RUN/pages` in its environment — never in `mcp.json`, which is part of
+every web unit's cache key and stays free of run-folder paths — the server stores the
+fetched text there as `<sha256(url)>.txt`, and every call appends one tab-separated line
+`time, sha256, hit|miss|error, status, bytes` to `RUN/pages/log.tsv`; a url fetched once
+is read from the file for the rest of the run. It fetches http(s) text pages only,
+refuses hosts that resolve to loopback, link-local, private (the carrier-shared /10
+included), unspecified, reserved or multicast addresses — IPv4 embedded inside an IPv6
+address checked too — (a local LLM server on 127.0.0.1 is not reachable through it),
+follows at most 3 redirects while re-checking scheme and address on every hop, and caps
+the body at the search tool's byte limit. Every hop resolves its host once and connects
+to exactly the address that check saw, so a name cannot answer publicly to the check and
+loopback to the connect; proxy environment variables do not reroute it; and 30 seconds
+cover one whole fetch — connect, headers and body together. A refusal or HTTP error comes
+back as a short error text naming `WebFetch` as the fallback — `WebFetch` stays the way to
+read a page whole, and the way to fetch what `page` refuses. Errors are not cached. With
+`QWEN_PAGE_CACHE` unset the tool writes nothing at all. `QWEN_PAGE_ALLOW_HOSTS` (a
+comma-separated host list) turns those address refusals off for the hosts it names — it
+exists for tests only (the page tests serve a local server on loopback), the server says
+so on stderr at startup when it is set, and it must never be set for a real run: it opens
+exactly the door the refusals shut.
 
 A `browser` role is a `none` role plus qwen-agent `--browser`: qwen-agent writes the one
 Playwright MCP server config itself and grants the `mcp__playwright__` tools itself, so

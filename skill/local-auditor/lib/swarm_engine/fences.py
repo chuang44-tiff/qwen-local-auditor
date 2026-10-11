@@ -11,7 +11,7 @@ of each unit's cache key (Swarm._key hashes toolset, grants, web and the mcp.jso
 | browser | none (--browser)               | -                       | no    | its own      | agents/<unit>|
 | browser-probe | none (--browser-eval)    | -                       | no    | its own      | agents/<unit>|
 | search  | none                           | mcp__search__search     | no    | yes          | agents/<unit>|
-| web     | none                           | mcp__search__search     | yes   | yes          | agents/<unit>|
+| web     | none                           | mcp__search__search,mcp__search__page | yes | yes        | agents/<unit>|
 | read    | Read,Glob,Grep                 | Read,Glob,Grep          | no    | no           | --target     |
 | sandbox | Read,Edit,Write,Bash,Glob,Grep | the same six            | no    | no           | a sandbox    |
 
@@ -36,6 +36,7 @@ import pathlib
 import sys
 
 SEARCH_TOOL = "mcp__search__search"
+PAGE_TOOL = "mcp__search__page"             # the web fence's second search-server tool
 READ_TOOLS = "Read,Glob,Grep"
 SANDBOX_TOOLS = "Read,Edit,Write,Bash,Glob,Grep"
 WEB_FENCES = ("search", "web")         # run at --web-seats; need mcp.json and a search preflight
@@ -45,7 +46,7 @@ SEARCH_SERVER = pathlib.Path(__file__).resolve().parents[1] / "search_mcp.py"
 DESCRIBE = {"none": "no tools", "browser": "a real browser (Playwright)",
             "browser-probe": "a real browser (Playwright) + scripted probes (browser_evaluate)",
             "search": "search",
-            "web": "search + WebFetch",
+            "web": "search + page + WebFetch",
             "read": "Read/Glob/Grep in --target", "sandbox": "edit + Bash in a sandbox copy"}
 
 
@@ -69,8 +70,11 @@ def unit_fields(fence, mcp=None):
     if fence in WEB_FENCES:
         if mcp is None:
             raise ValueError("fence %r needs the run's mcp.json" % fence)
-        return {"toolset": "none", "grants": SEARCH_TOOL, "web": fence == "web",
-                "mcp_config": mcp}
+        # `web` also gets the search server's `page` tool: fetch a known url once per run
+        # and take back only the passages around what the unit is checking, no model call
+        return {"toolset": "none",
+                "grants": SEARCH_TOOL if fence == "search" else SEARCH_TOOL + "," + PAGE_TOOL,
+                "web": fence == "web", "mcp_config": mcp}
     if fence == "read":
         return {"toolset": READ_TOOLS, "grants": READ_TOOLS, "web": False, "mcp_config": None}
     if fence == "sandbox":

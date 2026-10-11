@@ -272,6 +272,17 @@ class Workflow:
             # one evidence root per unit, inside the run folder: what the unit's session
             # is given is QWEN_BROWSER_DIR, and wf.browser_dir(unit) names the same path
             u.env = {"QWEN_BROWSER_DIR": str(self.browser_dir(u.name))}
+        if r.fence == "web":
+            # the run's page cache: the search server's `page` tool stores each fetched
+            # page's text under <run>/pages, so every web unit of the run reads the same
+            # one copy and a re-read never refetches. The path travels in the unit's env,
+            # never in mcp.json: that file sits in every web unit's cache key and must
+            # stay free of run-folder paths (env is not in any key). The folder is made
+            # now, before the unit starts; a --check dry run builds units and writes nothing
+            pages = self.run_dir / "pages"
+            if self.check is None:
+                pages.mkdir(parents=True, exist_ok=True)
+            u.env = {"QWEN_PAGE_CACHE": str(pages)}
         if r.fence == "sandbox":
             self._sandbox_unit(u)
             u.parse = self._sandbox_parse(u, parse, batch)

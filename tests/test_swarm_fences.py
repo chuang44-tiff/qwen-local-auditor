@@ -14,7 +14,8 @@ def test_each_fence_maps_to_the_released_flags(tmp_path):
                                           "mcp_config": None}
     assert fences.unit_fields("search", mcp) == {"toolset": "none", "grants": "mcp__search__search",
                                                  "web": False, "mcp_config": mcp}
-    assert fences.unit_fields("web", mcp) == {"toolset": "none", "grants": "mcp__search__search",
+    assert fences.unit_fields("web", mcp) == {"toolset": "none",
+                                              "grants": "mcp__search__search,mcp__search__page",
                                               "web": True, "mcp_config": mcp}
     # browser is `none` plus qwen-agent's own --browser: no toolset, no grants, and no
     # --mcp-config of ours (qwen-agent writes the Playwright server config for itself)
@@ -48,7 +49,7 @@ def test_unknown_fence_and_web_without_mcp_are_errors():
     ("browser", [("--toolset", "none")], ["-t", "--web", "--mcp-config"]),
     ("browser-probe", [("--toolset", "none")], ["-t", "--web", "--mcp-config"]),
     ("search", [("--toolset", "none"), ("-t", "mcp__search__search")], ["--web"]),
-    ("web", [("--toolset", "none"), ("-t", "mcp__search__search")], []),
+    ("web", [("--toolset", "none"), ("-t", "mcp__search__search,mcp__search__page")], []),
     ("read", [("--toolset", "Read,Glob,Grep"), ("-t", "Read,Glob,Grep")], ["--web", "--mcp-config"]),
     ("sandbox", [("--toolset", "Read,Edit,Write,Bash,Glob,Grep")], ["--web", "--mcp-config"]),
 ])
@@ -91,6 +92,19 @@ def test_a_browser_unit_keeps_its_own_empty_folder(tmp_path, monkeypatch):
     argv = json.loads((d / "calls.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert argv[argv.index("-C") + 1] == str(run / "agents" / "u-1")
     assert "--browser" in argv and "--mcp-config" not in argv
+
+
+def test_web_fence_grants_page_and_search_fence_does_not():
+    # `page` fetches a known url once per run and returns only the passages around the
+    # agent's `find`, with no model call -- that is a reader/verifier move, so the web
+    # fence grants it beside `search`; a search-fence unit still sees the results page only
+    mcp = "mcp.json"
+    web = fences.unit_fields("web", mcp)
+    search = fences.unit_fields("search", mcp)
+    assert web["grants"] == "mcp__search__search,mcp__search__page"
+    assert search["grants"] == "mcp__search__search"
+    assert "mcp__search__page" not in search["grants"]
+    assert web["web"] is True and search["web"] is False
 
 
 def test_the_browser_fence_needs_neither_search_nor_a_target():
