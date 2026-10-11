@@ -47,7 +47,9 @@ ones (the clone itself runs with the sandbox's parent as its cwd).
 
 run_cmd runs `bash -c cmd` in a fresh sandbox with the command's output going to a
 temporary file instead of a pipe (so killing the shell ends the wait even when a
-grandchild lives on); the file's name comes from `tempfile.mkstemp` -- a random
+grandchild lives on); a command longer than 4000 characters is run from a script file
+next to the sandbox instead of `-c`, because Windows truncates long command lines. The
+file's name comes from `tempfile.mkstemp` -- a random
 `<name>.*.out` under the sandboxes root -- so an output link an agent pre-placed at the
 old fixed `<name>.out` name is never written through. On timeout it kills the shell's
 process group on POSIX -- a child
@@ -402,7 +404,9 @@ def _kill(p):
 
 def run_cmd(target, path, cmd, patch=None, timeout=600):
     """`bash -c cmd` in a fresh sandbox of target at path, `patch` (a str or the bytes of
-    one) applied first. Returns {applied, rc, timed_out, output_tail}; the sandbox is
+    one) applied first. A command longer than 4000 characters is run from a script file
+    next to the sandbox instead of `-c`, because Windows truncates long command lines.
+    Returns {applied, rc, timed_out, output_tail}; the sandbox and any helper file are
     always removed. Relative target/path are read against the caller's cwd."""
     target = pathlib.Path(target).resolve()
     path = pathlib.Path(path)
@@ -412,7 +416,7 @@ def run_cmd(target, path, cmd, patch=None, timeout=600):
         raise RuntimeError("cannot run a sandbox at %s: %s is a symlink"
                            % (path, path.parent))
     path = path.parent.resolve() / path.name         # path does not exist yet
-    out_file = None
+    out_file = script_file = None
     try:
         create(target, path)
         if patch:
@@ -422,6 +426,19 @@ def run_cmd(target, path, cmd, patch=None, timeout=600):
             if ap.returncode != 0:
                 return {"applied": False, "rc": None, "timed_out": False,
                         "output_tail": _text(ap.stderr or ap.stdout)[-TAIL:]}
+        argv = [bash_path(), "-c", cmd]
+        if len(cmd) > 4000:
+            # Git Bash / MSYS on Windows truncates a `-c` argument past ~8 KB, and the
+            # optimize workflow's wrap() embeds runners.py as a here-document: write such
+            # a command out and run it as a script instead. mkstemp with the `.out`
+            # suffix, so the cleanup() sweep also catches it, and the finally below
+            # unlinks it in every case. Written BEFORE the output file's fd is taken:
+            # an encode failure then leaves no fd open.
+            sfd, script_file = tempfile.mkstemp(prefix=path.name + ".", suffix=OUT_SUFFIX,
+                                                dir=str(path.parent))
+            with os.fdopen(sfd, "wb") as sh:             # bytes, "\n" as cmd has them
+                sh.write(cmd.encode("utf-8"))
+            argv = [bash_path(), pathlib.Path(script_file).as_posix()]   # C:/x/y.out fits Git Bash
         # The output goes to a file, not a pipe: waiting must end once bash is killed,
         # even when a grandchild that outlives it still holds the output open. mkstemp
         # picks the name (a random `<name>.*.out`, still swept by suffix in cleanup()),
@@ -430,7 +447,7 @@ def run_cmd(target, path, cmd, patch=None, timeout=600):
         fd, out_file = tempfile.mkstemp(prefix=path.name + ".", suffix=OUT_SUFFIX,
                                         dir=str(path.parent))
         with os.fdopen(fd, "wb") as fh:
-            p = subprocess.Popen([bash_path(), "-c", cmd], cwd=str(path),
+            p = subprocess.Popen(argv, cwd=str(path),
                                  stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT,
                                  **({"start_new_session": True} if os.name == "posix" else {}))
             timed_out = False
@@ -446,6 +463,9 @@ def run_cmd(target, path, cmd, patch=None, timeout=600):
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("run_cmd(%r) failed: %s" % (cmd, exc))
     finally:
+        if script_file is not None:                  # the long-command script never
+            with contextlib.suppress(OSError):       # outlives the run
+                os.unlink(script_file)
         if out_file is not None:                     # the mkstemp file by its own name, so
             with contextlib.suppress(OSError):       # a stray `<name>.out` link is never
                 os.unlink(out_file)                  # the thing deleted here

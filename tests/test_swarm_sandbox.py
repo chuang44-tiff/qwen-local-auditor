@@ -88,6 +88,102 @@ def test_run_cmd_applies_runs_and_cleans_up(tmp_path):
     assert (repo / "v.txt").read_text(encoding="utf-8") == "bad\n"
 
 
+def test_run_cmd_runs_a_long_command_from_a_file(tmp_path):
+    # Windows truncates a `bash -c` argument past ~8 KB (the optimize workflow's wrap()
+    # embeds runners.py as a here-document): a command longer than that runs from a
+    # script file next to the sandbox, which must not be left behind.
+    repo = git_repo(tmp_path / "repo", {"v.txt": "x\n"})
+    boxes = tmp_path / "run" / "sandboxes"
+    cmd = "".join(": %s\n" % ("pad" * 40) for _ in range(170)) + "echo done\n"
+    assert len(cmd) > 20000
+    res = sandbox.run_cmd(repo, boxes / "long", cmd)
+    assert res["rc"] == 0 and "done" in res["output_tail"]
+    assert not (boxes / "long").exists()
+    res = sandbox.run_cmd(repo, boxes / "long2", cmd + "exit 7\n")     # a failing long one
+    assert res["rc"] == 7 and "done" in res["output_tail"]
+    res = sandbox.run_cmd(repo, boxes / "long3", cmd + "sleep 30\n", timeout=1)   # a killed one
+    assert res["timed_out"] is True and "done" in res["output_tail"]
+    work = tmp_path / "run" / "sandboxes" / "w"               # a long command WITH a patch:
+    sandbox.create(repo, work)                                # the patch applies before the
+    (work / "new.txt").write_text("patched\n", encoding="utf-8", newline="\n")   # script is
+    patch = sandbox.diff(work)                                # even written
+    sandbox.remove(repo, work)
+    res = sandbox.run_cmd(repo, boxes / "long4", cmd + "cat new.txt\n", patch=patch)
+    assert res["applied"] and res["rc"] == 0 and "patched" in res["output_tail"]
+    assert not [p for p in boxes.iterdir() if p.is_file()]   # no script or .out left beside it
+
+
+def test_run_cmd_runs_a_long_command_from_a_path_with_spaces(tmp_path):
+    # the script path is one argv element for bash: a run folder (and so the script
+    # name) with spaces and non-ASCII must survive quoting on every platform, Git Bash
+    # included; the script's own bytes are the UTF-8 command, multibyte text inside
+    repo = git_repo(tmp_path / "repo", {"v.txt": "1\n"})
+    boxes = tmp_path / "run dir" / "sand boxes" / "ünïcode"
+    cmd = ": %s\n" % ("测" * 100) * 40 + "echo done\n"
+    assert 4000 < len(cmd) < 20000                            # over the file threshold
+    res = sandbox.run_cmd(repo, boxes / "s p a c e", cmd)
+    assert res["rc"] == 0 and "done" in res["output_tail"]
+    assert not [p for p in boxes.iterdir() if p.is_file()]
+
+
+def bash_spawns(monkeypatch):
+    """The list of [bash, ...] argvs sandbox.Popen spawns (git goes through run())."""
+    seen = []
+    real_popen = subprocess.Popen
+
+    def spy(argv, *a, **k):
+        if argv and str(argv[0]) == sandbox.bash_path():   # git runs go through run() too
+            seen.append(list(argv))
+        return real_popen(argv, *a, **k)
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", spy)
+    return seen
+
+
+def test_run_cmd_chooses_dash_c_or_a_script_file(tmp_path, monkeypatch):
+    # short commands keep `bash -c cmd` exactly; a long one spawns `<bash> <script>` with
+    # the script next to the sandbox and still runs inside it, and the spawn argv is all
+    # a Windows -c truncation would have eaten
+    seen = bash_spawns(monkeypatch)
+    repo = git_repo(tmp_path / "repo", {"v.txt": "1\n"})
+    boxes = tmp_path / "run" / "sandboxes"
+    sandbox.run_cmd(repo, boxes / "short", "echo hi")
+    res = sandbox.run_cmd(repo, boxes / "long", "pwd\n" + ": pad\n" * 2000 + "echo done\n")
+    assert len(seen) == 2 and len(seen[0]) == 3 and seen[0][1] == "-c"
+    assert len(seen[1]) == 2 and seen[1][1] != "-c"          # [bash, script]
+    assert os.path.isabs(seen[1][1])                          # a / or C:/ path Git Bash takes
+    assert os.path.dirname(seen[1][1]) == str(boxes.resolve())
+    assert "done" in res["output_tail"] and "long" in res["output_tail"]   # ran in the sandbox
+    assert not os.path.exists(seen[1][1])                     # the script died with the run
+
+
+def test_run_cmd_switches_to_a_file_only_past_4000_characters(tmp_path, monkeypatch):
+    # the threshold is exactly `> 4000`: 4000 characters still take `-c`, 4001 the file
+    seen = bash_spawns(monkeypatch)
+    repo = git_repo(tmp_path / "repo", {"v.txt": "1\n"})
+    boxes = tmp_path / "run" / "sandboxes"
+    res = sandbox.run_cmd(repo, boxes / "exact", ":" + " " * 3998 + "\n")
+    assert len(seen[0]) == 3 and seen[0][1] == "-c" and res["rc"] == 0
+    res = sandbox.run_cmd(repo, boxes / "over", ":" + " " * 3999 + "\n")
+    assert len(seen[1]) == 2 and res["rc"] == 0
+    assert not [p for p in boxes.iterdir() if p.is_file()]
+
+
+def test_run_cmd_fails_a_long_command_with_lone_surrogates(tmp_path):
+    # the script file is written as UTF-8: a command holding a lone surrogate (the result
+    # of a JSON \udXXX escape in an agent answer) cannot be encoded, and run_cmd fails
+    # with that UnicodeEncodeError rather than running a mangled command -- and leaves
+    # nothing beside the sandbox
+    repo = git_repo(tmp_path / "repo", {"v.txt": "1\n"})
+    boxes = tmp_path / "run" / "sandboxes"
+    cmd = "echo done\n" + ": \ud800\n" * 2000
+    assert len(cmd) > 4000
+    with pytest.raises(UnicodeEncodeError):
+        sandbox.run_cmd(repo, boxes / "bad", cmd)
+    assert not (boxes / "bad").exists()
+    assert not [p for p in boxes.iterdir() if p.is_file()]
+
+
 def test_cleanup_removes_leftover_sandboxes(tmp_path):
     repo = git_repo(tmp_path / "repo", {"a": "1\n"})
     run = tmp_path / "run"

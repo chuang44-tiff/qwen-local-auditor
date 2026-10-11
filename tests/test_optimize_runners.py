@@ -202,14 +202,20 @@ def test_wrap_runs_times_and_keeps_the_exit_code(tmp_path):
     bash = shutil.which("bash")
     py = pathlib.Path(sys.executable).as_posix()
     cmd = '"%s" -c "import time; time.sleep(0.2); print(\'3 passed in 0.2s\')"' % py
-    p = subprocess.run([bash, "-c", R.wrap(cmd, "label one", bash=bash)], cwd=str(tmp_path),
+    # the wrapped command embeds runners.py, so it is too long for `bash -c` on Windows:
+    # run it from a script file, the way sandbox.run_cmd does
+    script = tmp_path / "wrap.sh"
+    script.write_bytes(R.wrap(cmd, "label one", bash=bash).encode("utf-8"))
+    p = subprocess.run([bash, script.as_posix()], cwd=str(tmp_path),
                        capture_output=True, text=True)
     assert p.returncode == 0
     res = R.parse_result(p.stdout)
     assert res["passed"] == 3 and res["wall"] >= 0.2
-    p = subprocess.run([bash, "-c", R.wrap("exit 3", "label two", bash=bash)], cwd=str(tmp_path),
+    script.write_bytes(R.wrap("exit 3", "label two", bash=bash).encode("utf-8"))
+    p = subprocess.run([bash, script.as_posix()], cwd=str(tmp_path),
                        capture_output=True, text=True)
     assert p.returncode == 3 and R.parse_result(p.stdout)["rc"] == 3
+    script.unlink()
     assert list(tmp_path.iterdir()) == []          # the output file lives outside the tree
 
 
@@ -219,7 +225,9 @@ def test_wrap_survives_a_non_utf8_locale(tmp_path):
     py = pathlib.Path(sys.executable).as_posix()
     cmd = 'PYTHONIOENCODING=utf-8 "%s" -c "print(\'\\u6d4b\\u8bd5 1 passed in 0.1s\')"' % py
     env = dict(os.environ, PYTHONIOENCODING="cp1252", PYTHONUTF8="0")
-    p = subprocess.run([bash, "-c", R.wrap(cmd, "enc", bash=bash)], cwd=str(tmp_path),
+    script = tmp_path / "wrap.sh"                  # a script file, as in run_cmd (long -c)
+    script.write_bytes(R.wrap(cmd, "enc", bash=bash).encode("utf-8"))
+    p = subprocess.run([bash, script.as_posix()], cwd=str(tmp_path),
                        capture_output=True, env=env)
     assert p.returncode == 0
     assert R.parse_result(p.stdout.decode("utf-8"))["passed"] == 1

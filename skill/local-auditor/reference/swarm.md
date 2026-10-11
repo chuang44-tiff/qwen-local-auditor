@@ -164,7 +164,7 @@ its patch. `--target` itself is never an agent's working directory unless the fe
 | `wf.converged(reason)` | end the rounds loop after this round |
 | `wf.round` | the current round (1 outside the loop) |
 | `wf.steps.NAME` | `normalize_url`, `merge_urls`, `merge_claims`, `vote_slots`, `tally`, `extract_json`, `clip`, `slug`, and `run_cmd` (`merge_urls` and `merge_claims` expect PARSED rows, as the research parsers produce, not raw agent output) |
-| `wf.steps.run_cmd(cmd, patch=None, timeout=600)` | `bash -c cmd` in a fresh sandbox of the target, `patch` applied first; returns `{applied, rc, timed_out, output_tail}` |
+| `wf.steps.run_cmd(cmd, patch=None, timeout=600)` | `bash -c cmd` in a fresh sandbox of the target, `patch` applied first; returns `{applied, rc, timed_out, output_tail}`. A command longer than 4000 characters is run from a script file next to the sandbox instead of `-c`, because Windows truncates long command lines |
 | `wf.save(key, data)` / `wf.load(key)` / `wf.exists(key)` / `wf.forget(*keys)` | JSON artifacts `<key>.json` in the run folder (`round-<r>/` from round 2), written to a temporary file and renamed into place, so a reader never sees half of one |
 | `wf.write(relpath, text)` | a text file in the run folder, e.g. `patches/1.diff` |
 | `wf.browser_dir(unit)` | the `RUN/browser/<unit>` folder a browser-fenced unit's session was given as its `QWEN_BROWSER_DIR`: qwen-agent's timestamped folders of screenshots and page snapshots are made inside it, so a report names this path as the unit's evidence |

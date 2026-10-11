@@ -223,8 +223,10 @@ def team(env):
 
 
 def test_a_slow_sleep_gets_a_checked_stacked_patch(tmp_path, team):
+    # no target: this test is about the stacked patch, and a small -30% would trip B4 on
+    # a slow runner (its saving is not more than 2x the timing noise)
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="-30%"))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
     text = report(run)
     assert rc == 0, text
     assert text.splitlines()[0] == "bench: ok"
@@ -263,8 +265,11 @@ def test_patch_outside_focus_is_not_measured(tmp_path, team):
 
 
 def test_target_reached_stops_rounds_early(tmp_path, team):
+    # -50%: the fake implementer drops DELAY 0.4 -> 0.01, so the patched measure runs in
+    # far under half the base, and the saving is big enough that CI timing noise (2x)
+    # never trips B4 the way -20% did on a slow runner
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="-20%"), depth="deep")
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="-50%"), depth="deep")
     assert rc == 0
     assert not (run / "round-2").exists()
     assert "target reached" in (run / "run.log").read_text(encoding="utf-8")
@@ -448,7 +453,7 @@ def test_a_patch_left_out_of_the_stack_says_why(tmp_path, team):
 
 def test_measurements_section_has_no_repeats(tmp_path, team):
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="-30%"))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
     assert rc == 0, report(run)
     after = report(run).split("## Measurements", 1)[1]
     assert after.count("guard: passed on the stack") == 1
@@ -470,7 +475,7 @@ def test_writer_tool_call_answer_gets_the_report_repair(tmp_path, team):
         "    return (0, '# Optimize\\n\\nslow.py sleeps less, repaired.\\n') if r"
         " else (0, '<command name=\"Bash\">ls</command>')\n", encoding="utf-8")
     repo = git_repo(tmp_path / "repo", SLOW)
-    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path, target="-30%"))
+    rc, run = optimize(tmp_path, repo, "--set", "bench=%s" % bench_file(tmp_path))
     assert rc == 0, report(run)                                          # repaired, not dropped
     log = (run / "run.log").read_text(encoding="utf-8").splitlines()
     assert any(l.split("\t")[0] == "write-1" and l.endswith("\trepaired") for l in log)
