@@ -213,3 +213,14 @@ def test_ask_note_keeps_out_of_mechanical_work(tmp_path, server, fake):
            server, fake, extra=dict(DEEP_ENV))
     assert r.returncode == 0, r.stderr
     assert "mechanical work" in sys_prompt(calls(tmp_path)[0][0])
+
+
+def test_ask_note_names_the_moments_to_ask(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stderr
+    note = sys_prompt(calls(tmp_path)[0][0])
+    assert "what input or situation breaks it" in note
+    assert "after two fix attempts" in note
+    assert "cannot look up here" in note

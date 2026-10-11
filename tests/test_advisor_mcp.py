@@ -248,3 +248,9 @@ def test_secret_looking_files_are_not_attached(adv):
     assert "looks like a secret" in out
     am.ask("Which?", "ctx", ["id_rsa"], env, str(root))
     assert "s3cret" not in (calls / "stdin.2").read_text()
+
+
+def test_tool_description_asks_what_breaks_it():
+    d = am.TOOL["description"]
+    assert "what input or situation breaks it" in d
+    assert "cannot search the codebase" in d

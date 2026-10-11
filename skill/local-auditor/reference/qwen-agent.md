@@ -515,9 +515,13 @@ the advisor never edits or runs anything.
 - Every question and answer is appended to `advisor-<stamp>-<pid>.md` in `QWEN_OUTDIR` when you set it, else in `~/.cache/qwen-agent/advisor/` (never the tree under audit).
   `--json` adds `qwen_agent.advisor` = `{model, budget, calls, answered, seconds, cost_usd,
   unavailable, log}`.
-- The system note tells the session to ask only about judgement calls: contradictory evidence,
-  a finding it is unsure whether to keep, a design trade-off. Not to find bugs, and not about
-  mechanical work (aligning docs, renaming, formatting).
+- The system note names three moments to ask: stuck (a check or test still fails after two fix
+  attempts, or two pieces of evidence contradict each other); before finishing work that handles
+  network requests, untrusted input (parsing, URLs, file paths), threads, timeouts or retries,
+  deleting files, or permissions -- asking what breaks the change; and a fact about a library,
+  tool or OS it cannot look up. It asks in the "what breaks this?" form: send the plan or change
+  and ask what input or situation breaks it. It still keeps out of mechanical work (aligning
+  docs, renaming, formatting). Nothing is mandatory: the session decides whether to ask.
 - Files that look like secrets are never attached, even inside the working directory:
   `.env*`, `*.env`, `id_*`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, names with
   "credential" or "secret", key and certificate files (`.pem`, `.key`, `.p12`, `.pfx`, `.jks`,

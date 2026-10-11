@@ -38,12 +38,12 @@ BRIEF_HEAD = (
 TOOL = {
     "name": "ask",
     "description": (
-        "Ask a stronger model for advice on ONE decision you cannot settle with a probe: "
-        "contradictory evidence, a claim you are unsure whether to keep or drop, a design "
-        "choice with real trade-offs. It sees only what you send: a self-contained question, "
-        "the evidence, and up to 5 files (paths inside the working directory). It cannot find "
-        "bugs for you or read the codebase. Verify any claim in its answer before relying on it. "
-        "Calls are limited per run."),
+        "Ask a stronger model ONE self-contained question. Best use: send a plan or a change "
+        "and ask what input or situation breaks it. Also ask when stuck (a check still fails "
+        "after two fix attempts, or evidence contradicts) or for a fact about a library, tool "
+        "or OS you cannot look up. It sees only what you send: the question, the evidence, and "
+        "up to 5 files (paths inside the working directory). It cannot search the codebase. "
+        "Verify any claim in its answer before relying on it. Calls are limited per run."),
     "inputSchema": {"type": "object",
                     "properties": {
                         "question": {"type": "string", "description": "one self-contained question"},
