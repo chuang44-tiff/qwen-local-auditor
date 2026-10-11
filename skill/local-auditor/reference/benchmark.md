@@ -6,20 +6,21 @@ One local model (Qwen3.8-Flash-Next, NVFP4, served by vLLM on one workstation GP
 Claude Code at `--effort xhigh`, on a fixed sample of
 20 Aider polyglot exercises (seeded, stratified: Python 4, JavaScript 4, Go 3, Rust 3,
 Java 3, C++ 3) and 10 Terminal-Bench 2.0 tasks (3 easy, 6 medium, 1 hard), run with
-[Harbor](https://github.com/laude-institute/harbor). Two runs, a week apart:
+[Harbor](https://github.com/laude-institute/harbor). Three runs over eight days:
 
 | run | server | Claude Code | sessions at once |
 |---|---|---|---|
 | A | `--max-num-seqs 4` | 2.1.286 | 4 |
 | B | `--max-num-seqs 6` | 2.1.295 | 6 |
+| C | `--max-num-seqs 6` | 2.1.296 | 6 (`--until-done` only, on a newer release) |
 
 ## Results
 
-| setup | run A: first attempt / with a second chance | run B: first attempt / with a second chance |
-|---|---|---|
-| Claude Code alone (Harbor `claude-code` agent), Aider polyglot | 12/20 / 14/20 (independent retry) | 11/20 / 12/20 (independent retry) |
-| Claude Code alone, Terminal-Bench 2.0 | 9/10 / 10/10 (independent retry) | 8/10 / 10/10 (independent retry) |
-| `qwen-agent --until-done`, Aider polyglot | 10/20 / **18/20** (second round sees the test failures) | 10/20 / **18/20** |
+| setup | run A: first attempt / with a second chance | run B: first attempt / with a second chance | run C |
+|---|---|---|---|
+| Claude Code alone (Harbor `claude-code` agent), Aider polyglot | 12/20 / 14/20 (independent retry) | 11/20 / 12/20 (independent retry) | not rerun |
+| Claude Code alone, Terminal-Bench 2.0 | 9/10 / 10/10 (independent retry) | 8/10 / 10/10 (independent retry) | not rerun |
+| `qwen-agent --until-done`, Aider polyglot | 10/20 / **18/20** (second round sees the test failures) | 10/20 / **18/20** | 11/20 / **17/20** |
 
 In this setup the same model and the same exercises went from 12-14/20 to 18/20 with a
 supervisor that runs the hidden tests after a round and hands the failures back (Aider's own
@@ -30,7 +31,20 @@ runs: no API errors, timeouts, context overflows or crashes. Run B reproduced th
 result exactly (10/20, then 18/20, the same two exercises failing). In run B the 10 exercises
 that passed the first round spent their second round on the coder's review round ("try to
 break your change"), which broke none of them; one Harbor trial was excluded for fetching the
-exercise's upstream tests.
+exercise's upstream tests. Run C repeated the loop on a later release: 11/20, then 17/20.
+Claude Code alone does not change with this repo's releases, so the Harbor rows were not
+rerun.
+
+### The advisor arm, not scored
+
+Run C also ran the loop with `--advisor opus`, which lets the local coder ask Claude Opus
+for advice. It scored 16/20 on the first round and 20/20 after the second, for $2.75 of
+Opus calls over 20 exercises. This is the first run in which the advisor changed the score,
+and the table leaves it out because it cannot count: in every one of the 20 exercises the
+coder asked Opus what the hidden Exercism tests assert, and Opus answered from memory,
+in one case reconstructing the test cases and the reference solution. Blocking the web did
+not block this: the answer key came from the stronger model's memory of a public
+benchmark. A fair advisor score needs tasks the advisor has not seen.
 
 ## How the runs were kept honest
 
