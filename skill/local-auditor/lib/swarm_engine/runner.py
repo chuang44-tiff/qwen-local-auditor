@@ -226,6 +226,19 @@ def shallow_roles(text, roles):
     return _roles_of("--shallow", text, roles)
 
 
+def note_deep_fence_none(m, names, skip=()):
+    """--deep ROLE/all naming a fence "none" role: the review round needs tools the
+    fence does not give, so such a role gets its subagent switch only (api._deep).
+    A role in `skip` is not named: one shallow for this run (--shallow wins, api._deep)
+    gets no switches at all, and a --resume passes the stored deep list so only the
+    roles this call newly opts in are named -- a repeat resume is quiet. One note per
+    call on stderr; the run goes on (this is no usage error)."""
+    named = [r for r in names if m.roles[r].fence == "none" and r not in skip]
+    if named:
+        err("--deep: the review round needs tools a fence none role does not have: %s "
+            "get the subagent switch only" % ", ".join(named))
+
+
 def load_json(path):
     """Bytes I/O with utf-8/surrogateescape: argv bytes (a goal, a --set value) that are
     not valid UTF-8 survive a run-folder round trip byte-exact; valid UTF-8 is identical."""
@@ -497,6 +510,9 @@ def _main(o, compat):
     o.run_dir = run                                     # where error.log goes if we crash
     if (run / "config.json").exists():
         raise Usage("--out %s already holds a run; use --resume %s or another --out" % (run, run))
+    if deep is not None:
+        # --deep on fence none: subagents only; a role --shallow names too gets none
+        note_deep_fence_none(m, deep, shallow or ())
     return _post_release(run, mod, _start(o, m, mod, cfg, run, seats, web_seats, max_unit,
                                           new=True))
 
@@ -602,14 +618,20 @@ def _resume(o, compat, wf_spec, words):
         stored = dict(stored) if isinstance(stored, dict) else {}
         stored.update(efforts)
         cfg["role_effort"] = stored
-    if getattr(o, "deep", None) is not None:
-        stored = cfg.get("deep")
-        stored = set(stored) if isinstance(stored, list) else set()
-        cfg["deep"] = sorted(stored | set(deep_roles(o.deep, tuple(m.roles))))
     if getattr(o, "shallow", None) is not None:
         stored = cfg.get("shallow")
         stored = set(stored) if isinstance(stored, list) else set()
         cfg["shallow"] = sorted(stored | set(shallow_roles(o.shallow, tuple(m.roles))))
+    if getattr(o, "deep", None) is not None:
+        added = deep_roles(o.deep, tuple(m.roles))
+        stored = cfg.get("deep")
+        stored = set(stored) if isinstance(stored, list) else set()
+        # merged above, so it also covers a --shallow given on this very resume
+        shal = set(cfg["shallow"]) if isinstance(cfg.get("shallow"), list) else set()
+        # the same note for a resumed run, for the newly deep roles only: one already
+        # in the stored list was noted when it entered, and one shallow gets no switches
+        note_deep_fence_none(m, added, stored | shal)
+        cfg["deep"] = sorted(stored | set(added))
     if o.hours is not None:
         cfg["hours"] = o.hours
         cfg["deadline"] = utc_iso(time.time() + o.hours * 3600)

@@ -468,6 +468,23 @@ def test_all_rows_discarded_triggers_repair(tmp_path, env):
     assert any(l.split("\t")[0] == "search-1" and l.endswith("\trepaired") for l in log)
 
 
+def test_synthesizer_tool_call_answer_gets_the_report_repair(tmp_path, env):
+    # the synthesizer's answer IS the report: an answer that opens with a tool call is
+    # the call, not the report, and its repair round asks for the whole markdown report
+    # (SYNTH_REPAIR, not the swarm's json REPAIR); the repaired body lands in report.md
+    (env / "synthesizer.py").write_text(
+        "def answer(p, r):\n"
+        "    return (0, '# Answer\\n\\nThe answer is repaired [1].\\n') if r"
+        " else (0, '<command name=\"Bash\">ls</command>')\n", encoding="utf-8")
+    assert main(tmp_path, "--depth", "quick", "q") == 0
+    repair = (tmp_path / "run" / "agents" / "synth-1.repair.md").read_text(encoding="utf-8")
+    assert "complete markdown report" in repair
+    assert "answered with a tool call" in repair          # the {why} SYNTH_REPAIR carries
+    log = (tmp_path / "run" / "run.log").read_text(encoding="utf-8").splitlines()
+    assert any(l.split("\t")[0] == "synth-1" and l.endswith("\trepaired") for l in log)
+    assert "The answer is repaired [1]." in (tmp_path / "run" / "report.md").read_text(encoding="utf-8")
+
+
 def test_non_string_fields_are_discarded(tmp_path, env, capsys):
     # the isinstance guards run inside the parsers: a list-valued id must not raise
     # TypeError at the set-membership test, and the one good entry survives next to
@@ -703,10 +720,10 @@ def test_timeout_scales_with_items(tmp_path, env):
     assert cfg["timeout_per_item"] == 240
     agents = tmp_path / "run" / "agents"
     t = recorded_timeouts(env)
-    # default depth on: scoper and synthesizer are deep, and a review round is two
-    # qwen-agent calls, so each is handed half of max(300, 2 * 240) -- but not less
-    # than the 300 s floor
-    assert t["scope-1"] == 300 and t["synth-1"] == 300
+    # fence "none" never gets the review round, so the scoper and the synthesizer keep
+    # their whole budget: each is a two-item unit at 240 s -- no halving happens
+    # without a review round
+    assert t["scope-1"] == 480 and t["synth-1"] == 480
     # readers get twice the per-item budget: each source is a whole page
     for prefix, pat, weight in (("search-", r"^- A\d+:", 1), ("fetch-", r"^- S\d+:", 2),
                                 ("verify-", r"^- C\d+:", 1)):
@@ -962,9 +979,9 @@ def test_old_config_timeout_is_per_item_on_resume(tmp_path, env):
     run = old_run("run")
     assert rs.main(["--agent", sys.executable, "--agent", str(FAKE), "--resume", str(run)]) == 0
     t = recorded_timeouts(env)
-    # default depth on: deep units are handed half of max(300, 2 * 900) -- the review
-    # round is a second qwen-agent call on the same unit budget
-    assert t["scope-1"] == 900 and t["synth-1"] == 900
+    # fence "none" never gets the review round, so no halving: the scope and synth units
+    # are handed their whole max(300, 2 * 900) budgets
+    assert t["scope-1"] == 1800 and t["synth-1"] == 1800
     for prefix, pat, weight in UNIT_PATS:
         for name in sorted(t):
             if name.startswith(prefix):
@@ -977,8 +994,8 @@ def test_old_config_timeout_is_per_item_on_resume(tmp_path, env):
     assert rs.main(["--agent", sys.executable, "--agent", str(FAKE), "--resume", str(run2),
                     "--timeout", "100"]) == 0
     t2 = recorded_timeouts(env)
-    # default depth on: the scoper is deep, so it is handed half of max(300, 2 * 100),
-    # held at the 300 s floor
+    # the fence-none scoper keeps its whole max(300, 2 * 100) budget: the 300 s floor,
+    # not a review-round half, is what holds it at 300
     assert t2["scope-1"] == 300
     per_fetch = {n: unit_items(run2 / "agents", n, r"^- S\d+:")
                  for n in t2 if n.startswith("fetch-")}

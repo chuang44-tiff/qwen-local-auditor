@@ -108,9 +108,9 @@ def test_timeouts_effort_and_seats_follow_the_role(tmp_path, fake):
     wf.fan_out("read", "reader", items(6), prompt, echo_parse)
     wf.agent("one", "voter", "- C9:", lambda text: steps.extract_json(text))
     by = {pathlib.Path(a[a.index("-C") + 1]).name: a for a in calls(fake)}
-    # default depth on: every role here is deep, and a review round is two qwen-agent
-    # calls, so each unit's budget (the max(300, ...) figure below) is halved on the way
-    # to the agent -- but never below the 300 s floor
+    # the reader (fence web) is deep, and a review round is two qwen-agent calls, so its
+    # budget is halved on the way to the agent -- never below the 300 s floor; the
+    # fence-none worker and voter get no review round and keep their max(300, ...) as is
     assert by["work-1"][by["work-1"].index("--timeout") + 1] == "300"   # max(300, 2 x 100)
     assert by["read-1"][by["read-1"].index("--timeout") + 1] == "300"   # weight 2: 400 / 2 < 300
     assert by["one-1"][by["one-1"].index("--timeout") + 1] == "300"     # an agent counts 2 items
@@ -426,26 +426,31 @@ def test_a_browser_role_runs_at_the_seats_and_needs_no_mcp(tmp_path, fake):
 # ---------------------------------------------------------------- depth by fence
 
 def test_toolless_role_gets_no_subagent_switches_by_default(tmp_path, fake):
-    # A fence-none role has no tools to delegate with: depth gives it the review
-    # round only. A role with tools (web) keeps the delegation nudge.
+    # A fence-none role has no tools at all: depth gives it no switch -- neither the
+    # review round nor the delegation nudge. A role with tools (web) keeps both, and
+    # --deep on the toolless role can only give it the subagent switch (the runner
+    # notes on stderr that the review round needs tools).
     wf = workflow(tmp_path)
-    assert wf._deep("worker") == ("review_round",)
+    assert wf._deep("worker") == ()
     assert wf._deep("reader") == ("review_round", "subagents")
     wf = workflow(tmp_path, deep=["worker"])              # --deep ROLE: still no tools
-    assert wf._deep("worker") == ("review_round",)
+    assert wf._deep("worker") == ("subagents",)
 
 
 def test_toolless_role_keeps_subagents_it_lists(tmp_path, fake):
-    roles = dict(ROLES, worker=dict(ROLES["worker"], deep=["review_round", "subagents"]))
+    roles = dict(ROLES, worker=dict(ROLES["worker"], deep=["subagents_push"]))
     folder = make_workflow(tmp_path / "wf2", {"roles": roles}, roles=("worker", "reader", "voter"))
     wf = workflow(tmp_path)
     wf.manifest = manifest.load(folder)
-    assert wf._deep("worker") == ("review_round", "subagents")
+    assert wf._deep("worker") == ("subagents_push",)
+    wf = workflow(tmp_path, deep=["worker"])              # --deep gives the "subagents"
+    wf.manifest = manifest.load(folder)                   # switch, as a list naming it
+    assert wf._deep("worker") == ("subagents",)           # would -- not the listed push
 
 
 def test_role_lists_in_config_are_matched_by_name_not_substring(tmp_path, fake):
     wf = workflow(tmp_path, deep="reader,voter", shallow="workers")   # hand-edited strings
-    assert wf._deep("worker") == ("review_round",)
+    assert wf._deep("worker") == ()                         # fence none: no switch at all
     assert wf._deep("reader") == ("review_round", "subagents")
 
 
@@ -580,6 +585,22 @@ def test_fan_out_repair_text_reaches_every_unit(tmp_path, fake):
     for u in ("work-1", "work-2"):
         text = (tmp_path / "run" / "agents" / ("%s.repair.md" % u)).read_text(encoding="utf-8")
         assert text.startswith("Again please (")
+
+
+def test_agent_repair_text_reaches_the_unit(tmp_path, fake):
+    # the same for wf.agent's repair=: the unit's own repair round gets the workflow's
+    # text with the parse's reason in place of {why}, and the repaired answer is returned
+    (fake / "worker.py").write_text(
+        "def answer(p, resumed):\n"
+        "    return (0, '```json\\n[{\"id\": \"X\"}]\\n```') if resumed else (0, 'prose')\n",
+        encoding="utf-8")
+    wf = workflow(tmp_path)
+    assert wf.agent("one", "worker", "- X:", lambda text: steps.extract_json(text),
+                    repair="Again please ({why}).") == [{"id": "X"}]
+    assert wf.last_unit["ok"] and wf.last_unit["name"] == "one-1"
+    text = (tmp_path / "run" / "agents" / "one-1.repair.md").read_text(encoding="utf-8")
+    assert text.startswith("Again please (")
+    assert "{why}" not in text                             # replaced by the parse's reason
 
 
 # ---------------------------------------------------------------- browser-probe, unit_ids

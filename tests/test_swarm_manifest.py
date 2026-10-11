@@ -162,8 +162,10 @@ def test_non_string_default_depth(tmp_path, depth):
 
 # ---------------------------------------------------------------- the role "deep" field
 
-def role_with(deep):
-    return {"roles": {"worker": {"file": "roles/worker.md", "fence": "none", "deep": deep}}}
+def role_with(deep, fence="search"):
+    """The one-role manifest with `deep` set, on a tool-bearing fence unless given:
+    the shared BASE role is fence "none", which can name none of these switches."""
+    return {"roles": {"worker": {"file": "roles/worker.md", "fence": fence, "deep": deep}}}
 
 
 @pytest.mark.parametrize("deep,want", [
@@ -179,8 +181,10 @@ def test_role_deep_field(tmp_path, deep, want):
 
 def test_role_deep_defaults_to_every_switch(tmp_path):
     # default depth on: a role that says nothing about depth gets the whole depth;
-    # "deep": false (above) is the opt-out
-    assert load(tmp_path).roles["worker"].deep == ("review_round", "subagents")
+    # "deep": false (above) is the opt-out (both readings are for a fence with tools)
+    assert load(tmp_path, roles={"worker": {"file": "roles/worker.md",
+                                            "fence": "search"}}).roles["worker"].deep == \
+        ("review_round", "subagents")
 
 
 @pytest.mark.parametrize("deep,needle", [
@@ -194,6 +198,33 @@ def test_role_deep_field_errors(tmp_path, deep, needle):
     with pytest.raises(manifest.ManifestError, match="roles.worker.deep") as e:
         load(tmp_path, **role_with(deep))
     assert needle in str(e.value)
+
+
+# ---------------------------------------------------------------- fence none has no tools
+
+def test_fence_none_never_gets_the_review_round(tmp_path):
+    # the shared BASE role is fence "none": depth gives it no switch at all -- the
+    # default, a spelled-out "deep": true (which keeps loading) and "deep": false alike
+    assert load(tmp_path).roles["worker"].deep == ()
+    assert load(tmp_path, **role_with(True, fence="none")).roles["worker"].deep == ()
+    assert load(tmp_path, **role_with(False, fence="none")).roles["worker"].deep == ()
+
+
+@pytest.mark.parametrize("deep", [["review_round"], ["subagents", "review_round"]])
+def test_fence_none_deep_list_with_review_round_is_refused(tmp_path, deep):
+    with pytest.raises(manifest.ManifestError, match="roles.worker.deep") as e:
+        load(tmp_path, **role_with(deep, fence="none"))
+    assert "no tools" in str(e.value) and "review round" in str(e.value)
+
+
+def test_fence_none_deep_list_keeps_subagents(tmp_path):
+    # the subagent switches are qwen-agent flags, not the role's tools: a fence-none
+    # list may name them, exactly as it always could
+    assert load(tmp_path, **role_with(["subagents"], fence="none")).roles["worker"].deep == \
+        ("subagents",)
+    assert load(tmp_path, **role_with(["subagents_push"],
+                                       fence="none")).roles["worker"].deep == \
+        ("subagents_push",)
 
 
 def test_a_knob_may_not_be_called_deep(tmp_path):

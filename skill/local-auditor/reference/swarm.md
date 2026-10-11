@@ -53,7 +53,7 @@ my-workflow/
 | `roles.R.fence` | `none`, `browser`, `browser-probe`, `search`, `web`, `read` or `sandbox` (below); `read` and `sandbox` need `"target": "required"` |
 | `roles.R.budget_weight` | number >= 1 (default 1): the per-item budget multiplier |
 | `roles.R.effort` | optional default effort; `--effort` and `--role-effort` beat it |
-| `roles.R.deep` | optional, and **the default is depth**: no `deep` field (or `true`) gives the role both switches (a fence-`none` role, having no tools, gets the review round only, unless its own list names a subagent switch), `"deep": false` is the shallow opt-out, and a list of `"review_round"` (qwen-agent `--review-round`), `"subagents"` (`--subagents-nudge`) and `"subagents_push"` (`--subagents-push`, the delegation mandate that replaces the nudge when a list names both) picks the list's own; nudging stays the default a `true` or absent field gives. `"probe"` is refused: a `sandbox` role already has a shell. `--deep ROLE` forces both on a role, `--shallow ROLE` forces none. The switches are part of each unit's cache key (a shallow unit's key is the one the released command computed), and a repair round never carries them |
+| `roles.R.deep` | optional, and **the default is depth**: no `deep` field (or `true`) gives the role both switches — on every fence but `none`, which never gets the review round: it has no tools, so `true` or absent gives it no switches at all and a list may name `"subagents"`/`"subagents_push"` only (naming `"review_round"` there is a manifest error) — `"deep": false` is the shallow opt-out, and on a fence with tools a list of `"review_round"` (qwen-agent `--review-round`), `"subagents"` (`--subagents-nudge`) and `"subagents_push"` (`--subagents-push`, the delegation mandate that replaces the nudge when a list names both) picks the list's own; nudging stays the default a `true` or absent field gives. `"probe"` is refused: a `sandbox` role already has a shell. `--deep ROLE` forces both on a tool-bearing role (on a fence-`none` one, only its subagent switch, with one note on stderr); `--shallow ROLE` forces none. The switches are part of each unit's cache key (a shallow unit's key is the one the released command computed), and a repair round never carries them |
 | `knobs` | name -> `int` (>= 0), `float`, `str` or `bool`; a name may not shadow a config key (`depth`, `goal`, `budget`, ...); `--set` also takes the engine knobs `budget`, `retries`, `rounds` and `hours` without their being declared |
 | `presets.D` | may name only declared knobs and the engine knobs, and must set every declared knob plus `budget` (int >= 1, seconds per item), `retries` (int >= 0) and `rounds` (int >= 1 or `"until"`); `hours` is optional (> 0; required with `"until"`) |
 | `default_depth` | names a preset |
@@ -290,8 +290,9 @@ hard deadline stored in `config.json`: no new unit starts after it, items not ru
 logged as `deadline`, synthesis-style `always=True` agents still run, and no new round
 starts. `--rounds until` needs a deadline. Depth is the default, so the two flags are
 requests in opposite directions: `--deep ROLE[,ROLE...]|all` forces a review round and the
-delegation nudge on those roles (a fence-`none` role, which has no tools to delegate
-with, gets the review round only) (stored in `config.json` as `deep`) and `--shallow
+delegation nudge on those roles — a fence-`none` role has no tools, so it never gets the
+review round: `--deep` gives it its subagent switch only and says so once on stderr —
+(stored in `config.json` as `deep`) and `--shallow
 ROLE[,ROLE...]|all` forces neither (stored as `shallow`, and it wins if a role ends up in
 both lists); each is merged into the stored list by a resume, and the units it touches run
 again under their new cache keys. Those stored lists only grow on `--resume`, so a role

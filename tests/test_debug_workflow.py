@@ -119,6 +119,26 @@ def test_a_planted_bug_gets_a_checked_patch(tmp_path, env, capsys):
             assert cwd == repo.resolve() and a[a.index("--toolset") + 1] == "Read,Glob,Grep"
 
 
+def test_writer_tool_call_answer_gets_the_report_repair(tmp_path, env):
+    # the writer's answer IS the report: an answer that opens with a tool call is the
+    # call, not the report, and its repair round asks for the whole markdown report
+    # (WRITE_REPAIR); the repaired body is what lands in report.md
+    repo = git_repo(tmp_path / "repo", BUGGY)
+    (env / "writer.py").write_text(
+        "def answer(p, r):\n"
+        "    return (0, '# Root cause\\n\\nadd subtracts, repaired.\\n') if r"
+        " else (0, '<command name=\"Bash\">ls</command>')\n", encoding="utf-8")
+    rc, run = debug(tmp_path, repo, "--set", "repro=" + REPRO)
+    assert rc == 0                                                   # repaired, not dropped
+    log = (run / "run.log").read_text(encoding="utf-8").splitlines()
+    assert any(l.split("\t")[0] == "write-1" and l.endswith("\trepaired") for l in log)
+    repair = (run / "agents" / "write-1.repair.md").read_text(encoding="utf-8")
+    assert "complete markdown report" in repair
+    assert "answered with a tool call" in repair         # the {why} WRITE_REPAIR carries
+    report = (run / "report.md").read_text(encoding="utf-8")
+    assert report.startswith("# Root cause") and "add subtracts, repaired." in report
+
+
 def test_no_reproduction_exits_4_without_guessing(tmp_path, env):
     repo = git_repo(tmp_path / "repo", BUGGY)
     rc, run = debug(tmp_path, repo, "--set", "repro=true")

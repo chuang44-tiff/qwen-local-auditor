@@ -16,11 +16,16 @@ TOP_KEYS = ("name", "description", "goal", "target", "roles", "knobs", "presets"
             "default_depth")
 ROLE_KEYS = ("file", "fence", "budget_weight", "effort", "deep")
 # qwen-agent depth switches a role may ask for ("deep": true, or no "deep" field at all,
-# = all of them; "deep": false = none of them), in the order qwen-agent is given them:
-# --review-round, --subagents-nudge. A role's default depth keeps nudging; a list may
-# ask for "subagents_push" (--subagents-push, the mandate that replaces the nudge text)
-# instead of or on top of "subagents" -- qwen-agent lets push win.
+# = all of them on a fence with tools; "deep": false = none of them), in the order
+# qwen-agent is given them: --review-round, --subagents-nudge. A role's default depth
+# keeps nudging; a list may ask for "subagents_push" (--subagents-push, the mandate that
+# replaces the nudge text) instead of or on top of "subagents" -- qwen-agent lets push
+# win. Fence "none" has no tools, so it never gets the review round: there, "deep": true
+# or absent means no switches at all (see _deep), and a list names subagents only.
 DEEP_SWITCHES = ("review_round", "subagents")
+# the switches a fence "none" role may still name: no tools to delegate WITH, but the
+# switches themselves are flags qwen-agent acts on, not the role's tools
+SUBAGENT_SWITCHES = ("subagents", "subagents_push")
 _DEEP_LIST = DEEP_SWITCHES + ("subagents_push",)
 # config.json keys a knob would shadow
 RESERVED = ENGINE_KNOBS + ("workflow", "workflow_dir", "goal", "question", "depth",
@@ -89,12 +94,16 @@ def _check_engine(depth, preset):
         raise ManifestError("%s.hours is required when rounds is \"until\"" % where)
 
 
-def _deep(where, value):
+def _deep(where, value, fence):
     """A role's "deep" field as a tuple of switch names: true or absent = all of
     DEEP_SWITCHES (depth is the default; nudging stays the default), false = none (the
-    shallow opt-out), or a list of the switches wanted, "subagents_push" included."""
+    shallow opt-out), or a list of the switches wanted, "subagents_push" included.
+    Fence "none" has no tools, so its review round is off whatever the field says: true
+    or absent gives it no switches at all (a manifest that spells the default out keeps
+    loading), false is the same none, and a list may name the subagent switches only --
+    naming "review_round" there is refused."""
     if value is True:
-        return DEEP_SWITCHES
+        return () if fence == "none" else DEEP_SWITCHES
     if value is False:
         return ()
     if isinstance(value, list):
@@ -113,7 +122,12 @@ def _deep(where, value):
         if v not in _DEEP_LIST:
             raise ManifestError("%s.deep: unknown switch %r (allowed: %s)"
                                 % (where, v, ", ".join(_DEEP_LIST)))
-    return tuple(d for d in _DEEP_LIST if d in value)
+    out = tuple(d for d in _DEEP_LIST if d in value)
+    if fence == "none" and "review_round" in out:
+        raise ManifestError("%s.deep: fence \"none\" has no tools for the review round "
+                            "(a fence \"none\" role may name only %s)"
+                            % (where, " or ".join(SUBAGENT_SWITCHES)))
+    return out
 
 
 def validate(data, folder):
@@ -175,8 +189,9 @@ def validate(data, folder):
         if effort is not None and not (isinstance(effort, str) and _EFFORT.fullmatch(effort)):
             raise ManifestError("%s.effort must be a level name such as low or high" % where)
         # depth is the default: only an explicit "deep": false opts a role out
+        # (and on fence "none" the default is no switches -- there is no review round there)
         deep = spec.get("deep", True)
-        roles[rname] = Role(rname, path, fence, weight, effort, _deep(where, deep),
+        roles[rname] = Role(rname, path, fence, weight, effort, _deep(where, deep, fence),
                             deep_listed=isinstance(deep, list))
     knobs = data["knobs"]
     if not isinstance(knobs, dict):

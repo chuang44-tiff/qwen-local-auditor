@@ -56,6 +56,21 @@ REPAIR_FAILED = "answer still unusable after one repair: "
 _FENCE_JSON = re.compile(r"```json[ \t]*\r?\n(.*?)```", re.S | re.I)
 _FENCE_ANY = re.compile(r"```[^\n]*\r?\n(.*?)```", re.S)
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# how a model writes a tool call when it answers with one instead of the result. An
+# answer whose FIRST non-blank text starts with one of these ("<command name=", the
+# tool_call tag, the function= tag, "<invoke ", "<parameter") returned the call, not
+# the report or block asked for (_refuse_tool_call); the same string later in the text
+# is ordinary content -- a quoted command, a code sample -- and parses normally. Built
+# from its tags without the angle bracket so the guard's own source never reads as one.
+_TOOL_CALL_MARKUP = tuple("<" + t for t in ("command name=", "tool_call", "function=",
+                                            "invoke ", "parameter"))
+
+
+def _refuse_tool_call(text):
+    """ValueError when the answer's first non-blank text is tool-call markup, so the
+    unit takes the repair round; a second such answer fails it the normal way."""
+    if (text or "").lstrip().startswith(_TOOL_CALL_MARKUP):
+        raise ValueError("answered with a tool call instead of the result")
 
 
 def deal(items, max_agents):
@@ -428,6 +443,9 @@ class Swarm:
                     try:
                         if rc == 6:
                             raise ValueError("qwen-agent ran clean but returned an empty result")
+                        # an answer that opens with a tool call is the call, not the
+                        # result: it takes the repair round like any unparseable answer
+                        _refuse_tool_call(rec["result"])
                         data = u.parse(rec["result"])
                     except ValueError as e:
                         if not rec["session"]:
@@ -447,6 +465,9 @@ class Swarm:
                                 (self.agents_dir / ("%s.repair.out" % u.name)).write_bytes(
                                     rec2["result"].encode("utf-8", "surrogateescape"))
                                 try:
+                                    # a repair answer that opens with a tool call failed
+                                    # the same way twice: REPAIR_FAILED, the normal way
+                                    _refuse_tool_call(rec2["result"])
                                     data, status = u.parse(rec2["result"]), "repaired"
                                 except ValueError as e2:
                                     why = REPAIR_FAILED + str(e2)

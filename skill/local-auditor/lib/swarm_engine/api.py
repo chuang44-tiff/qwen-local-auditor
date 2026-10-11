@@ -167,17 +167,20 @@ class Workflow:
     def _deep(self, role):
         """--shallow ROLE forces the opt-out, --deep ROLE (all switches) forces all, and
         otherwise the manifest's role "deep" (default: all); a tuple of names. A
-        fence-none role has no tools to delegate with, so it gets the subagent
-        switches only when its own "deep" list names them."""
+        fence-none role has no tools: its review round is never on, and --deep ROLE
+        gives it the "subagents" switch -- what a list naming "subagents" would give it,
+        since a fence-none role's list may name nothing else (the runner notes this on
+        stderr once per run)."""
         if role in self._role_list("shallow"):
             return ()
         r = self._role(role)
-        switches = manifest.DEEP_SWITCHES if role in self._role_list("deep") else r.deep
+        forced = role in self._role_list("deep")
         if r.fence == "none":
-            listed = r.deep if r.deep_listed else ()
-            if not any(s.startswith("subagents") for s in listed):
-                switches = tuple(s for s in switches if not s.startswith("subagents"))
-        return switches
+            # unforced, the manifest has already kept a fence-none list's subagent
+            # switches and nothing else; forced, the switch is "subagents" itself
+            return (("subagents",) if forced
+                    else tuple(s for s in r.deep if s in manifest.SUBAGENT_SWITCHES))
+        return manifest.DEEP_SWITCHES if forced else r.deep
 
     def _timeout(self, role, items):
         per_item = self.cfg["timeout_per_item"]
@@ -293,20 +296,22 @@ class Workflow:
             u.setup = lambda: staging.copy(src, dest)
 
     def agent(self, name, role, prompt, parse, *, cache=True, always=False, item="goal",
-              stage=None):
+              stage=None, repair=None):
         """One agent; returns parse(text) (parse(text, None, patch) for a sandbox role),
         or None when the unit failed or the deadline kept it from starting -- then
         wf.last_unit says which ("ok", "why", "deadline"). always=True runs it past the
         deadline; cache=False re-runs it on every resume. stage=DIR copies DIR into the
         unit's agents/<unit>/fixtures/ when it starts; `prompt` may then be a callable,
-        prompt(staged) -> str, handed wf.stage_dir(unit) as a native absolute path."""
+        prompt(staged) -> str, handed wf.stage_dir(unit) as a native absolute path.
+        repair=TEXT replaces the swarm's REPAIR text for this unit's repair round
+        ("{why}" in it is replaced by the parse's reason), as in fan_out."""
         uname = self._unit_name(name, 1)
         fence = self._role(role).fence
         wrapped = parse if fence != "sandbox" else (lambda text, batch, patch: parse(text, batch, patch))
         if stage is not None and callable(prompt):
             prompt = prompt(str(self.stage_dir(uname)))
         u = self._unit(uname, role, prompt, self._timeout(role, 2), wrapped, None, cache, always,
-                       stage)
+                       stage, repair=repair)
         (r,) = self._phase([u], role)
         self.last_unit = r
         if r["ok"]:

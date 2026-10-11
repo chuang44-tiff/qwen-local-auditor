@@ -440,24 +440,33 @@ def calls_of(fake):
             if "--preflight-only" not in x]
 
 
-def test_deep_flag_gives_a_role_the_depth_switches(tmp_path, fake):
+def test_deep_flag_gives_a_role_the_depth_switches(tmp_path, fake, monkeypatch):
+    # the role carries tools (fence search: the fake agent never searches, so only the
+    # preflight needs skipping) -- --deep gives it both switches. A fence-none one gets
+    # the subagent switch only (test_deep_all_gives_fence_none_only_subagents_with_a_note).
+    monkeypatch.setenv("QWEN_SWARM_SKIP_SEARCH_CHECK", "1")
+    tool_worker = {"worker": {"file": "roles/worker.md", "fence": "search"}}
     out = tmp_path / "run"
-    assert swarm_main(echo(tmp_path), "g", "--out", str(out), "--deep", "worker") == 0
+    assert swarm_main(echo(tmp_path, manifest={"roles": tool_worker}), "g",
+                      "--out", str(out), "--deep", "worker") == 0
     cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
     assert cfg["deep"] == ["worker"]
-    # a fence-none role has no tools to delegate with: the review round only
-    assert all("--review-round" in a and "--subagents-nudge" not in a for a in calls_of(fake))
+    assert all("--review-round" in a and "--subagents-nudge" in a for a in calls_of(fake))
 
 
-def test_no_depth_flag_leaves_the_config_alone_and_runs_deep(tmp_path, fake):
+def test_no_depth_flag_leaves_the_config_alone_and_runs_deep(tmp_path, fake, monkeypatch):
     # default depth on: neither "deep" nor "shallow" is written unless its flag is given,
-    # and the units get the depth switches (besides their always-present --shallow) anyway
+    # and a role with tools gets the depth switches (besides its always-present
+    # --shallow) anyway
+    monkeypatch.setenv("QWEN_SWARM_SKIP_SEARCH_CHECK", "1")
+    tool_worker = {"worker": {"file": "roles/worker.md", "fence": "search"}}
     out = tmp_path / "run"
-    assert swarm_main(echo(tmp_path), "g", "--out", str(out)) == 0
+    assert swarm_main(echo(tmp_path, manifest={"roles": tool_worker}), "g",
+                      "--out", str(out)) == 0
     cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
     assert "deep" not in cfg and "shallow" not in cfg
-    assert all("--shallow" in a and "--review-round" in a and "--subagents-nudge" not in a
-               for a in calls_of(fake))                 # fence none: nothing to delegate
+    assert all("--shallow" in a and "--review-round" in a and "--subagents-nudge" in a
+               for a in calls_of(fake))
 
 
 def test_manifest_deep_reaches_the_agents(tmp_path, fake):
@@ -475,8 +484,8 @@ def test_deep_flag_names_roles_or_all(tmp_path, fake, capsys, value):
 
 
 def test_deep_on_resume_is_merged_and_reruns_the_units(tmp_path, fake):
-    # default depth on: the role starts out "deep": false, because a role that is already
-    # deep by default has no cache key left for --deep to change
+    # the role opts out ("deep": false), so the first run leaves it plain and the resume's
+    # --deep all opts it in: the units' keys change and they run again
     out = tmp_path / "run"
     shallow_worker = {"worker": {"file": "roles/worker.md", "fence": "none", "deep": False}}
     assert swarm_main(echo(tmp_path, manifest={"roles": shallow_worker}), "g",
@@ -486,9 +495,86 @@ def test_deep_on_resume_is_merged_and_reruns_the_units(tmp_path, fake):
     assert swarm_main("--resume", str(out), "--deep", "all") == 0
     assert json.loads((out / "config.json").read_text(encoding="utf-8"))["deep"] == ["worker"]
     later = calls_of(fake)[first:]
-    assert len(later) == first and all("--review-round" in a for a in later)   # new cache keys
+    # the role is fence none: --deep all gives it only the subagent switch, and that is
+    # still a new cache key, so the units run again
+    assert len(later) == first and all("--subagents-nudge" in a and "--review-round" not in a
+                                       for a in later)
     assert swarm_main("--resume", str(out)) == 0
     assert len(calls_of(fake)) == 2 * first                    # and those stay cached
+
+
+def test_deep_all_gives_fence_none_only_subagents_with_a_note(tmp_path, fake, capsys):
+    # --deep all naming a fence-none role is no usage error: the role gets the subagent
+    # switch (qwen-agent's own flag, not one of the role's tools), and stderr says once
+    # that the review round needs tools the fence does not have -- once per run, not
+    # once per unit
+    out = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "g", "--out", str(out), "--deep", "all") == 0
+    cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
+    assert cfg["deep"] == ["worker"]
+    got = calls_of(fake)
+    assert got and all("--subagents-nudge" in a and "--review-round" not in a for a in got)
+    err = capsys.readouterr().err
+    assert err.count("the review round needs tools") == 1 and "worker" in err
+
+
+def _deep_note(captured_err):
+    return [l for l in captured_err.splitlines() if "review round needs tools" in l]
+
+
+def test_deep_note_skips_roles_that_are_also_shallow(tmp_path, fake, capsys):
+    # --shallow wins over --deep (api._deep gives the role no switches at all), so the
+    # fence-none note never names a role that is shallow for this run: not one --shallow
+    # ROLE names beside --deep all, not one it --shallow all covers, and not one the
+    # shallow list a resumed run has stored already holds
+    roles = {"worker": {"file": "roles/worker.md", "fence": "none"},
+             "scribe": {"file": "roles/scribe.md", "fence": "none"}}
+    wf = echo(tmp_path, manifest={"roles": roles}, roles=("worker", "scribe"))
+    out = tmp_path / "run"
+    assert swarm_main(wf, "g", "--out", str(out), "--deep", "all", "--shallow", "scribe") == 0
+    note = _deep_note(capsys.readouterr().err)
+    assert len(note) == 1 and "worker" in note[0] and "scribe" not in note[0]
+    assert all("--subagents-nudge" in a and "--review-round" not in a for a in calls_of(fake))
+    n = len(calls_of(fake))
+    out2 = tmp_path / "run2"
+    assert swarm_main(wf, "g", "--out", str(out2), "--deep", "all", "--shallow", "all") == 0
+    assert _deep_note(capsys.readouterr().err) == []             # every role: no note at all
+    got2 = calls_of(fake)[n:]
+    assert got2 and all("--subagents-nudge" not in a for a in got2)
+    out3 = tmp_path / "run3"
+    assert swarm_main(wf, "g", "--out", str(out3), "--shallow", "all") == 0
+    capsys.readouterr()
+    assert swarm_main("--resume", str(out3), "--deep", "all") == 0
+    assert _deep_note(capsys.readouterr().err) == []     # the stored shallow list wins
+    assert json.loads((out3 / "config.json").read_text(encoding="utf-8"))["deep"] == \
+        ["scribe", "worker"]                             # merged, yet note-free and shallow
+    out4 = tmp_path / "run4"
+    assert swarm_main(wf, "g", "--out", str(out4)) == 0
+    capsys.readouterr()
+    # a --shallow given on the resume line itself is shallow for this run too: it names
+    # only the role it covers, and the other one is still noted
+    assert swarm_main("--resume", str(out4), "--deep", "all", "--shallow", "scribe") == 0
+    note = _deep_note(capsys.readouterr().err)
+    assert len(note) == 1 and "worker" in note[0] and "scribe" not in note[0]
+
+
+def test_resume_deep_note_names_only_new_roles(tmp_path, fake, capsys):
+    # a resume --deep notes only the roles it newly opts in: one the stored deep list
+    # already holds was noted by the call that put it there, so a repeat resume is quiet
+    roles = {"worker": {"file": "roles/worker.md", "fence": "none"},
+             "scribe": {"file": "roles/scribe.md", "fence": "none"}}
+    wf = echo(tmp_path, manifest={"roles": roles}, roles=("worker", "scribe"))
+    out = tmp_path / "run"
+    assert swarm_main(wf, "g", "--out", str(out), "--deep", "worker") == 0
+    note = _deep_note(capsys.readouterr().err)
+    assert len(note) == 1 and "worker" in note[0] and "scribe" not in note[0]
+    assert swarm_main("--resume", str(out), "--deep", "all") == 0
+    note = _deep_note(capsys.readouterr().err)
+    assert len(note) == 1 and "scribe" in note[0] and "worker" not in note[0]
+    assert json.loads((out / "config.json").read_text(encoding="utf-8"))["deep"] == \
+        ["scribe", "worker"]
+    assert swarm_main("--resume", str(out), "--deep", "all") == 0
+    assert _deep_note(capsys.readouterr().err) == []
 
 
 def test_deep_research_compat_does_not_take_deep(tmp_path, fake):

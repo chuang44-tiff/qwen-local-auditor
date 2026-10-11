@@ -83,11 +83,11 @@ def _part_b_key(role_text, prompt, toolset, grants, web, mcp_text, effort, deep=
     return hashlib.sha256((blob + deep).encode("utf-8")).hexdigest()
 
 
-# default depth on: a research role with no "deep" field is deep now, so its key carries
-# the switch list; the fan-out roles (searcher, reader, verifier) say "deep": false and
-# their keys stay byte-identical to the released ones
-DEEP = "\ndeep:review_round"            # fence none: no subagent switch
-DEEP_ROLES = {"scoper": DEEP, "synthesizer": DEEP}
+# default depth on, and research takes none of it: the fan-out roles (searcher, reader,
+# verifier) say "deep": false, and scoper, planner and synthesizer are fence "none",
+# which has no tools and never gets the review round. No unit's key carries a switch
+# suffix, so every key stays byte-identical to the released one.
+DEEP_ROLES = {}
 
 
 def _run(tmp_path, depth):
@@ -129,9 +129,9 @@ def test_one_round_run_folder_matches_the_released_one(tmp_path, env, capsys, de
 
 
 def test_one_round_cache_keys_match_the_released_ones(tmp_path, env):  # noqa: F811
-    # the fence flags and the key blob are unchanged, so a run folder the released
-    # command wrote resumes with every shallow unit still a cache hit; the roles that are
-    # deep by default now (DEEP_ROLES) have new keys and run again
+    # the fence flags and the key blob are unchanged and no research role is deep
+    # (DEEP_ROLES is empty: the fan-out roles opt out, the rest are fence "none"), so a
+    # run folder the released command wrote resumes with every unit still a cache hit
     rc, run = _run(tmp_path, "quick")
     assert rc == 0
     agents = run / "agents"
@@ -146,7 +146,7 @@ def test_one_round_cache_keys_match_the_released_ones(tmp_path, env):  # noqa: F
         role, toolset, grants, web, mcp = fences[name.split("-")[0]]
         role_text = (rs.ROLES / ("%s.md" % role)).read_text(encoding="utf-8")
         prompt = (agents / ("%s.prompt.md" % name)).read_text(encoding="utf-8")
-        # default depth on: only a role that is deep by now gains the switch suffix
+        # no research role is deep, so no key carries the switch suffix (DEEP_ROLES)
         want = _part_b_key(role_text, prompt, toolset, grants, web, mcp, None,
                            DEEP_ROLES.get(role, ""))
         assert json.loads(rec.read_text(encoding="utf-8"))["key"] == want, name

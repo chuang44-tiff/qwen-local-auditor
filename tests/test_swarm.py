@@ -421,6 +421,62 @@ def test_repair_failure_still_counts_tokens(tmp_path, fake, monkeypatch):
     assert res[0]["tokens"] == 220 and s.tokens == 220   # the repair record counts on any rc too
 
 
+def test_tool_call_answer_gets_a_repair_round(tmp_path, fake):
+    # an answer that OPENS with a tool call returned the call, not the block asked for:
+    # the unit takes the repair round like any other unparseable answer, and the repair
+    # prompt says what went wrong
+    (fake / "worker.py").write_text(
+        "def answer(p, resumed):\n"
+        "    return (0, '```json\\n[1]\\n```') if resumed"
+        " else (0, '<command name=\"Bash\">ls</command>')\n")
+    s = swarm(tmp_path)
+    res = s.run_phase([unit(tmp_path, "a")])
+    assert res[0]["ok"] and res[0]["data"] == [1]
+    calls = [json.loads(x) for x in (fake / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 2 and "--resume" not in calls[0] and "--resume" in calls[1]
+    repair = (tmp_path / "run" / "agents" / "a.repair.md").read_text(encoding="utf-8")
+    assert "tool call" in repair
+    assert (tmp_path / "run" / "run.log").read_text(encoding="utf-8").rstrip().endswith("\trepaired")
+
+
+def test_tool_call_repair_answer_fails_the_unit(tmp_path, fake):
+    # a repair answer that opens with a tool call is the same failure twice: the unit
+    # is dropped with the ordinary "still unusable after one repair" reason
+    (fake / "worker.py").write_text(
+        "def answer(p, r):\n    return 0, '<tool_call>{\"tool\": \"search\"}</tool_call>'\n")
+    s = swarm(tmp_path)
+    res = s.run_phase([unit(tmp_path, "a")])
+    assert not res[0]["ok"] and "still unusable after one repair" in res[0]["why"]
+    assert "tool call" in res[0]["why"]
+    calls = [json.loads(x) for x in (fake / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 2 and "--resume" in calls[1]
+    assert s.dropped == 1
+
+
+def test_tool_call_text_mid_answer_parses(tmp_path, fake):
+    # the markup condemns an answer only by how it opens: the same tag later in the
+    # text is a quoted command, ordinary content the parse passes straight through
+    (fake / "worker.py").write_text(
+        "def answer(p, r):\n"
+        "    return 0, ('I ran <command name=\"Bash\">ls</command> first.\\n'\n"
+        "                '```json\\n[5]\\n```')\n")
+    s = swarm(tmp_path)
+    res = s.run_phase([unit(tmp_path, "a")])
+    assert res[0]["ok"] and res[0]["data"] == [5]
+    assert len((fake / "calls.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+@pytest.mark.parametrize("opening", ['<command name="a">', '<tool_call name="s">',
+                                     '<function="s">', '\n  <invoke name="s">',
+                                     ' \t <parameter name="q">'])
+def test_tool_call_guard_reads_the_first_non_blank_text(opening):
+    # every markup tag condemns an answer however much whitespace it hides behind;
+    # the same tag after any real text is ordinary content
+    with pytest.raises(ValueError):
+        sw._refuse_tool_call(opening)
+    sw._refuse_tool_call("here is the report\n" + opening)
+
+
 def test_cache_miss_when_prompt_changes(tmp_path, fake):
     swarm(tmp_path).run_phase([unit(tmp_path, "a")])
     calls = fake / "calls.jsonl"

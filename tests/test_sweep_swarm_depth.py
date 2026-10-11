@@ -87,9 +87,11 @@ def test_sweep_shallow_is_documented_in_the_help(tmp_path):
 
 # ---------------------------------------------------------------- the swarm side
 
-def role_workflow(tmp_path, deep=None):
-    """The manifest of a one-role workflow: the role's "deep" field only when given."""
-    worker = {"file": "roles/worker.md", "fence": "none"}
+def role_workflow(tmp_path, deep=None, fence="search"):
+    """The manifest of a one-role workflow: the role's "deep" field only when given.
+    Fence "search" by default -- a fence with tools, whose depth these tests are about;
+    a fence "none" role never gets the review round at all."""
+    worker = {"file": "roles/worker.md", "fence": fence}
     if deep is not None:
         worker = dict(worker, deep=deep)
     return manifest.load(make_workflow(tmp_path / "wfs", {"roles": {"worker": worker}}))
@@ -105,19 +107,36 @@ def unit_from(tmp_path, role, mcp=None):
                           timeout=60, backoff=0)
 
 
-def test_swarm_role_default_is_deep(tmp_path, fake):
+def test_swarm_role_default_is_deep(tmp_path, fake, monkeypatch):
     # a role that says nothing about depth is deep: the unit is handed --shallow (so
-    # qwen-agent implies nothing) and then the review round. This role's fence is
-    # none -- no tools at all -- so it gets no delegation switch.
+    # qwen-agent implies nothing) and then the review round and the delegation nudge.
+    # The role's fence is search -- a fence none has no tools and never gets the review
+    # round at all (test_fence_none_roles_run_plain_by_default).
+    monkeypatch.setenv("QWEN_SWARM_SKIP_SEARCH_CHECK", "1")   # the fake never searches
     out = tmp_path / "run"
-    folder = make_workflow(tmp_path / "wfs")
+    folder = make_workflow(tmp_path / "wfs",
+                           {"roles": {"worker": {"file": "roles/worker.md", "fence": "search"}}})
     assert runner.main(agent_args() + [str(folder), "g", "--out", str(out)]) == 0
     got = calls(fake)
     assert got, "no unit ran"
     for argv in got:
         assert argv.count("--shallow") == 1, argv
-        assert argv.index("--shallow") < argv.index("--review-round"), argv
-        assert not [a for a in argv if a.startswith("--subagents")], argv
+        assert argv.index("--shallow") < argv.index("--review-round")
+        assert argv.index("--review-round") < argv.index("--subagents-nudge"), argv
+        assert "--probe" not in argv and "--deep" not in argv, argv
+
+
+def test_fence_none_roles_run_plain_by_default(tmp_path, fake):
+    # fence none has no tools: depth is nothing to switch on there. The unit is still
+    # handed --shallow, but no review round and no nudge follow it.
+    out = tmp_path / "run"
+    folder = make_workflow(tmp_path / "wfs")           # BASE's worker: fence none
+    assert runner.main(agent_args() + [str(folder), "g", "--out", str(out)]) == 0
+    got = calls(fake)
+    assert got, "no unit ran"
+    for argv in got:
+        assert argv.count("--shallow") == 1, argv
+        assert not [a for a in argv if a.startswith(("--subagents", "--review-round"))], argv
         assert "--probe" not in argv and "--deep" not in argv, argv
 
 
@@ -146,7 +165,7 @@ def test_swarm_deep_default_and_list_reach_the_same_argv(tmp_path):
 
 
 TWO_ROLES = {"worker": {"file": "roles/worker.md", "fence": "none"},
-             "voter": {"file": "roles/voter.md", "fence": "none"}}
+             "voter": {"file": "roles/voter.md", "fence": "search"}}
 TWO_SCRIPT = '''
 def run(wf):
     items = [{"id": "I%d" % i} for i in range(1, wf.knob("items") + 1)]
@@ -161,7 +180,8 @@ def run(wf):
 '''
 
 
-def test_swarm_cli_shallow_merges_on_resume(tmp_path, fake):
+def test_swarm_cli_shallow_merges_on_resume(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("QWEN_SWARM_SKIP_SEARCH_CHECK", "1")   # the voter's search fence
     folder = make_workflow(tmp_path / "wfs", {"roles": TWO_ROLES}, script=TWO_SCRIPT,
                            roles=("worker", "voter"))
     out = tmp_path / "run"
@@ -231,17 +251,22 @@ def builtin_json(name):
 
 
 def test_research_fanout_roles_are_shallow():
-    # the high fan-out roles answer once (each is one more request to the model), and the
-    # roles that shape the report keep the default depth
+    # the high fan-out roles answer once (each review round is one more request to the
+    # model), and the roles that shape the report are fence "none": with no tools there
+    # is no review round for them either, so a research run carries no depth switch at
+    # all on any role
     doc = builtin_json("research")
     for role in ("searcher", "reader", "verifier"):
         assert doc["roles"][role]["deep"] is False, role
     m = manifest.load(runner.BUILTIN / "research")
     for role in ("searcher", "reader", "verifier"):
-        assert m.roles[role].deep == (), role
+        assert m.roles[role].deep == (), role                  # spelled-out opt-out
     for role in ("scoper", "planner", "synthesizer"):
-        assert m.roles[role].deep == manifest.DEEP_SWITCHES, role
-    # debug has no high fan-out role: every one of its roles keeps the new default
+        assert m.roles[role].fence == "none", role             # no tools ...
+        assert m.roles[role].deep == (), role                  # ... so no switches
+    # debug has no high fan-out role: every role with tools keeps the default depth,
+    # and its two fence-none roles get nothing
     debug = manifest.load(runner.BUILTIN / "debug")
     assert "deep" not in builtin_json("debug")["roles"]["prober"]
-    assert all(r.deep == manifest.DEEP_SWITCHES for r in debug.roles.values())
+    assert all(r.deep == (manifest.DEEP_SWITCHES if r.fence != "none" else ())
+               for r in debug.roles.values())

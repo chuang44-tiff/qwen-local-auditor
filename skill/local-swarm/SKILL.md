@@ -85,7 +85,8 @@ Rules that keep a workflow resumable:
 - Depth is the default: an agent reviews its own answer and is nudged to delegate unless
   its role says `"deep": false` (what a high fan-out role says), `--deep ROLE` forces
   depth on and `--shallow ROLE` opts out. Mark a role that fans out over many items
-  shallow; the review round is a second call per unit.
+  shallow: the review round is a second call per unit. A fence `none` role has no tools,
+  so it never gets the review round; `--deep` gives it only the subagent nudge.
 
 Before launching anything (step 3), run
 
