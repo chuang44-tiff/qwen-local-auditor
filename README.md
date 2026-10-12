@@ -103,9 +103,13 @@ glance, and the measured failure modes: [reference/limits.md](skill/local-audito
 Claude model for advice on a hard decision through your own `claude` login, at most 4 calls
 per run; questions and the files the session attaches leave your machine, and nothing else
 changes. The idea comes from Claude's own [advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
-where a cheaper executor consults a stronger model at decision points. It is not proven to
-help: Qwen was never trained to use an advisor and rarely calls it; in our audit A/B it found
-2 more of 51 known bugs, below our bar ([details](skill/local-auditor/reference/qwen-agent.md#advisor---advisor-model-experimental)).
+where a cheaper executor consults a stronger model at decision points. It shows no major
+benefit yet: in our audit A/B it found 2 more of 51 known bugs, below our bar, and on hard
+benchmark tasks the coder scored the same with and without it. Qwen was never trained to use
+an advisor, so it asks at the wrong time and does not reliably act on the answer. Anthropic
+reports a similar consult-rate problem with its own Haiku and Sonnet executors. The advisor
+is not a silver bullet; making it pay off is major work on the executor side ([benchmark](skill/local-auditor/reference/benchmark.md#the-advisor),
+[details](skill/local-auditor/reference/qwen-agent.md#advisor---advisor-model-experimental)).
 
 `qwen-swarm ui-test` re-checks each FAIL/BLOCKED row with Claude **by default** (`confirm=claude`,
 opus, up to `confirm_max` rows): the scenario, the tester's report and screenshots, the fixtures
@@ -116,8 +120,8 @@ and a browser on the app's URL go to Claude through your own `claude` login;
 
 One local model on one workstation GPU, 20 Aider polyglot exercises: Claude Code alone
 solved 12-14/20 with a retry, `qwen-agent --until-done` solved **18/20** in two runs a week
-apart, and 17/20 in a third on a later release. `--until-done` runs the coding
-task in rounds, each new round seeing the previous round's test failures, until the task
+apart, and 17/20 in a third on a later release; on 15 hard Terminal-Bench 2.0 tasks it
+solved 13/15. `--until-done` runs the coding task in rounds, each new round seeing the previous round's test failures, until the task
 file's checklist passes or `--max-rounds` is reached. The gain is the loop, not the
 model; method, caveats and numbers: [reference/benchmark.md](skill/local-auditor/reference/benchmark.md).
 

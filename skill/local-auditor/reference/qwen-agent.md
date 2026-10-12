@@ -484,11 +484,13 @@ right answer is.
 Inspired by Claude's [advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool):
 a cheaper model does the work and asks a stronger one at decision points. Here the local
 Qwen session is the executor. It is experimental and not proven effective: Qwen is not
-trained to use an advisor, so it decides on its own when to ask and rarely does. In a blind
-audit A/B it found 2 more of 51 known bugs, which is below our bar of 3. Its calls helped
-classify findings, not find them. In coder runs (`--until-done`) it asked twice in 22 runs,
-and both answers changed or should have changed the outcome. Read the advisor log: the
-advice is not binding, and the session can ignore it.
+trained to use an advisor, so it decides on its own when to ask; the session's note tells it
+to ask readily and to act on the answer. In a blind audit A/B it found 2 more of 51 known
+bugs, which is below our bar of 3. Its calls helped classify findings, not find them. On 15
+hard Terminal-Bench tasks the coder (`--until-done`) asked 11 times and scored 13/15, the
+same as without the advisor, for more tokens: it asked on tasks it solves alone, not on the
+ones it cannot, and did not reliably act on the answer ([benchmark](benchmark.md#the-advisor)). Read
+the advisor log: the advice is not binding, and the session can ignore it.
 
 The session gets one more tool, `ask`: it sends one self-contained question, the evidence,
 and up to 5 files (40 KB each, 120 KB in all, inside the working directory) to a Claude
