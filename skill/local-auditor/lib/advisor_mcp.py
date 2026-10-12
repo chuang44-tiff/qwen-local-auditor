@@ -39,11 +39,13 @@ TOOL = {
     "name": "ask",
     "description": (
         "Ask a stronger model ONE self-contained question. Best use: send a plan or a change "
-        "and ask what input or situation breaks it. Also ask when stuck (a check still fails "
-        "after two fix attempts, or evidence contradicts) or for a fact about a library, tool "
-        "or OS you cannot look up. It sees only what you send: the question, the evidence, and "
-        "up to 5 files (paths inside the working directory). It cannot search the codebase. "
-        "Verify any claim in its answer before relying on it. Calls are limited per run."),
+        "and ask what input or situation breaks it. Also ask when you are unsure which approach "
+        "to take, when a check or test fails and you do not know why, when your approach is not "
+        "converging (the same failure after two attempts), or when the harness reports a failure "
+        "you do not understand. It sees only what you send: the question, the evidence, and up to "
+        "5 files (paths inside the working directory). It cannot search the codebase. Take its "
+        "answer seriously: act on each concrete finding and run the check it names; if you "
+        "disagree, say why with evidence or ask a follow-up. Calls are limited per run."),
     "inputSchema": {"type": "object",
                     "properties": {
                         "question": {"type": "string", "description": "one self-contained question"},

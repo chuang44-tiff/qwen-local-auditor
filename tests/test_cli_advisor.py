@@ -222,5 +222,7 @@ def test_ask_note_names_the_moments_to_ask(tmp_path, server, fake):
     assert r.returncode == 0, r.stderr
     note = sys_prompt(calls(tmp_path)[0][0])
     assert "what input or situation breaks it" in note
-    assert "after two fix attempts" in note
-    assert "cannot look up here" in note
+    assert "unsure which approach to take" in note
+    assert "not converging" in note
+    assert "a failure you do not understand" in note
+    assert "Take its answer seriously" in note

@@ -515,13 +515,17 @@ the advisor never edits or runs anything.
 - Every question and answer is appended to `advisor-<stamp>-<pid>.md` in `QWEN_OUTDIR` when you set it, else in `~/.cache/qwen-agent/advisor/` (never the tree under audit).
   `--json` adds `qwen_agent.advisor` = `{model, budget, calls, answered, seconds, cost_usd,
   unavailable, log}`.
-- The system note names three moments to ask: stuck (a check or test still fails after two fix
-  attempts, or two pieces of evidence contradict each other); before finishing work that handles
-  network requests, untrusted input (parsing, URLs, file paths), threads, timeouts or retries,
-  deleting files, or permissions -- asking what breaks the change; and a fact about a library,
-  tool or OS it cannot look up. It asks in the "what breaks this?" form: send the plan or change
-  and ask what input or situation breaks it. It still keeps out of mechanical work (aligning
-  docs, renaming, formatting). Nothing is mandatory: the session decides whether to ask.
+- The system note tells the session to ask readily -- a question costs little, a wrong approach can
+  cost the whole round -- when it is unsure which approach to take, when a check or test fails and
+  it does not know why, when its approach is not converging (the same failure after two attempts, or
+  results far from the target), when the harness reports a failure it does not understand, and
+  before finishing work that handles network requests, untrusted input (parsing, URLs, file paths),
+  threads, timeouts or retries, deleting files, or permissions. It asks in the "what breaks this?"
+  form: send the plan or change and ask what input or situation breaks it. It is told to act on
+  each concrete finding and run the check or test the advice names, and when it disagrees to say
+  why with evidence or ask a follow-up rather than set the advice aside. It keeps out of mechanical
+  work (aligning docs, renaming, formatting). Nothing is mandatory: the session decides whether to
+  ask.
 - Files that look like secrets are never attached, even inside the working directory:
   `.env*`, `*.env`, `id_*`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, names with
   "credential" or "secret", key and certificate files (`.pem`, `.key`, `.p12`, `.pfx`, `.jks`,
