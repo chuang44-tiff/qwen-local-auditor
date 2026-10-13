@@ -23,7 +23,7 @@ import time
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import checks, decisions, probe, taskfile, testrun  # noqa: E402
+from lib import advisor_mcp, checks, decisions, probe, taskfile, testrun  # noqa: E402
 from lib.builders import history  # noqa: E402
 
 EXIT_OK, EXIT_USAGE, EXIT_APIERR, EXIT_HARNESS = 0, 2, 4, 8
@@ -412,6 +412,154 @@ def _advisor_lines(advisor):
             "unavailable: %d" % sum(1 for r in recs if r.get("unavailable"))]
 
 
+# --advisor-triggers fail: the supervisor's own advisor call after a failing round.
+HARNESS_Q = ("The agent's last round failed the checks below. What is the most likely cause, "
+             "and what should it change or check next? Name the specific mistake if you can "
+             "see it.")
+ADVICE_BLOCK = """
+
+# Advice from a stronger model on these failures
+
+{advice}
+
+Address each point in your reply: act on it and run the check it names, or say why not,
+with evidence."""
+_CUT_MARK = 40                      # room for "\n[... N characters cut]"
+_ATTACH_MAX = 1000000               # never attach a file this big (large repositories can hold model files)
+
+
+def _cut(text, n):
+    if len(text) <= n:
+        return text
+    if n <= 0:
+        return "[... %d characters cut]" % len(text)
+    return text[:n] + "\n[... %d characters cut]" % (len(text) - n)
+
+
+def harness_context(fails, diff, task, limit=advisor_mcp.MAX_CONTEXT):
+    """The failure call's context: failing output first (it is what the advice is about),
+    then the round's diff, then the task, each cut to fit `limit` in that priority."""
+    heads = ("FAILING CHECKS:\n", "\n\nDIFF SINCE THE START OF THE RUN:\n", "\n\nTHE TASK:\n")
+    room = limit - sum(len(h) for h in heads) - 3 * _CUT_MARK
+    f = _cut(fails, min(6000, room))
+    t = _cut(task, max(0, min(2000, room - len(f))))
+    d = _cut(diff, max(0, room - len(f) - len(t))) if diff else "(no changes)"
+    return (heads[0] + f + heads[1] + d + heads[2] + t)[:limit]
+
+
+def changed_files(repo, start, n=5):
+    """Up to n files the run changed, most-changed first: tracked text changes from
+    `git diff --numstat` (binary ones show '-' and are skipped), then untracked text files
+    under _ATTACH_MAX bytes. Relative to repo. Secret-looking paths are never candidates:
+    an attachment is the file's whole content, which is exactly what must not leave."""
+    rows = []
+    for line in _git(repo, "diff", "--numstat", start).splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            rows.append((int(parts[0]) + int(parts[1]), parts[2]))
+    rows.sort(key=lambda x: -x[0])
+    out = [p for _, p in rows if not advisor_mcp.looks_secret(p)]
+    for rel in _git(repo, "ls-files", "--others", "--exclude-standard").splitlines():
+        if advisor_mcp.looks_secret(rel):
+            continue
+        path = os.path.join(repo, rel)
+        try:
+            if os.path.getsize(path) > _ATTACH_MAX:
+                continue
+            with open(path, "rb") as fh:
+                if b"\0" in fh.read(8192):
+                    continue
+        except OSError:
+            continue
+        out.append(rel)
+    return out[:n]
+
+
+def _check_files(items, failing, repo):
+    """The files a failing check itself runs: words of a failing `cmd`/`test` check's
+    argument that name an existing regular file of the repo (relative, no `..`, no
+    secret). The script that just failed is the first thing the advice should see."""
+    by_index = {it.index: it for it in items}
+    out = []
+    for c in failing:
+        it = by_index.get(c.index)
+        if it is None or it.kind not in ("cmd", "test"):
+            continue
+        # Every cmd/test argument reaching here is splittable: taskfile.parse checks
+        # cmd arguments with shlex, and a test argument that would not split already
+        # failed in run_checks -- long before this failing item existed.
+        for tok in shlex.split(it.arg):
+            if (tok in out or os.path.isabs(tok)
+                    or ".." in tok.replace("\\", "/").split("/")
+                    or advisor_mcp.looks_secret(tok)):
+                continue
+            if os.path.isfile(os.path.join(repo, tok)):
+                out.append(tok)
+    return out
+
+
+def _attachments(check_files, repo, start, n=5):
+    """The failure call's files: the failing checks' own scripts first, then what the
+    run changed, deduplicated, at most n in all (advisor_mcp takes no more than 5)."""
+    out = []
+    for p in list(check_files) + changed_files(repo, start):
+        if p not in out:
+            out.append(p)
+    return out[:n]
+
+
+def harness_advice(model, state_dir, budget, log_path, repo, start, fails, task, check_files=()):
+    """One failure call through advisor_mcp.ask, on the harness's OWN state dir and
+    budget (the local model's count is never touched). (advice or None, info).
+
+    No secret leaves the machine: every changed path advisor_mcp.looks_secret names is
+    kept out of the diff (by pathspec) and out of the new-file list, and _attachments
+    gets the files the failing checks name (check_files) ahead of the run's changes."""
+    env = dict(os.environ)
+    env.update({"QA_ADVISOR_MODEL": model, "QA_ADVISOR_STATE": state_dir,
+                "QA_ADVISOR_MAX_CALLS": str(budget),
+                "QA_ADVISOR_TIMEOUT": os.environ.get("QWEN_ADVISOR_TIMEOUT") or "600",
+                "QA_ADVISOR_LOG": log_path or "",
+                "QA_ADVISOR_CLAUDE": (os.environ.get("QWEN_ADVISOR_CLAUDE")
+                                      or os.environ.get("QWEN_CLAUDE_BIN") or "claude")})
+    try:
+        # -z, not --name-only's lines: porcelain would octal-quote a non-ASCII name
+        # (core.quotePath), and an escaped pathspec matches nothing -- the secret it
+        # names would stay in the diff.
+        secrets = [p for p in _git(repo, "diff", "--name-only", "-z", start).split("\0")
+                   if p and advisor_mcp.looks_secret(p)]
+        # A magic pathspec's body matches as a GLOB: without literal, a secret named
+        # key[1].pem would not match :(exclude)key[1].pem ([1] is a one-char class).
+        spec = ["--"] + [":(exclude,literal)%s" % p for p in secrets] if secrets else []
+        diff = _git(repo, "diff", start, *spec)
+        if secrets:
+            # Trust but verify: bytes no text can carry (a name that is not valid
+            # UTF-8 reaches this process with replacements) defeat even a literal
+            # pathspec. If a secret-named file would still sit in the diff, no diff
+            # goes out at all rather than that file's content.
+            left = [p for p in _git(repo, "diff", "--name-only", "-z", start, *spec).split("\0")
+                    if p and advisor_mcp.looks_secret(p)]
+            if left:
+                diff = "(diff omitted: a changed file with a secret name could not be excluded)"
+        new = [p for p in _git(repo, "ls-files", "-z", "--others", "--exclude-standard").split("\0")
+               if p and not advisor_mcp.looks_secret(p)]
+        if new:
+            diff += "\nNew files (not shown above):\n" + "\n".join(new) + "\n"
+        text = advisor_mcp.ask(HARNESS_Q, harness_context(fails, diff, task),
+                               _attachments(check_files, repo, start), env, repo)
+    except Exception as e:      # Refused, Unavailable, anything: the loop goes on without it
+        return None, {"called": False, "skipped_reason": "%s: %s" % (type(e).__name__, e),
+                      "cost_usd": None}
+    cost = None
+    try:
+        with open(os.path.join(state_dir, "calls.jsonl"), encoding="utf-8") as fh:
+            lines = [ln for ln in fh if ln.strip()]
+        cost = json.loads(lines[-1]).get("cost_usd") if lines else None
+    except (OSError, ValueError):
+        pass
+    return text, {"called": True, "skipped_reason": None, "cost_usd": cost}
+
+
 def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, start, repo, denied=(),
             agent_err="", notes=(), tools=None, transcript_found=False, switches=(), depth=None,
             advisor=None):
@@ -431,6 +579,26 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
                   ["| %s | %d |" % (name, cnt) for name, cnt in
                    sorted((tools or {}).items(), key=lambda kv: (-kv[1], kv[0]))]
                   ) if transcript_found else ["(no transcript found)"]
+    # The harness's own failure calls, one record per attempt (advice and reply None
+    # when the next round never ran). `calls` counts only the records whose ask went
+    # out; the attempts that were skipped without a call are `skipped`, so the money
+    # line never hides a round that went unasked. No trigger, no file, no lines:
+    # without the failure trigger the Advisor section reads exactly as before.
+    # Unreadable records are no records -- a reporting gap, never a run failure.
+    harness_path = os.path.join(run_dir, "advisor-harness.jsonl")
+    harness_seen = os.path.isfile(harness_path)
+    harness_recs = []
+    if harness_seen:
+        try:
+            with open(harness_path, encoding="utf-8") as fh:
+                harness_recs = [json.loads(line) for line in fh if line.strip()]
+        except (OSError, ValueError):
+            harness_recs = []
+    harness_called = sum(1 for r in harness_recs if r.get("called"))
+    harness_lines = (["harness calls: %d" % harness_called,
+                      "harness skipped: %d" % (len(harness_recs) - harness_called),
+                      "harness cost_usd: %g" % sum(r.get("cost_usd") or 0 for r in harness_recs)]
+                     if harness_seen else [])
     text = "\n".join([
         "# until-done report", "",
         "stop: %s (exit %d)" % (reason, code),
@@ -444,7 +612,15 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
         "## Checklist", "", "| # | item | status | evidence |", "|---|---|---|---|", *rows, "",
         "## Tool use", "", *tool_lines, "",
         # Only an --advisor run gets the section: what the option spent, over every round.
-        *(["## Advisor", "", *_advisor_lines(advisor), ""] if advisor else []),
+        # The harness lines count its own failure calls from the run's record file; they
+        # never mix with the agent's counts above (a separate budget on a separate dir).
+        *(["## Advisor", "", *_advisor_lines(advisor), *harness_lines, ""] if advisor else []),
+        *(["### Advice after failing rounds", "",
+           *["- round %d: %s\n\n  advice:\n\n  %s\n\n  next reply (start):\n\n  %s\n" % (
+               h["round"], "asked" if h["called"] else "skipped (%s)" % h["skipped_reason"],
+               (h.get("advice") or "-").replace("\n", "\n  "),
+               (h.get("reply") or "-").replace("\n", "\n  ")) for h in harness_recs]]
+          if harness_recs else []),
         "## Decision log", "", decisions.render(log), "",
         "## Diff", "", "```", _git(repo, "diff", "--stat", start).rstrip(), "```",
         *(["new files:"] + ["  %s" % f for f in new] if new else []),
@@ -580,6 +756,7 @@ def _run(o):
     mine = False
     run_dir = session = None
     advisor_dir = None                # --advisor: this run's ONE advisor state dir (finally removes it)
+    pending = None                    # the harness record waiting for the next round's reply
     report_path = None                # the report.md of this run, once written (what a
                                       # late cleanup failure adds its note to)
     rounds = tokens = 0
@@ -647,6 +824,18 @@ def _run(o):
         Read when the report is written and not after: the finally removes the directory,
         and every path that leaves this run (including the os._exit one) reports first."""
         return (o.advisor, advisor_dir) if advisor_dir is not None else None
+
+    def flush_pending():
+        """Write the pending harness record to run_dir/advisor-harness.jsonl. The loop
+        calls it when the round the record asks about has answered (reply set), and every
+        path that writes the report calls it first: a failure call whose next round never
+        ran is still a call this run made, and report.md must say so."""
+        nonlocal pending
+        if pending is not None:
+            with open(os.path.join(run_dir, "advisor-harness.jsonl"), "a",
+                      encoding="utf-8") as fh:
+                fh.write(json.dumps(pending) + "\n")
+            pending = None
     try:
         # The handler in _stop_on_signal is not enough on its own: a signal
         # landing between the mkdir and `mine = True` would run the cleanup
@@ -696,6 +885,13 @@ def _run(o):
             print("until-done: advisor %s via your claude login for every coder round; "
                   "at most %s calls across the whole run" % (o.advisor, _advisor_budget()),
                   file=sys.stderr)
+            if "fail" in o.advisor_triggers:
+                # The harness asks on its OWN state dir and budget, inside the run's:
+                # one sweep takes both, and the local model's call count is untouched.
+                os.makedirs(os.path.join(advisor_dir, "harness"))
+                print("until-done: the harness asks %s after each failing round "
+                      "(at most %d calls, besides the agent's own)"
+                      % (o.advisor, max(0, o.max_rounds - 1)), file=sys.stderr)
         if o.probe:
             # probe.check() and probe.remove() only accept a run folder carrying create()'s
             # marker; this run owns run_dir, so drop it in before the sandbox under it.
@@ -740,6 +936,12 @@ def _run(o):
                            # every coder round -- and the review round, which is a round --
                            # asks the same advisor through the same state dir
                            advisor=advisor_info())
+            if pending is not None:
+                # This round is the answer the pending failure call was waiting for:
+                # record what it replied (capped -- the log is a summary, not an archive)
+                # and the record is complete.
+                pending["reply"] = (r.get("result") or "")[:1500]
+                flush_pending()
             # A round killed in the middle of an ask leaves the advisor's lock in the
             # state dir, and advisor_mcp breaks a stale one only after wait + 60 s
             # (~660 s with the default timeout): every later round would sit on it that
@@ -884,7 +1086,34 @@ def _run(o):
                          "No shell is available this run; use Read, Grep and Glob.")
                 feedback += ("\n%d Bash calls were denied last round. %s"
                              % (len(r["denied"]), fence))
+            if advisor_dir is not None and "fail" in o.advisor_triggers and rounds < o.max_rounds:
+                # The last round follows this prompt, so ask the advisor about its
+                # failure now: the advice rides into the next prompt, and the record
+                # waits for that round's reply (flushed above, or by flush_pending when
+                # the loop ends). A skipped call leaves the plain NOT_DONE prompt.
+                if not failing:
+                    # The round is "failing" only because of unlogged deviations: the
+                    # checks themselves all passed, so there is no failing output the
+                    # advisor could be told about. Record the skip like any other.
+                    why = "no failing checks (unlogged deviations only)"
+                    pending = {"called": False, "skipped_reason": why, "cost_usd": None,
+                               "round": rounds, "advice": None, "reply": None}
+                    notes.append("advisor after round %d skipped: %s" % (rounds, why))
+                else:
+                    advice, info = harness_advice(
+                        o.advisor, os.path.join(advisor_dir, "harness"),
+                        max(1, o.max_rounds - 1),
+                        os.path.join(run_dir, "advisor-harness.md"), repo, start,
+                        _fails_text(failing), task_text,
+                        check_files=_check_files(task.items, failing, repo))
+                    pending = dict(info, round=rounds, advice=advice, reply=None)
+                    if advice:
+                        feedback += ADVICE_BLOCK.format(advice=advice)
+                    else:
+                        notes.append("advisor after round %d skipped: %s"
+                                     % (rounds, info["skipped_reason"]))
         patch = finish_probe()
+        flush_pending()
         path = _report(run_dir, reason=reason, code=code, rounds=rounds, session=session,
                        tokens=tokens, results=results, log=log, start=start, repo=repo,
                        denied=denied, agent_err=agent_err, notes=notes,
@@ -912,6 +1141,7 @@ def _run(o):
                 # The stderr line dies with a closed terminal; the report is what
                 # the reader finds, and it must name the kept sandbox too.
                 notes.append("sandbox kept: %s" % sb)
+            flush_pending()
             path = _report(run_dir, reason="interrupted", code=EXIT_INTERRUPTED, rounds=rounds,
                            session=session, tokens=tokens, results=results, log=log, start=start,
                            repo=run_dir if (o.probe and sb is None) else repo,
@@ -977,6 +1207,11 @@ def _run(o):
             print("sandbox kept: %s" % sb, file=sys.stderr)
             # Name the kept sandbox in the report too: it holds the run's work.
             notes.append("sandbox kept: %s" % sb)
+        with contextlib.suppress(OSError):
+            # The pending record is worth writing on the way out, but a record whose
+            # write fails must not mask the error this report is about -- and must
+            # not take the report (and the 8) down with it.
+            flush_pending()
         path = _report(run_dir, reason="error: %s: %s" % (type(exc).__name__, exc),
                        code=EXIT_HARNESS, rounds=rounds, session=session, tokens=tokens,
                        results=results, log=log, start=start,
@@ -1089,11 +1324,27 @@ def main(argv=None):
     # state dir and hands it to every coder round, so one budget covers the run. It is
     # not part of the passthrough (that would put it in the deviation audit's call too).
     ap.add_argument("--advisor", default=None)
+    # --advisor-triggers: when the supervisor itself asks the advisor. "fail" (the default
+    # with --advisor) asks after every failing round that another round follows.
+    ap.add_argument("--advisor-triggers", default=None)
     try:
         o = ap.parse_args(argv)
     except SystemExit:
         return EXIT_USAGE
     o.passthrough = passthrough
+    if o.advisor_triggers is not None and not o.advisor:
+        print("until-done: --advisor-triggers needs --advisor", file=sys.stderr)
+        return EXIT_USAGE
+    trig = (o.advisor_triggers if o.advisor_triggers is not None else "fail").split(",")
+    if not o.advisor:
+        trig = []
+    elif trig == ["none"]:
+        trig = []
+    elif not trig or any(t not in ("fail",) for t in trig):
+        print("until-done: --advisor-triggers takes fail or none (got %r)"
+              % o.advisor_triggers, file=sys.stderr)
+        return EXIT_USAGE
+    o.advisor_triggers = trig
     return run(o)
 
 

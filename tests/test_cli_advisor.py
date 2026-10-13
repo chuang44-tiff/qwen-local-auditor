@@ -226,3 +226,49 @@ def test_ask_note_names_the_moments_to_ask(tmp_path, server, fake):
     assert "not converging" in note
     assert "a failure you do not understand" in note
     assert "Take its answer seriously" in note
+
+
+# ------------------------------------------------------- --advisor-triggers
+
+def test_until_done_passes_advisor_triggers_to_the_supervisor(tmp_path):
+    r, argv = _until_done_argv(tmp_path, ["--advisor", "opus", "--advisor-triggers", "none"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    sep = argv.index("--")
+    i = argv.index("--advisor-triggers")
+    assert i < sep and argv[i + 1] == "none"
+    assert not [a for a in argv[sep + 1:] if a.startswith("--advisor")]
+
+
+def test_advisor_triggers_default_is_not_typed(tmp_path):
+    r, argv = _until_done_argv(tmp_path, ["--advisor", "opus"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "--advisor-triggers" not in argv          # the supervisor's default (fail) applies
+
+
+@pytest.mark.parametrize("args,msg", [
+    (["--advisor-triggers", "fail"], "--advisor-triggers needs --advisor"),
+    (["--advisor", "opus", "--advisor-triggers", "plan"], "--advisor-triggers takes fail or none"),
+    # an empty value is a value: "no triggers given" is the absence of the flag, and an
+    # empty string would otherwise slip through every [ -n ] test as if it had not been typed
+    (["--advisor", "opus", "--advisor-triggers", ""], "--advisor-triggers takes fail or none"),
+])
+def test_advisor_triggers_refusals_under_until_done(tmp_path, args, msg):
+    r, _ = _until_done_argv(tmp_path, args)
+    assert r.returncode == 2 and msg in r.stderr
+
+
+def test_advisor_triggers_outside_until_done_is_refused(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "--advisor-triggers", "fail",
+                      "-C", posix(repo), "hi"], server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 2 and "--advisor-triggers needs --until-done" in r.stderr
+
+
+def test_ask_note_mentions_harness_advice(tmp_path, server, fake):
+    # same harness as test_ask_note_names_the_moments_to_ask: read the system prompt
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stderr
+    note = sys_prompt(calls(tmp_path)[0][0])
+    assert "Advice from a stronger model" in note

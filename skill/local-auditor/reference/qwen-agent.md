@@ -499,6 +499,13 @@ is one `claude -p` run with no tools, no settings, no hooks and one turn, so one
 request to that model, at Anthropic's default effort. The Qwen session keeps doing the work;
 the advisor never edits or runs anything.
 
+`--advisor-triggers LIST` — with `--until-done --advisor`: when the loop asks the advisor
+itself. `fail` (the default): after every failing round that another round follows, its advice
+goes into the next round's prompt; these calls do not count toward the agent's own
+`QWEN_ADVISOR_MAX_CALLS` — at most `--max-rounds` − 1 such calls per run; each is logged in
+`advisor-harness.md` and listed in report.md's Advisor section with the next round's reply.
+`none`: only the agent asks.
+
 - Off unless you type `--advisor MODEL`. No environment variable or config line turns it on, so sweeps and swarms never send code out through it.
 - One named exception elsewhere: the `ui-test` swarm workflow's confirm pass is on by default
   (a saved `--set` knob, not a typed flag). It asks Claude through the same login to re-check

@@ -134,6 +134,9 @@ ADVISOR_DIR=""      # the run's private advisor state (call counter, lock, calls
 ADVISOR_MCP=""      # its one-server MCP config, passed as one more --mcp-config
 ADVISOR_LOG=""      # QWEN_OUTDIR/advisor-<stamp>-<pid>.md: every question and answer
 ADVISOR_STATE=""    # --advisor-state DIR: the supervisor's state dir shared by every round (internal)
+ADVISOR_TRIGGERS="" # --advisor-triggers LIST: when the --until-done supervisor asks the advisor itself (fail|none)
+ADVISOR_TRIGGERS_SET=0  # 1 once --advisor-triggers was GIVEN, even with an empty value: the
+                    # empty string is a value to refuse, not the same thing as "never given"
 ADVISOR_DIR_OWN=0   # 1 only when this run mktemp'd ADVISOR_DIR itself; only then may cleanup remove it
 DESKTOP=""          # --desktop APP: drive one desktop application through qla-desktop (lib/desktop.py)
 DESKTOP_ROOT=""     # where desktop run folders go (QWEN_DESKTOP_DIR), absolute before the -C chdir
@@ -532,6 +535,12 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
       --advisor-state DIR
                        internal: used by --until-done (the supervisor hands its one
                        shared advisor state dir to each coder round)
+      --advisor-triggers LIST
+                       With --until-done --advisor: when the loop asks the advisor
+                       itself. fail (default): after every failing round that another
+                       round follows, its advice goes into the next round's prompt;
+                       these calls do not count toward the agent's own
+                       QWEN_ADVISOR_MAX_CALLS. none: only the agent asks.
       --scenarios FILE Scripted UI suite for the tester: implies --browser and
                        -r tester. The file (format: reference/qwen-agent.md,
                        "Scripted UI suites") is validated FIRST -- a parse error
@@ -1074,6 +1083,11 @@ while [ $# -gt 0 ]; do
     --advisor-state)      need_arg "$1" $(($#-1))
                           [ -n "$2" ] || { die "--advisor-state needs a directory"; exit $QA_USAGE; }
                           ADVISOR_STATE="$2"; shift 2 ;;
+    --advisor-triggers)   need_arg "$1" $(($#-1))
+                          # Given is not the same as given-a-value: an empty value must
+                          # reach the case below and be refused there, not read as "no
+                          # --advisor-triggers" by every later test of the variable.
+                          ADVISOR_TRIGGERS="$2"; ADVISOR_TRIGGERS_SET=1; shift 2 ;;
     --scenarios)          need_arg "$1" $(($#-1))
                           # The same empty-value trap as --mcp-config: an empty
                           # path would survive every later [ -n "$SCENARIOS" ] as
@@ -1171,6 +1185,16 @@ ADVISOR="$ADVISOR_FLAG"
 case "$ADVISOR" in
   *[!A-Za-z0-9._:-]*) die "--advisor: not a model name: $ADVISOR"; exit $QA_USAGE ;;
 esac
+# --advisor-triggers steers the SUPERVISOR's own failure calls: it exists only for
+# --until-done, where the loop asks the advisor after a failing round.
+if [ "$ADVISOR_TRIGGERS_SET" = 1 ]; then
+  [ -n "$ADVISOR" ] || { die "--advisor-triggers needs --advisor"; exit $QA_USAGE; }
+  [ -n "$UNTIL_DONE" ] || { die "--advisor-triggers needs --until-done (the supervisor makes these calls)"; exit $QA_USAGE; }
+  case "$ADVISOR_TRIGGERS" in
+    fail|none) ;;
+    *) die "--advisor-triggers takes fail or none (got $ADVISOR_TRIGGERS)"; exit $QA_USAGE ;;
+  esac
+fi
 if   [ "$SHALLOW" -eq 1 ];       then DEPTH_MODE="shallow"   # the flag wins over the env
 elif [ "$DEEP" -eq 1 ];          then DEPTH_MODE="deep"
 elif [ "$DEPTH_ENV" = shallow ]; then DEPTH_MODE="shallow"
@@ -1547,6 +1571,8 @@ if [ -n "$UNTIL_DONE" ]; then
       # the audit's passthrough is derived from this one.
       --advisor)          _skip=1 ;;
       --advisor=*)        ;;
+      --advisor-triggers) _skip=1 ;;
+      --advisor-triggers=*) ;;
       # One review round after the checks pass is the supervisor's, not each round's.
       --review-round) ;;
       # The supervisor owns the probe sandbox: one for the whole loop. Each round runs
@@ -1622,6 +1648,12 @@ if [ -n "$UNTIL_DONE" ]; then
   # hands --advisor --advisor-state to each coder round itself, and the deviation audit
   # keeps the passthrough without it (see the FWD scan above).
   [ -n "$ADVISOR" ] && SUP_ARGS+=(--advisor "$ADVISOR")
+  # SET, not -n: by here a given value is proven fail|none (the check above refused
+  # anything else), and passing it on is exactly what the flag was typed for.
+  [ "$ADVISOR_TRIGGERS_SET" = 1 ] && SUP_ARGS+=(--advisor-triggers "$ADVISOR_TRIGGERS")
+  # The supervisor's own failure call runs claude itself: give it the same binary the
+  # rounds' advisor uses.
+  [ -n "$ADVISOR" ] && export QWEN_ADVISOR_CLAUDE="${QWEN_ADVISOR_CLAUDE:-$CLAUDE_BIN}"
   [ "$DEEP" -eq 1 ] && FWD+=(--role-variant deep --subagents-push)
   resolve_py || { die "no working Python 3.8+ found (set QWEN_PYTHON)"; exit $QA_HARNESS; }
   # The supervisor is exec'd, not sourced: it only sees EXPORTED variables. The
@@ -2767,7 +2799,7 @@ PY
     die "--advisor: could not write the MCP config: $ADVISOR_MCP"; exit $QA_HARNESS
   fi
   TOOLS="${TOOLS:+$TOOLS,}mcp__qla_advisor__ask"
-  _adv_note="You can ask a stronger model for advice with the \`ask\` tool (at most $_adv_max calls $_adv_scope). Use it: a question costs little, and a wrong approach can cost the whole round. Ask when you are unsure which approach to take; when a check or test fails and you do not know why; when your approach is not converging (the same failure after two attempts, or results far from the target); when the harness reports a failure you do not understand; and before you finish work that handles network requests, untrusted input (parsing, URLs, file paths), threads, timeouts or retries, deleting files, or permissions. It is best at finding what breaks a plan or a change, so ask in that form: send what you did or plan to do and ask what input or situation breaks it. It sees only what you send and cannot search the codebase: send one self-contained question, the evidence, and the 1-3 files that matter. Take its answer seriously: act on each concrete finding and run the check or test it names; if you disagree, say why with evidence or ask it a follow-up, rather than setting the advice aside. Do mechanical work yourself (aligning docs, renaming, formatting or syncing wording); do not ask about it. Your answer has an ADVISOR section listing each question, the advice, and what you did with it."
+  _adv_note="You can ask a stronger model for advice with the \`ask\` tool (at most $_adv_max calls $_adv_scope). Use it: a question costs little, and a wrong approach can cost the whole round. Ask when you are unsure which approach to take; when a check or test fails and you do not know why; when your approach is not converging (the same failure after two attempts, or results far from the target); when the harness reports a failure you do not understand; and before you finish work that handles network requests, untrusted input (parsing, URLs, file paths), threads, timeouts or retries, deleting files, or permissions. It is best at finding what breaks a plan or a change, so ask in that form: send what you did or plan to do and ask what input or situation breaks it. It sees only what you send and cannot search the codebase: send one self-contained question, the evidence, and the 1-3 files that matter. Take its answer seriously: act on each concrete finding and run the check or test it names; if you disagree, say why with evidence or ask it a follow-up, rather than setting the advice aside. Under --until-done the harness may also put advice into your prompt after a failing round, under \"Advice from a stronger model\"; address each point the same way. Do mechanical work yourself (aligning docs, renaming, formatting or syncing wording); do not ask about it. Your answer has an ADVISOR section listing each question, the advice, and what you did with it."
   if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
 
 $_adv_note"; else SYSTEM="$_adv_note"; fi
