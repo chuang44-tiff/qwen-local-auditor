@@ -103,12 +103,13 @@ glance, and the measured failure modes: [reference/limits.md](skill/local-audito
 Claude model for advice on a hard decision through your own `claude` login, at most 4 calls
 per run; questions and the files the session attaches leave your machine, and nothing else
 changes. The idea comes from Claude's own [advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
-where a cheaper executor consults a stronger model at decision points. It shows no major
-benefit yet: in our audit A/B it found 2 more of 51 known bugs, below our bar, and on hard
-benchmark tasks the coder scored the same with and without it. Qwen was never trained to use
-an advisor, so it asks at the wrong time and does not reliably act on the answer. Anthropic
-reports a similar consult-rate problem with its own Haiku and Sonnet executors. The advisor
-is not a silver bullet; making it pay off is major work on the executor side ([benchmark](skill/local-auditor/reference/benchmark.md#the-advisor),
+where a cheaper executor consults a stronger model at decision points. Under `--until-done`
+the harness also asks after every failing round, with the failing output, and puts the advice into the next
+round's prompt: on our benchmarks that call fixed most first-round failures (Aider 17 to
+19/20, hard Terminal-Bench tasks 13 to 14/15, one run each, $2-4 of Opus calls per run).
+The coder's own asks mostly come at the wrong time, as Anthropic also reports for its Haiku
+and Sonnet executors; the harness, not the model, deciding when to ask is what made the
+difference ([benchmark](skill/local-auditor/reference/benchmark.md#the-advisor),
 [details](skill/local-auditor/reference/qwen-agent.md#advisor---advisor-model-experimental)).
 
 `qwen-swarm ui-test` re-checks each FAIL/BLOCKED row with Claude **by default** (`confirm=claude`,
@@ -121,7 +122,7 @@ and a browser on the app's URL go to Claude through your own `claude` login;
 One local model on one workstation GPU, 20 Aider polyglot exercises: Claude Code alone
 solved 12-14/20 with a retry, `qwen-agent --until-done` solved **18/20** in two runs a week
 apart, and 17/20 in a third on a later release; on 15 hard Terminal-Bench 2.0 tasks it
-solved 13/15. `--until-done` runs the coding task in rounds, each new round seeing the previous round's test failures, until the task
+solved 13/15, and 14/15 with the Opus advisor. `--until-done` runs the coding task in rounds, each new round seeing the previous round's test failures, until the task
 file's checklist passes or `--max-rounds` is reached. The gain is the loop, not the
 model; method, caveats and numbers: [reference/benchmark.md](skill/local-auditor/reference/benchmark.md).
 
