@@ -206,7 +206,12 @@ def test_secret_with_undecodable_name_drops_the_diff(repo, tmp_path, fake_claude
     # diff is held back rather than that file's content -- the advisor still gets the
     # failing output and the task.
     name = "bad\udcffname.pem"
-    (repo / name).write_text("BYTELEAK=1\n", encoding="utf-8")
+    try:
+        (repo / name).write_text("BYTELEAK=1\n", encoding="utf-8")
+    except OSError:
+        # macOS (APFS) refuses names that are not valid UTF-8 (EILSEQ): such a file
+        # cannot exist there, so neither can the leak this test guards against.
+        pytest.skip("this filesystem refuses non-UTF-8 file names")
     git(repo, "add", "-A"); git(repo, "commit", "-qm", "raw-byte name")
     start = git(repo, "rev-parse", "HEAD").strip()
     (repo / name).write_text("BYTELEAK=rotated\n", encoding="utf-8")
