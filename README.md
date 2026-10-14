@@ -105,11 +105,11 @@ per run; questions and the files the session attaches leave your machine, and no
 changes. The idea comes from Claude's own [advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
 where a cheaper executor consults a stronger model at decision points. Under `--until-done`
 the harness also asks after every failing round, with the failing output, and puts the advice into the next
-round's prompt: on our benchmarks that call fixed most first-round failures (Aider 17 to
-19/20, hard Terminal-Bench tasks 13 to 14/15, one run each, $2-4 of Opus calls per run).
-The coder's own asks mostly come at the wrong time, as Anthropic also reports for its Haiku
-and Sonnet executors; the harness, not the model, deciding when to ask is what made the
-difference ([benchmark](skill/local-auditor/reference/benchmark.md#the-advisor),
+round's prompt. On our benchmarks that call was the part that helped: it lifted Qwen from 17 to
+19/20 on Aider and from 13 to 14/15 on hard Terminal-Bench tasks (one run each, $2-4 of Opus
+calls). The coder's own asks mostly come at the wrong time, as Anthropic also reports for its
+Haiku and Sonnet executors, so `--until-done --advisor opus` is the recommended use
+([benchmark](skill/local-auditor/reference/benchmark.md#the-advisor),
 [details](skill/local-auditor/reference/qwen-agent.md#advisor---advisor-model-experimental)).
 
 `qwen-swarm ui-test` re-checks each FAIL/BLOCKED row with Claude **by default** (`confirm=claude`,
@@ -119,12 +119,16 @@ and a browser on the app's URL go to Claude through your own `claude` login;
 
 ## Benchmark
 
-One local model on one workstation GPU, 20 Aider polyglot exercises: Claude Code alone
-solved 12-14/20 with a retry, `qwen-agent --until-done` solved **18/20** in two runs a week
-apart, and 17/20 in a third on a later release; on 15 hard Terminal-Bench 2.0 tasks it
-solved 13/15, and 14/15 with the Opus advisor. `--until-done` runs the coding task in rounds, each new round seeing the previous round's test failures, until the task
-file's checklist passes or `--max-rounds` is reached. The gain is the loop, not the
-model; method, caveats and numbers: [reference/benchmark.md](skill/local-auditor/reference/benchmark.md).
+Quality and price on 20 Aider polyglot exercises and 15 hard Terminal-Bench 2.0 tasks, two
+rounds each, one run per setup (suggestive, not proven). The loop is the main gain: the same
+local model in Claude Code alone solved 12-14/20 Aider exercises with a retry, and 17-18/20
+under `--until-done`. The local model (Qwen3.8-Flash-Next,
+$0 in API dollars) scored 17/20 and 13/15; with the Opus failure call, 19/20 and 14/15 for
+$2.30 and $3.67. Claude Haiku 5.5 as the coder scored 20/20 for $1.30 and 15/15 for $7.07, a
+strong result that moved the price bar: it is about as good as the local model on a first try,
+better at fixing its own mistakes, and cheaper on easy tasks. The local setup's case is
+offline, private and free per token, and it is still cheaper on the hard set. Method and
+numbers: [reference/benchmark.md](skill/local-auditor/reference/benchmark.md).
 
 ## Reference pages
 
