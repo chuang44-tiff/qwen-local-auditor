@@ -10,6 +10,8 @@ like a resumed Claude Code session's transcript).
 With "advisor", one JSON line per entry is appended to the call's --advisor-state
 directory's calls.jsonl -- what lib/advisor_mcp.py writes for every ask call it
 serves, so a test can hand the supervisor the call log of a run that asked.
+With "advisor_count" (an int), that number is written to the --advisor-state directory's
+`count` file: the agent has spent that many asks.
 With "advisor_lock" (true/false), one JSON line {"found": .., "left": ..} is appended
 to $FAKE_AGENT_RECORD.locks: "found" is whether that state directory held the
 advisor's lock when the call started, and true also leaves one behind (what a round
@@ -66,6 +68,10 @@ if "advisor_lock" in step:
         os.mkdir(lk)
     with open(os.environ["FAKE_AGENT_RECORD"] + ".locks", "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"found": found, "left": os.path.isdir(lk)}) + "\n")
+if step.get("advisor_count") is not None:
+    with open(os.path.join(argv[argv.index("--advisor-state") + 1], "count"), "w",
+              encoding="utf-8") as fh:
+        fh.write(str(step["advisor_count"]))
 if "--plan-state" in argv:
     pdir = argv[argv.index("--plan-state") + 1]
     with open(os.environ["FAKE_AGENT_RECORD"] + ".plan", "a", encoding="utf-8") as fh:

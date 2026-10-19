@@ -23,3 +23,5 @@ qwen-sweep --builder history    --repo . --arg files=src/net.py,src/retry.py
 
 Read `local-auditor`'s `reference/sweep.md` for mechanics and `reference/limits.md`
 before acting on any verdict.
+
+If a qwen-agent or qwen-swarm run prints the "Claude settings changed" notice, relay it to the user verbatim.

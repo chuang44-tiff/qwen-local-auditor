@@ -37,6 +37,17 @@ qwen-sweep --builder deviations --repo . --base main --arg spec=SPEC.md
 | `--shallow` | batches answer once: no review round, no delegation nudge. Depth is the default (see below), so this is the opt-out for a large fan-out run |
 | `--no-preflight` | skip the one-time server check (also `QWEN_PREFLIGHT=0`) |
 
+### Claude calls
+
+A sweep runs `qwen-agent` for every batch, so it follows the config file like any other
+run: off on a fresh install, and if you set `QWEN_ADVISOR` (or `QWEN_PLAN`) there, each
+batch's agent gets that call, with the questions and any file Claude reads leaving the machine
+([qwen-agent.md](qwen-agent.md#advisor---advisor-model-experimental)). A plan applies only to a batch run that can write, which in a sweep means `--test` (and
+the `deviations` builder, which implies it); other batches skip it and the `claude:` line
+says so. Rescue does not apply. `qwen-sweep` has no Claude option of its own: to keep a
+sweep local, comment the lines out of the config (or set them to `off`) for that sweep, or
+point `QWEN_SWEEP_DISPATCH` at a wrapper that adds `--advisor off --plan off`.
+
 ### Depth
 
 A sweep gives every batch the depth an auditor gets standing at the repo, and a batch is

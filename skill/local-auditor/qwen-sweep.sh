@@ -33,10 +33,13 @@ unset _src _dir
 
 # The same machine config qwen-agent reads (CRs stripped: Windows editors add them).
 _cfg="${QWEN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/qwen-agent/config}"
+# Claude settings in the config are qwen-agent's; dropped before and after the read so no child sees them.
+unset QWEN_PLAN QWEN_ADVISOR QWEN_RESCUE QWEN_CONFIRM
 if [ -f "$_cfg" ] && [ -r "$_cfg" ]; then
   eval "$(tr -d '\r' < "$_cfg")"
 fi
 unset _cfg
+unset QWEN_PLAN QWEN_ADVISOR QWEN_RESCUE QWEN_CONFIRM
 # Native Windows Python defaults to cp1252 for files and pipes; everything here is UTF-8.
 export PYTHONUTF8=1
 

@@ -20,6 +20,7 @@ from test_ui_test_workflow import suite_file, ui, ui_run, verdict_block
 
 fake = test_swarm_runner.fake
 claude = uit.claude      # the autouse FakeClaude fixture, by assignment (pytest collects it)
+config_confirm = uit.config_confirm   # QWEN_CONFIRM=opus in the user's config, as in test_ui_test_workflow
 _restore_signal_handlers = test_swarm_runner._restore_signal_handlers
 
 

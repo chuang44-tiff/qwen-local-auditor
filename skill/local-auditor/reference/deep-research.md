@@ -263,6 +263,13 @@ Page text is treated as data: the worst a hostile page can do is plant a false c
 is exactly what the adversarial verify phase exists to catch. Nothing writable or executable
 of yours is anywhere in an agent's reach.
 
+## Claude calls follow the config
+
+Research agents are `qwen-agent` sessions, so they follow the config file like everything
+else: off on a fresh install; a `QWEN_ADVISOR` line there starts every research agent
+session with `--advisor` (a role without tools may never use it), and what it sends (questions, attached files, anything Claude reads) leaves the
+machine. `qwen-swarm research <question...> --show-claude` prints each role's effective settings before you run.
+
 ## Research needs the internet
 
 `qwen-deep-research` is the command here that needs internet access — a search backend, and

@@ -12,10 +12,13 @@ SKILL_DIR="$(cd -P "$(dirname "$_src")" && pwd)"
 unset _src _dir
 
 _cfg="${QWEN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/qwen-agent/config}"
+# Claude settings in the config are qwen-agent's; dropped before and after the read so no child sees them.
+unset QWEN_PLAN QWEN_ADVISOR QWEN_RESCUE QWEN_CONFIRM
 if [ -f "$_cfg" ] && [ -r "$_cfg" ]; then
   eval "$(tr -d '\r' < "$_cfg")"
 fi
 unset _cfg
+unset QWEN_PLAN QWEN_ADVISOR QWEN_RESCUE QWEN_CONFIRM
 # testrun.py reads these from the ENVIRONMENT; eval set shell variables only.
 # Export whatever the config defined (guard unset ones for set -u).
 [ -n "${QWEN_TEST_CMD:-}" ] && export QWEN_TEST_CMD

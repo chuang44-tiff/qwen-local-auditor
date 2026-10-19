@@ -643,7 +643,7 @@ def test_probe_json_record(tmp_path, server, fake):
 def test_sigterm_mid_session_still_removes_the_sandbox(tmp_path, server, fake):
     repo = dirty_repo(tmp_path)
     env = {k: v for k, v in os.environ.items() if not k.startswith(("QWEN_", "CLAUDE_", "ANTHROPIC_"))}
-    env.update({"QWEN_CONFIG": posix(tmp_path / "none"), "QWEN_BASE_URL": test_cli.base_url(server),
+    env.update({"QWEN_CONFIG": posix(tmp_path / "none"), "QWEN_NO_NOTICE": "1", "QWEN_BASE_URL": test_cli.base_url(server),
                 "QWEN_CLAUDE_BIN": posix(fake), "FAKE_DIR": posix(tmp_path / "calls"),
                 "FAKE_MODES": "sleep", "QWEN_PROBE_DIR": posix(tmp_path / "probes")})
     p = subprocess.Popen([test_cli.BASH, posix(test_cli.AGENT), "--probe", "-C", posix(repo), "hi"],

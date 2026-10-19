@@ -88,6 +88,7 @@ def sweep(tmp_path, args, dispatch=None, extra=None, cwd=None):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("QWEN_") and k != "XDG_CACHE_HOME"}
     env["QWEN_CONFIG"] = posix(tmp_path / "no-such-config")
+    env["QWEN_NO_NOTICE"] = "1"
     if dispatch is not None:
         env["QWEN_SWEEP_DISPATCH"] = posix(dispatch)
     env.update(extra or {})
@@ -285,3 +286,18 @@ def test_sweep_test_command_from_the_config_is_enough(tmp_path, repo, dispatch):
     r = sweep(tmp_path, files_args(repo, tmp_path / "run") + ["--test"], dispatch,
               extra={"QWEN_CONFIG": posix(cfg)})
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_config_claude_settings_do_not_reach_the_dispatch(tmp_path, repo, dispatch):
+    cfg = tmp_path / "config"
+    cfg.write_text("export QWEN_ADVISOR=opus\nexport QWEN_PLAN=opus\n", encoding="utf-8")
+    dump = tmp_path / "env.txt"
+    stub = tmp_path / "env-dispatch"
+    stub.write_text('#!/usr/bin/env bash\nenv >> "%s"\nexec "%s" "$@"\n'
+                    % (posix(dump), posix(dispatch)), encoding="utf-8", newline="\n")
+    stub.chmod(0o755)
+    r = sweep(tmp_path, files_args(repo, tmp_path / "run"), stub,
+              extra={"QWEN_CONFIG": posix(cfg)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    names = {line.split("=", 1)[0] for line in dump.read_text(encoding="utf-8").splitlines()}
+    assert names and not names & {"QWEN_ADVISOR", "QWEN_PLAN", "QWEN_RESCUE", "QWEN_CONFIRM"}

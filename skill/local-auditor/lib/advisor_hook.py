@@ -414,6 +414,7 @@ def main(argv=None, stdin=None, stdout=None):
     ap.add_argument("--digest", default="")
     ap.add_argument("--claude", default="")
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--tools", action="store_true")     # EXPERIMENTAL: the call may read cwd
     try:
         a = ap.parse_args(argv)
     except SystemExit:                          # a bad command line exits 2, which would block the write
@@ -441,7 +442,7 @@ def _decide(a, stdin, stdout):
     tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
     cwd = data.get("cwd") or os.getcwd()
     shown, _ = _shown(_held_path(tool_input), cwd)
-    rec = {"trigger": "plan", "round": advisor_mcp._int(os.environ.get("QWEN_PLAN_ROUND"), 1),
+    rec = {"call": "plan", "round": advisor_mcp._int(os.environ.get("QWEN_PLAN_ROUND"), 1),
            "called": False, "skipped_reason": None, "cost_usd": None, "tool": tool,
            "path": shown, "digest_chars": 0, "cut": False, "advice": None}
     transcript = data.get("transcript_path") or ""
@@ -479,7 +480,10 @@ def _decide(a, stdin, stdout):
     env = dict(os.environ)
     env.update({"QA_ADVISOR_MODEL": a.model, "QA_ADVISOR_STATE": a.state,
                 "QA_ADVISOR_MAX_CALLS": "1", "QA_ADVISOR_TIMEOUT": str(a.timeout),
-                "QA_ADVISOR_LOG": a.log})
+                "QA_ADVISOR_LOG": a.log, "QA_CLAUDE_CALL": "plan"})
+    env.pop("QA_ADVISOR_TOOLS", None)
+    if a.tools:
+        env["QA_ADVISOR_TOOLS"] = "1"
     if a.claude:
         env["QA_ADVISOR_CLAUDE"] = a.claude
     try:
@@ -554,7 +558,7 @@ def _gate(a, data, stdout):
         rows = []
     responded, checked = _after_advice(rows, g["advised"])
     missing = [k for k, ok in (("respond", responded), ("check", checked)) if not ok]
-    rec = {"trigger": "plan-gate", "responded": responded, "checked": checked,
+    rec = {"call": "plan-gate", "responded": responded, "checked": checked,
            "held": bool(missing) and not g.get("held") and bool(rows)}
     if not rec["held"]:
         g["released"] = True

@@ -10,7 +10,7 @@
  "knobs": {"scenarios": "str", "base": "str", "fixtures": "str", "confirm": "str",
            "confirm_model": "str", "confirm_max": "int"},
  "presets": {
-  "quick": {"scenarios": "", "base": "", "fixtures": "", "confirm": "claude",
+  "quick": {"scenarios": "", "base": "", "fixtures": "", "confirm": "local",
             "confirm_model": "opus", "confirm_max": 10,
             "budget": 900, "retries": 1, "rounds": 1}
  },

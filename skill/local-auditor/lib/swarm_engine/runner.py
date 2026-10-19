@@ -20,6 +20,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -40,7 +41,7 @@ LEGACY = {"research": {"goal_key": "question", "goal_file": "question.md",
 DEFAULT_PROFILE = {"goal_key": "goal", "goal_file": "goal.md", "out_root": None,
                    "env": ("QWEN_SWARM_",)}
 RESUMABLE = "--seats, --web-seats, --timeout, --retries, --rounds, --hours, --effort, " \
-            "--role-effort, --deep, --shallow and --keep-sandboxes"
+            "--role-effort, --claude, --deep, --shallow and --keep-sandboxes"
 # the --resume error keeps each command's own wording: deep-research's text is the one
 # it released with, which predates the engine-only --rounds and --keep-sandboxes
 RESUME_MSG = {
@@ -53,8 +54,9 @@ USAGE = {
     None: "usage: qwen-swarm WORKFLOW GOAL [--depth NAME] [--set KNOB=VALUE] [--target DIR] "
           "[--max-agents N] [--max-items N] [--seats N] [--web-seats N] [--timeout N] "
           "[--retries N] [--rounds N|until] [--hours H] [--effort LEVEL] "
-          "[--role-effort ROLE=LEVEL[,ROLE=LEVEL...]] [--deep ROLE[,ROLE...]|all] "
-          "[--shallow ROLE[,ROLE...]|all] [--out DIR] "
+          "[--role-effort ROLE=LEVEL[,ROLE=LEVEL...]] "
+          "[--claude ROLE:plan|advisor=MODEL|off[,...]] [--show-claude] "
+          "[--deep ROLE[,ROLE...]|all] [--shallow ROLE[,ROLE...]|all] [--out DIR] "
           "[--keep-sandboxes] | WORKFLOW --stdin | --resume RUN_DIR | --check WORKFLOW | --preflight [WORKFLOW] "
           "| --record-verdict RUN_DIR --id ID --verdict VERDICT --evidence TEXT [--evidence TEXT ...] "
           "| --list",
@@ -208,6 +210,98 @@ def role_efforts(text, roles):
     return out
 
 
+_MODEL = re.compile(r"[A-Za-z0-9._:-]+")
+CLAUDE_KEYS = ("plan", "advisor")
+
+
+def role_claude(text, roles):
+    """One `--claude ROLE:KEY=MODEL[,KEY=MODEL...]` -> {role: {"plan"|"advisor": MODEL|"off"}}.
+    `roles` is the manifest's {name: Role}. A model is [A-Za-z0-9._:-]+ or `off`. `plan` is
+    refused for a role whose fence cannot write; `rescue` fits no swarm role."""
+    role, sep, rest = text.partition(":")
+    if not sep or role not in roles or not rest:
+        raise Usage("--claude: %r is not ROLE:KEY=MODEL[,KEY=MODEL...] with ROLE one of %s"
+                    % (text, ", ".join(roles)))
+    out = {}
+    for pair in rest.split(","):
+        key, eq, model = pair.partition("=")
+        if key == "rescue":
+            raise Usage("--claude %s: rescue does not apply to a swarm role (swarm units are "
+                        "single runs, not --until-done)" % role)
+        if not eq or key not in CLAUDE_KEYS or not _MODEL.fullmatch(model):
+            raise Usage("--claude %s: %r is not KEY=MODEL with KEY one of %s and MODEL a model "
+                        "name or off" % (role, pair, ", ".join(CLAUDE_KEYS)))
+        if key == "plan" and not roles[role].can_plan:
+            raise Usage("--claude %s: plan needs a role that can edit files; %s has fence %s"
+                        % (role, role, roles[role].fence))
+        out[key] = model
+    return {role: out}
+
+
+def merge_role_claude(texts, roles, stored=None):
+    """Every --claude of the command line, later ones winning per role and key, over `stored`."""
+    out = {r: dict(v) for r, v in (stored or {}).items()} if isinstance(stored, dict) else {}
+    for text in texts or ():
+        for role, keys in role_claude(text, roles).items():
+            out.setdefault(role, {}).update(keys)
+    return out
+
+
+def claude_defaults(environ=None):
+    """The config file's plan/advisor/confirm, as qwen-swarm.sh copied them to QA_CFG_*
+    (only from the file; an exported QWEN_* never gets here). -> ({plan, advisor}, confirm)."""
+    env = os.environ if environ is None else environ
+    vals = {}
+    for key in ("PLAN", "ADVISOR", "CONFIRM"):
+        v = (env.get("QA_CFG_" + key) or "").strip()
+        if v and not _MODEL.fullmatch(v):
+            raise Usage("QWEN_%s (config file): %r is not a model name (letters, digits, . _ : -) "
+                        "or off" % (key, v))
+        vals[key] = v
+    dflt = {k.lower(): vals[k] for k in ("PLAN", "ADVISOR") if vals[k] and vals[k] != "off"}
+    return dflt, vals["CONFIRM"]
+
+
+def claude_lines(m, cfg):
+    """One line per role: `ROLE: plan=<m|off|n/a> advisor=<m|off> rescue=n/a`."""
+    out = []
+    for name in m.roles:
+        c = api.claude_for(m, cfg, name)
+        out.append("%s: plan=%s advisor=%s rescue=n/a" % (name, c["plan"] or "n/a", c["advisor"]))
+    return out
+
+
+def claude_check_line(cfg):
+    """`claude checks: off|<model>`: whether wf.claude_check (any workflow) may ask Claude."""
+    return "claude checks: %s" % (api.claude_checks(cfg) or "off")
+
+
+def claude_tools_on(environ=None):
+    """Read tools for the calls: on unless QWEN_CLAUDE_TOOLS=0 (config file or environment)."""
+    return (os.environ if environ is None else environ).get("QWEN_CLAUDE_TOOLS") != "0"
+
+
+def claude_on(m, cfg):
+    return (api.claude_checks(cfg) is not None
+            or any(v not in (None, "off") for name in m.roles
+                   for v in api.claude_for(m, cfg, name).values()))
+
+
+def _apply_config_confirm(mod, cfg, sets, config_confirm, knob_names):
+    """The workflow's own hook (ui-test: confirm) reads the config file's value; a typed
+    --set always wins, and it is the workflow that knows what its knobs mean."""
+    hook = getattr(mod, "claude_config", None)
+    if callable(hook):
+        # the hook edits a deep copy; only the manifest's knobs come back, so it cannot
+        # reach the Claude permissions (claude_*) that the engine's gate reads
+        work = copy.deepcopy(cfg)
+        for line in hook(work, set(sets), config_confirm) or ():
+            err(line)
+        for k in knob_names:
+            if k in work:
+                cfg[k] = work[k]
+
+
 def _roles_of(flag, text, roles):
     """ROLE[,ROLE...] or all for a depth flag: the sorted role names it names."""
     names = [r.strip() for r in text.split(",") if r.strip()]
@@ -260,13 +354,14 @@ def save_json(path, data):
 def preflight(agent):
     """The model server is reachable and serves the model (qwen-agent --preflight-only)."""
     try:
-        p = subprocess.run(list(agent) + ["--preflight-only", "-q"], stdin=subprocess.DEVNULL,
+        p = subprocess.run(list(agent) + ["--preflight-only", "-q", "--plan", "off",
+                                         "--advisor", "off", "--rescue", "off"], stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
     except (FileNotFoundError, PermissionError) as e:
         err("preflight: model: cannot run the agent: %s" % e)
         return False
     if p.returncode != 0:
-        err("preflight: model: %s" % ((p.stderr.strip().splitlines() or ["qwen-agent exit %d" % p.returncode])[0]))
+        err("preflight: model: %s" % swarm.reason_line(p.stderr, "qwen-agent exit %d" % p.returncode))
         return False
     return True
 
@@ -311,6 +406,8 @@ def parse_args(argv, compat=None):
     ap.add_argument("--effort")
     ap.add_argument("--role-effort", dest="role_effort")
     if compat is None:
+        ap.add_argument("--claude", action="append", default=[])
+        ap.add_argument("--show-claude", action="store_true", dest="show_claude")
         # depth per role: --deep forces the switches on (qwen-agent --review-round
         # --subagents-nudge), --shallow opts a role out of the default; the released
         # qwen-deep-research takes neither
@@ -436,6 +533,10 @@ def _main(o, compat):
     deep = deep_roles(o.deep, tuple(m.roles)) if getattr(o, "deep", None) is not None else None
     shallow = (shallow_roles(o.shallow, tuple(m.roles))
                if getattr(o, "shallow", None) is not None else None)
+    claude_over = merge_role_claude(getattr(o, "claude", None), m.roles)
+    claude_dflt, claude_confirm = claude_defaults()
+    if getattr(o, "show_claude", False):
+        return _show_claude(o, m, folder, claude_over, claude_dflt, claude_confirm)
     seats, web_seats = _seats(o, env)
     if o.preflight:
         ok = preflight(o.agent)
@@ -493,6 +594,9 @@ def _main(o, compat):
                 "retries": retries, "effort": o.effort, "role_effort": efforts, "hours": hours,
                 "deadline": None if hours is None else utc_iso(time.time() + hours * 3600),
                 "workflow": m.name, "rounds": rounds,
+                "claude": claude_over, "claude_default": claude_dflt,
+                "claude_confirm": claude_confirm,
+                "claude_typed_confirm": sets.get("confirm") == "claude",
                 "target": None if target is None else str(target),
                 "workflow_dir": None if folder.parent == BUILTIN else str(folder)})
     if deep is not None:
@@ -504,11 +608,12 @@ def _main(o, compat):
     except Exception as e:
         err("internal error: workflow.py does not import: %s: %s" % (type(e).__name__, e))
         return EXIT_HARNESS
+    _apply_config_confirm(mod, cfg, sets, claude_confirm, m.knobs)
     validate = getattr(mod, "validate", None)
     msg = None
     if callable(validate):
         try:
-            msg = validate(dict(cfg))
+            msg = validate(copy.deepcopy(cfg))
         except Exception as e:
             err("internal error: workflow.py validate(): %s: %s" % (type(e).__name__, e))
             return EXIT_HARNESS
@@ -526,6 +631,37 @@ def _main(o, compat):
         note_deep_fence_none(m, deep, shallow or ())
     return _post_release(run, mod, _start(o, m, mod, cfg, run, seats, web_seats, max_unit,
                                           new=True))
+
+
+def _show_claude(o, m, folder, over, dflt, config_confirm):
+    """--show-claude: the effective per-role Claude settings, then exit 0 with nothing
+    launched. It prints what the run would use, from the same code the run uses."""
+    cfg = {"claude": over, "claude_default": dflt, "claude_confirm": config_confirm}
+    try:
+        mod = load_module(folder)
+    except Exception as e:
+        err("internal error: workflow.py does not import: %s: %s" % (type(e).__name__, e))
+        return EXIT_HARNESS
+    depth = o.depth or m.default_depth
+    if depth not in m.presets:
+        raise Usage("--depth must be one of %s (got %r)" % (", ".join(m.presets), depth))
+    try:
+        sets = manifest.parse_sets(m, o.sets)
+    except manifest.ManifestError as e:
+        raise Usage(str(e))
+    knobs = {k: sets.get(k, m.presets[depth][k]) for k in m.knobs}
+    if callable(getattr(mod, "claude_config", None)):
+        _apply_config_confirm(mod, knobs, sets, config_confirm, m.knobs)
+    cfg["claude_typed_confirm"] = sets.get("confirm") == "claude"
+    cfg["confirm"], cfg["confirm_model"] = knobs.get("confirm"), knobs.get("confirm_model")
+    for line in claude_lines(m, cfg):
+        print(line)
+    print(claude_check_line(cfg))
+    print("claude read tools (plan/advisor/rescue): %s" % ("on" if claude_tools_on() else "off"))
+    if callable(getattr(mod, "claude_config", None)):
+        mode = knobs.get("confirm")
+        print("confirm=%s" % ("claude:%s" % knobs.get("confirm_model") if mode == "claude" else mode))
+    return EXIT_OK
 
 
 def _first(*values):
@@ -602,6 +738,19 @@ def _resume(o, compat, wf_spec, words):
         raise Usage("--resume: %s is a %s run, not %s" % (run, name, wf_spec))
     folder = pathlib.Path(cfg["workflow_dir"]) if cfg.get("workflow_dir") else BUILTIN / name
     m = _load_manifest(folder)
+    if getattr(o, "show_claude", False):
+        # exactly what this resume would use: stored --claude merged with the new ones, and
+        # the config file's defaults read now; the confirm knob is the run's stored one
+        cfg["claude"] = merge_role_claude(getattr(o, "claude", None), m.roles, cfg.get("claude"))
+        cfg["claude_default"], cfg["claude_confirm"] = claude_defaults()
+        for line in claude_lines(m, cfg):
+            print(line)
+        print(claude_check_line(cfg))
+        print("claude read tools (plan/advisor/rescue): %s" % ("on" if claude_tools_on() else "off"))
+        if callable(getattr(load_module(folder), "claude_config", None)) and "confirm" in cfg:
+            mode = cfg["confirm"]
+            print("confirm=%s" % ("claude:%s" % cfg.get("confirm_model") if mode == "claude" else mode))
+        return EXIT_OK
     prof = profile(m)
     env = prof["env"]
     max_unit = env_min_int(env, "MAX_UNIT_SECONDS", 1, swarm.MAX_UNIT_SECONDS)
@@ -633,6 +782,10 @@ def _resume(o, compat, wf_spec, words):
         stored.update(efforts)
         cfg["role_effort"] = stored
     _check_stored_efforts(cfg, run)
+    # Claude settings: --claude merges over the stored ones, and the config file's defaults
+    # are read afresh. A change re-runs the affected units through their cache key.
+    cfg["claude"] = merge_role_claude(getattr(o, "claude", None), m.roles, cfg.get("claude"))
+    cfg["claude_default"], cfg["claude_confirm"] = claude_defaults()
     # the same environment check a fresh run makes at start: a resume inherits no
     # --effort, and an unlevelled role would run at whatever QWEN_EFFORT now says
     if manifest.turns_thinking_off(os.environ.get("QWEN_EFFORT")):
@@ -750,13 +903,24 @@ def summary(m, cfg):
     return {"workflow": m.name, "depth": cfg["depth"],
             "roles": {r.name: r.fence for r in m.roles.values()},
             "knobs": knobs, "target": cfg.get("target"),
-            "target_dirty": bool(cfg.get("target_dirty"))}
+            "target_dirty": bool(cfg.get("target_dirty")),
+            "claude": claude_lines(m, cfg), "claude_checks": claude_check_line(cfg),
+            "claude_on": claude_on(m, cfg), "claude_tools": claude_tools_on()}
 
 
 def print_summary(s):
     err("workflow %s (depth %s)" % (s["workflow"], s["depth"]))
     err("  roles: %s" % " ".join("%s=%s" % kv for kv in s["roles"].items()))
     err("  knobs: %s" % " ".join("%s=%s" % (k, json.dumps(v)) for k, v in s["knobs"].items()))
+    for line in s.get("claude", ()):
+        err("  claude %s" % line)
+    if s.get("claude_checks"):
+        err("  %s" % s["claude_checks"])
+    if s.get("claude_on"):
+        err("  claude: calls above that are not off send this run's prompts and answers to "
+            "Claude (read tools (plan/advisor/rescue) %s; claude checks always have Read); "
+            "code can leave this machine"
+            % ("on" if s.get("claude_tools", True) else "off"))
     if s["target"]:
         err("  target: %s%s" % (s["target"], " (uncommitted changes are NOT in the sandboxes)"
                                 if s["target_dirty"] else ""))

@@ -11,7 +11,17 @@ If the question is underspecified (no scope, timeframe, region, budget or use ca
 matters), ask 2-3 short clarifying questions first and fold the answers into one precise
 question. Do not research a vague question.
 
-## 2. Check, then run in the background
+## 2. Check, sign off Claude, then run in the background
+
+Sign-off, before EVERY launch or resume: run `qwen-swarm research "QUESTION" --show-claude` with
+the intended options (for a resume: `qwen-swarm --resume RUN --show-claude`, plus any new
+`--claude`) and show the user its lines; say which calls are on, with which model, whether
+read tools are on and that content leaves the machine; ask "Use your global Claude settings
+for this run?". Yes: launch as shown. No: offer per-role choices, all off included, and add
+`--claude ROLE:advisor=MODEL|off` (repeatable). Launch with `qwen-swarm research "QUESTION" ...`
+instead of `qwen-deep-research` whenever `--claude` is needed (`qwen-deep-research` has neither
+`--show-claude` nor `--claude`; same engine and flags).
+If a qwen-agent or qwen-swarm run prints the "Claude settings changed" notice, relay it to the user verbatim.
 
     qwen-deep-research --check
     qwen-deep-research "PRECISE QUESTION" [--depth quick|standard|deep|overnight] [--max-agents N]

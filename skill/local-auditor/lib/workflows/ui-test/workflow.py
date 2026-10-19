@@ -16,9 +16,10 @@ gets the swarm's repair round with REPAIR below -- scenarios.results(strict=True
 instead of scoring BLOCKED -- and, past the preset's one retry, is dropped: its row is BLOCKED
 "no result block after repair".
 
-Every FAIL or BLOCKED scenario then goes to the confirm pass (knob `confirm`): `claude`, the
-default, asks Claude through the user's own claude login (lib/swarm_engine/claude_check.py),
-`local` hands it to a local `browser-probe` agent, `none` skips the pass. Each such row gains
+Every FAIL or BLOCKED scenario then goes to the confirm pass (knob `confirm`): `claude` asks
+Claude through the user's own claude login (lib/swarm_engine/claude_check.py) and is on only
+when the config file's QWEN_CONFIRM names a model or --set confirm=claude says so; `local`,
+the default, hands it to a local `browser-probe` agent, `none` skips the pass. Each such row gains
 a `confirmation` (CONFIRMED, FALSE_ALARM or NEEDS_HUMAN, with evidence); its `status` stays
 the tester's. A confirmer that could not answer -- no login, over `confirm_max`, a failed unit,
 the deadline -- leaves NEEDS_HUMAN, never a silent pass. The whole tester block a confirmer
@@ -183,6 +184,31 @@ def _confirm_problem(cfg):
         return ("confirm_model must name a model when confirm=claude "
                 "(e.g. --set confirm_model=opus)")
     return None
+
+
+def claude_config(cfg, sets, config_confirm):
+    """The config file's QWEN_CONFIRM, applied to the run's knobs (`cfg`) unless the user
+    typed --set confirm (`sets` holds the typed knob names): a model -> confirm=claude with
+    that model (a typed --set confirm_model still wins); local, none -> that mode; off or
+    nothing -> local. A workflow file never switches Claude on: a preset saying `claude`
+    counts as `local`. Returns the notice lines for the runner to print."""
+    notes = []
+    if "confirm" not in sets and cfg.get("confirm") == "claude":
+        cfg["confirm"] = "local"
+        notes.append("the preset's confirm=claude is ignored (a workflow file cannot turn "
+                     "Claude on): confirm=local; use QWEN_CONFIRM in the config file or "
+                     "--set confirm=claude")
+    if "confirm" in sets or not config_confirm:
+        return notes
+    if config_confirm in ("local", "none"):
+        cfg["confirm"] = config_confirm
+    elif config_confirm == "off":
+        cfg["confirm"] = "local"
+    else:
+        cfg["confirm"] = "claude"
+        if "confirm_model" not in sets:
+            cfg["confirm_model"] = config_confirm
+    return notes
 
 
 NOTICE_DOWN = ("confirm=claude: claude is not available now (%s): non-PASS rows will be "

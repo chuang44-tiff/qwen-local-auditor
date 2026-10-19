@@ -30,7 +30,7 @@ import json, shlex, sys
 cmd = json.load(open(sys.argv[1]))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
 rec = shlex.split(cmd)
 with open(rec[rec.index("--record") + 1], "a") as fh:
-    fh.write(json.dumps({"trigger": "plan", "round": 1, "called": True, "skipped_reason": None,
+    fh.write(json.dumps({"call": "plan", "round": 1, "called": True, "skipped_reason": None,
                          "cost_usd": 0.1, "tool": "Edit", "path": "a.txt", "digest_chars": 321,
                          "cut": False, "advice": "check the loader"}) + "\n")
 PY
@@ -90,6 +90,18 @@ def test_plan_wiring_holds_the_first_write_with_a_hook(tmp_path, server, fake):
     assert not same_path(state).startswith(same_path(tmp_path / "repo"))   # outside the repo
     import os
     assert not os.path.exists(state)                                      # removed with the run
+
+
+@pytest.mark.parametrize("flag,on", [("1", True), ("plan", True), ("plan,ask", True),
+                                     ("rescue", False), ("fail", False), ("ask", False),
+                                     ("", True)])
+def test_plan_hook_tools_follow_the_scope_list(tmp_path, server, fake, flag, on):
+    args = plan_args(tmp_path, "--plan", "opus", "--test")
+    r = go(tmp_path, args, server, fake, extra=dict(SHALLOW, **TEST_ENV, QWEN_ADVISOR_TOOLS=flag,
+           QWEN_TEST_WORKTREES=posix(tmp_path / "wts")))
+    assert r.returncode == 0, r.stderr
+    [h] = settings_of(tmp_path)["hooks"]
+    assert ("--tools" in shlex.split(h["command"])) is on
 
 
 def test_plan_hook_timeout_follows_the_advisor_timeout(tmp_path, server, fake):

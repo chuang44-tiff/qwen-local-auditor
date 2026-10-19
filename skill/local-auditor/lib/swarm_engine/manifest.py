@@ -54,6 +54,13 @@ class Role:
         self.deep = tuple(deep)         # switch names in the order _DEEP_LIST gives them
         self.deep_listed = deep_listed  # True when the manifest gave "deep" as a list
 
+    @property
+    def can_plan(self):
+        """Claude's plan call (hold the first edit) fits only a role whose fence writes.
+        The manifest cannot turn any Claude call on; this is applicability only."""
+        from lib.swarm_engine import fences
+        return fences.can_write(self.fence)
+
 
 class Manifest:
     def __init__(self, folder, name, description, goal, target, roles, knobs, presets,

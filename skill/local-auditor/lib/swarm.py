@@ -158,7 +158,7 @@ class Unit:
                  mcp_config=None, parse=extract_json, cache=True, timeout=None, retries=0,
                  effort=None, ignore_deadline=False, cwd=None, key_extra="", setup=None,
                  teardown=None, deep=(), browser=False, env=None, repair_text=None,
-                 browser_eval=False):
+                 browser_eval=False, claude=None):
         # fullmatch, not match: "a\n" must not pass on the strength of the trailing $.
         if not _SAFE_NAME.fullmatch(name or ""):
             raise ValueError("unit name must match %s (got %r)" % (_SAFE_NAME.pattern, name))
@@ -193,12 +193,37 @@ class Unit:
         # qwen-agent --browser-eval on top: scripted probes (browser_evaluate) and single
         # network requests -- the browser-probe fence. Also joins the cache key.
         self.browser_eval = browser_eval
+        # this unit's Claude settings: {"advisor": MODEL|"off", "plan": MODEL|"off"}; the
+        # "plan" key is present only for a role that can write. None = not given (the child
+        # qwen-agent would then read the config file itself, so a swarm always gives it).
+        self.claude = dict(claude) if claude else None
         # extra environment variables for this unit's session ({NAME: VALUE}, both str);
         # None = the inherited environment alone
         self.env = env
         # the repair round's text, "{why}" replaced by the parse's reason; None = REPAIR.
         # Not part of the cache key: it only re-asks for an answer the key already names
         self.repair_text = repair_text
+
+
+NOTICE_HEAD = "qwen-agent: Claude settings changed"
+
+
+def reason_line(text, default=""):
+    """The first stderr line that says what went wrong: qwen-agent's own `claude:` summary
+    line and the one-time "Claude settings changed" notice block come before the error
+    and are not it."""
+    in_notice = False
+    for line in (text or "").splitlines():
+        if line.startswith(NOTICE_HEAD):
+            in_notice = True
+            continue
+        if in_notice and (line[:1] in (" ", "\t") or not line.strip()):
+            continue
+        in_notice = False
+        if line.startswith("claude:") or not line.strip():
+            continue
+        return line.strip()
+    return default
 
 
 class Swarm:
@@ -254,6 +279,15 @@ class Swarm:
             argv.append("--browser-eval")
         if u.mcp_config:
             argv += ["--mcp-config", str(u.mcp_config)]
+        # always explicit, "off" included: the child reads the config file on its own and
+        # must not find a default the launch did not choose (a skipped config value would
+        # even print `claude: ... skipped` as its first stderr line, the failure reason).
+        # A resumed (repair) session cannot take a real --plan: its first write is long
+        # past; a swarm unit never gets a rescue.
+        real_plan = bool(u.claude) and "plan" in u.claude and not resume
+        argv += ["--plan", u.claude["plan"] if real_plan else "off", "--rescue", "off"]
+        if u.claude:
+            argv += ["--advisor", u.claude.get("advisor") or "off"]
         if u.deep and not resume:
             # a repair round only re-asks for the answer's format: no second review there
             if "review_round" in u.deep:
@@ -376,6 +410,10 @@ class Swarm:
         if u.browser_eval:
             # a probing session can establish what a looking one cannot: its own key
             blob += "\n--browser-eval"
+        if u.claude and any(v != "off" for v in u.claude.values()):
+            # an answer earned with Claude on is not the answer asked for with it off, nor
+            # with another model; all-off adds nothing, so every older key stays as it was
+            blob += "\n--claude " + " ".join("%s=%s" % kv for kv in sorted(u.claude.items()))
         if u.deep:
             # an answer earned with a review round is not the answer asked for without one
             blob += "\ndeep:" + ",".join(u.deep)
@@ -444,7 +482,7 @@ class Swarm:
                 with self._lock:
                     self.agents_run += 1
                 if rc not in (0, 6):       # 6 = ran clean but the result was empty
-                    why = "qwen-agent exit %d: %s" % (rc, (err.strip().splitlines() or [""])[0])
+                    why = "qwen-agent exit %d: %s" % (rc, reason_line(err))
                     # only a timeout or a server error that survived the backoff inside
                     # the call can retrying fix: any other exit (usage, denied, signal)
                     # is the same answer the next time
@@ -487,7 +525,7 @@ class Swarm:
                                     why = REPAIR_FAILED + str(e2)
                                     retryable = True
                             else:
-                                why = "qwen-agent exit %d on repair: %s" % (rc, (err.strip().splitlines() or [""])[0])
+                                why = "qwen-agent exit %d on repair: %s" % (rc, reason_line(err))
                                 # exit 6 = the repair answered empty: same unusable answer
                                 # as a failed parse, so it buys a retry like one does
                                 retryable = (rc == AGENT_TIMEOUT or rc in (AGENT_PREFLIGHT,

@@ -66,6 +66,14 @@ FLAGS
   --hours H            hard deadline for the whole run (env QWEN_SWARM_HOURS)
   --effort LEVEL       reasoning effort for every role
   --role-effort ROLE=LEVEL[,ROLE=LEVEL...]   effort for single roles
+  --claude ROLE:KEY=MODEL[,KEY=MODEL...]   Claude for one role this run (repeatable); KEY is
+                       advisor (any role) or plan (a role that can edit files), MODEL a
+                       model or off. Beats the config file's QWEN_PLAN / QWEN_ADVISOR; with
+                       neither, Claude is off. A workflow file can never turn it on. Rescue
+                       does not apply to swarm roles. QWEN_CONFIRM (config file) sets the
+                       ui-test confirm pass: a model, local (default), none or off (= local)
+  --show-claude        print each role's effective Claude settings (and ui-test's confirm),
+                       then exit 0 without launching anything
   --deep ROLE[,ROLE...]|all   force deeper agents on these roles: each gets a review
                        round and a delegation nudge (qwen-agent --review-round
                        --subagents-nudge); cached apart from the plain answers
@@ -79,7 +87,8 @@ FLAGS
   --version            print the version
 
   On --resume only --seats, --web-seats, --timeout, --retries, --rounds, --hours,
-  --effort, --role-effort, --deep, --shallow and --keep-sandboxes may be given. The
+  --effort, --role-effort, --claude, --show-claude, --deep, --shallow and --keep-sandboxes
+  may be given. The
   research workflow also reads the QWEN_DR_* names of these variables (QWEN_SWARM_* wins).
 
 EXIT CODES
@@ -113,9 +122,22 @@ else
 fi
 
 _cfg="${QWEN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/qwen-agent/config}"
+# Claude settings come from the config FILE only. An exported QWEN_PLAN / QWEN_ADVISOR /
+# QWEN_RESCUE / QWEN_CONFIRM is dropped before the file is read (so a `${QWEN_PLAN:-opus}`
+# line gets the file's default, never the environment's), the file's values are copied to
+# QA_CFG_*, and the QWEN_ names are dropped again so that neither an exported value nor a
+# config `export` line reaches the runner or the qwen-agent children (each child would
+# otherwise read its own plan/advisor; the runner always passes them explicitly).
+unset QWEN_PLAN QWEN_ADVISOR QWEN_RESCUE QWEN_CONFIRM QA_CFG_PLAN QA_CFG_ADVISOR QA_CFG_CONFIRM
 if [ -f "$_cfg" ] && [ -r "$_cfg" ]; then
   eval "$(tr -d '\r' < "$_cfg")"
 fi
+QA_CFG_PLAN="${QWEN_PLAN:-}"; QA_CFG_ADVISOR="${QWEN_ADVISOR:-}"; QA_CFG_CONFIRM="${QWEN_CONFIRM:-}"
+export QA_CFG_PLAN QA_CFG_ADVISOR QA_CFG_CONFIRM
+unset QWEN_PLAN QWEN_ADVISOR QWEN_RESCUE QWEN_CONFIRM
+# shellcheck source=/dev/null
+. "$SKILL_DIR/lib/whats_new.sh"
+qa_whats_new "$SKILL_DIR" "$_cfg"
 unset _cfg
 # The runner reads these from the ENVIRONMENT; eval set shell variables only.
 for _p in QWEN_SWARM_ QWEN_DR_; do
@@ -125,13 +147,15 @@ for _p in QWEN_SWARM_ QWEN_DR_; do
     eval "[ -n \"\${$_v:-}\" ] && export $_v"
   done
 done
+# QWEN_CLAUDE_TOOLS and QWEN_ADVISOR_TOOLS (off-direction / bench knobs) go out too, so the
+# runner's `claude read tools` line agrees with the qwen-agent children, which read the file.
 # QWEN_PLAYWRIGHT_MCP, QWEN_CLAUDE_BIN and QWEN_EXEC_RETRY_BACKOFF: wf.claude_check runs
 # claude (and builds its browser's MCP config) inside the runner itself, not in a
 # qwen-agent child that would read this file on its own. The backoff goes out whenever it
 # is SET, even when blank: a blank value means "no retry" (as qwen-agent.sh reads it), and
 # dropping it here would hand the runner the default of "10 30" instead.
 for _v in QWEN_SEARCH_BACKEND QWEN_SEARCH_URL QWEN_SEARCH_KEY QWEN_SEARCH_BRAVE_URL \
-          QWEN_PLAYWRIGHT_MCP QWEN_CLAUDE_BIN; do
+          QWEN_PLAYWRIGHT_MCP QWEN_CLAUDE_BIN QWEN_CLAUDE_TOOLS QWEN_ADVISOR_TOOLS; do
   eval "[ -n \"\${$_v:-}\" ] && export $_v"
 done
 [ -n "${QWEN_EXEC_RETRY_BACKOFF+x}" ] && export QWEN_EXEC_RETRY_BACKOFF

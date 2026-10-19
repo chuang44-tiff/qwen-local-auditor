@@ -136,6 +136,10 @@ if [ -e "$CONFIG" ]; then
 else
   cp "$REPO/config.example" "$CONFIG" || die "cannot write $CONFIG"
   say "wrote $CONFIG"
+  # A fresh install starts with every Claude call off, so there is nothing to announce;
+  # an upgrade (config already there) keeps the one-time "Claude settings changed" notice.
+  _marker="${XDG_STATE_HOME:-$HOME/.local/state}/qwen-agent/notice-claude-settings-1"
+  { mkdir -p "$(dirname "$_marker")" && : > "$_marker"; } 2>/dev/null || true
 fi
 
 forwarder qwen-agent         qwen-agent.sh

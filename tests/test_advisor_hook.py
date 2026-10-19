@@ -299,7 +299,7 @@ def test_hook_denies_the_first_write_once_with_the_advice(hk):
     assert "plan: opus advised" in out["systemMessage"]
     assert (hk["state"] / "count").read_text() == "1"
     [rec] = records(hk)
-    assert (rec["trigger"], rec["round"], rec["called"], rec["tool"], rec["path"]) == (
+    assert (rec["call"], rec["round"], rec["called"], rec["tool"], rec["path"]) == (
         "plan", 1, True, "Edit", "src/x.py")
     assert rec["cost_usd"] == 0.11 and rec["digest_chars"] > 100 and rec["cut"] is False
     assert "APPROACH: read value.txt first" in rec["advice"]
@@ -337,6 +337,24 @@ def test_hook_records_a_safeguard_refusal_as_its_own_reason(hk):
     assert r.returncode == 0 and r.stdout == ""               # fails open
     [rec] = records(hk)
     assert rec["called"] is False and rec["skipped_reason"] == "refused by Claude's safeguards"
+
+
+def test_hook_tools_flag_lets_the_plan_call_read_the_code(hk):
+    env = dict(os.environ, FAKE_PLAN_DIR=str(hk["calls"]), FAKE_PLAN_MODE="ok",
+               QWEN_PLAN_LAG_WAIT="0.3", QWEN_PLAN_ROUND="1")
+    argv = [sys.executable, HOOK, "--state", str(hk["state"]), "--model", "opus",
+            "--task", str(hk["task"]), "--record", str(hk["record"]), "--log", str(hk["log"]),
+            "--digest", str(hk["digest"]), "--claude", str(hk["fake"]), "--timeout", "30", "--tools"]
+    payload = dict(hk["payload"], cwd=str(hk["tmp"]))          # the call starts in a real dir
+    r = subprocess.run(argv, input=json.dumps(payload), capture_output=True, text=True,
+                       env=env, timeout=90)
+    assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "YOU CAN READ THE CODE" in (hk["calls"] / "stdin.1").read_text()
+
+
+def test_hook_without_tools_flag_ignores_an_inherited_tools_env(hk):
+    run_hook(hk, extra={"QA_ADVISOR_TOOLS": "1"})
+    assert "YOU CAN READ THE CODE" not in (hk["calls"] / "stdin.1").read_text()
 
 
 def test_hook_ignores_a_subagent_write(hk):
@@ -451,8 +469,8 @@ def test_gate_holds_a_reissued_edit_once_when_the_advice_was_ignored(hk):
     assert out["permissionDecision"] == "deny"
     assert "ADVICE RESPONSE" in out["permissionDecisionReason"]
     assert "CHECK NEXT" in out["permissionDecisionReason"]
-    gate = [x for x in records(hk) if x["trigger"] == "plan-gate"]
-    assert gate == [{"trigger": "plan-gate", "responded": False, "checked": False, "held": True}]
+    gate = [x for x in records(hk) if x["call"] == "plan-gate"]
+    assert gate == [{"call": "plan-gate", "responded": False, "checked": False, "held": True}]
     again = run_hook(hk, payload=dict(hk["payload"], tool_use_id="held3"))
     assert again.stdout == ""                                 # never held twice
     assert stub_calls(hk) == ["stdin.1"]                      # the gate makes no model call
@@ -470,11 +488,11 @@ def test_gate_lets_the_edit_through_when_the_advice_was_acted_on(hk):
     r = _advised(hk, [said("ADVICE RESPONSE:\n1. DONE read value.txt"),
                       use("c1", "Read", file_path="/repo/value.txt"), result("c1", "v")])
     assert r.stdout == ""
-    assert [x for x in records(hk) if x["trigger"] == "plan-gate"][0]["held"] is False
+    assert [x for x in records(hk) if x["call"] == "plan-gate"][0]["held"] is False
 
 
 @posix_only
 def test_gate_is_off_when_the_plan_call_failed(hk):
     run_hook(hk, mode="err")
     assert run_hook(hk, payload=dict(hk["payload"], tool_use_id="held2")).stdout == ""
-    assert [x["trigger"] for x in records(hk)] == ["plan"]
+    assert [x["call"] for x in records(hk)] == ["plan"]

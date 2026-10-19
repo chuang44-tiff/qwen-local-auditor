@@ -96,6 +96,14 @@ class FakeClaude:
 
 
 @pytest.fixture(autouse=True)
+def config_confirm(monkeypatch):
+    """The confirm pass is local by default; most tests here exercise the Claude confirmer,
+    so they run as a user whose config file says QWEN_CONFIRM=opus (qwen-swarm.sh copies it
+    to QA_CFG_CONFIRM). The default and the other config values have their own tests."""
+    monkeypatch.setenv("QA_CFG_CONFIRM", "opus")
+
+
+@pytest.fixture(autouse=True)
 def claude(monkeypatch):
     """Every ui-test run in these tests talks to FakeClaude, never to a real claude."""
     fc = FakeClaude()
@@ -838,7 +846,7 @@ def test_confirm_knobs_are_declared_and_validated_before_the_run(tmp_path, fake,
                           "confirm": "str", "confirm_model": "str", "confirm_max": "int"}
     quick = m["presets"]["quick"]
     assert (quick["confirm"], quick["confirm_model"], quick["confirm_max"],
-            quick["fixtures"]) == ("claude", "opus", 10, "")
+            quick["fixtures"]) == ("local", "opus", 10, "")
     assert m["roles"]["confirmer"] == {"file": "roles/confirmer.md", "fence": "browser-probe",
                                        "deep": False}
     suite = suite_file(tmp_path, 1)
@@ -1264,11 +1272,11 @@ def test_parse_confirmation():
             parse(bad, "s2")
 
 
-def test_resume_of_a_pre_change_ui_test_folder_fills_confirm_and_warns(tmp_path, fake,
-                                                                       monkeypatch, capsys):
+def test_resume_of_a_pre_change_ui_test_folder_fills_confirm_locally(tmp_path, fake,
+                                                                     monkeypatch, capsys):
     # a run folder made before this change has none of the new knobs in its config.json:
-    # the resume fills them from the run's own preset, so the confirm pass comes on
-    # with confirm=claude -- and the run-start notice says so before any call
+    # the resume fills them from the run's own preset, whose confirm is local -- an old
+    # folder never gains a Claude call it did not ask for -- and no claude notice is printed
     monkeypatch.setenv("FAKE_UI_FAIL", "s1")
     out = tmp_path / "run"
     assert ui_run(fake, suite_file(tmp_path, 2), out, "--set", "confirm=none") == 4
@@ -1281,11 +1289,9 @@ def test_resume_of_a_pre_change_ui_test_folder_fills_confirm_and_warns(tmp_path,
     capsys.readouterr()
     assert runner.main(agent_args() + ["--resume", str(out)]) == 4
     err = capsys.readouterr().err
-    assert "config.json has no 'confirm'; using preset value 'claude'" in err
-    assert "confirm=claude: for each FAIL/BLOCKED scenario" in err
-    rows = {r["id"]: r for r in json.loads((out / "results.json").read_text(encoding="utf-8"))}
-    assert rows["s1"]["confirmation"]["verdict"] == "NEEDS_HUMAN"   # FakeClaude: unavailable
-    assert "confirmation" not in rows["s2"]                          # a PASS is never confirmed
+    assert "config.json has no 'confirm'; using preset value 'local'" in err
+    assert "confirm=claude:" not in err
+    assert runner.load_json(out / "config.json")["confirm"] == "local"
 
 
 def test_tester_defaults_to_medium_effort():
@@ -1297,3 +1303,65 @@ def test_tester_defaults_to_medium_effort():
                       "local-auditor" / "lib" / "workflows" / "ui-test")
     assert {r: m.roles[r].effort for r in m.roles} == {
         "tester": "medium", "confirmer": None}
+
+
+# ------------------------------------------------------------------ confirm from the config
+
+def test_ui_test_confirm_defaults_local(tmp_path, fake, monkeypatch, capsys):
+    monkeypatch.delenv("QA_CFG_CONFIRM")
+    probed = []
+    monkeypatch.setattr(claude_check, "probe", lambda *a, **k: probed.append(1) or ("available", "", ""))
+    monkeypatch.setenv("FAKE_UI_FAIL", "s1")
+    out = tmp_path / "run"
+    assert ui_run(fake, suite_file(tmp_path, 2), out) == 4
+    assert json.loads((out / "config.json").read_text(encoding="utf-8"))["confirm"] == "local"
+    assert probed == [] and "confirm=claude:" not in capsys.readouterr().err
+
+
+def test_ui_test_confirm_from_config(tmp_path, fake, monkeypatch):
+    monkeypatch.setenv("QA_CFG_CONFIRM", "sonnet")
+    out = tmp_path / "run"
+    assert ui_run(fake, suite_file(tmp_path, 1), out) == 0
+    cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
+    assert (cfg["confirm"], cfg["confirm_model"]) == ("claude", "sonnet")
+    out2 = tmp_path / "run2"
+    assert ui_run(fake, suite_file(tmp_path, 1), out2, "--set", "confirm=none") == 0
+    assert json.loads((out2 / "config.json").read_text(encoding="utf-8"))["confirm"] == "none"
+
+
+@pytest.mark.parametrize("value,mode", [("off", "local"), ("local", "local"), ("none", "none")])
+def test_ui_test_confirm_config_modes(tmp_path, fake, monkeypatch, value, mode):
+    monkeypatch.setenv("QA_CFG_CONFIRM", value)
+    out = tmp_path / "run"
+    assert ui_run(fake, suite_file(tmp_path, 1), out) == 0
+    assert json.loads((out / "config.json").read_text(encoding="utf-8"))["confirm"] == mode
+
+
+def test_ui_test_show_claude_prints_confirm(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("QA_CFG_CONFIRM")
+    runner._MODULES.clear()
+    assert runner.main(agent_args() + ["ui-test", "--show-claude"]) == 0
+    assert "confirm=local" in capsys.readouterr().out.splitlines()
+    monkeypatch.setenv("QA_CFG_CONFIRM", "sonnet")
+    runner._MODULES.clear()
+    assert runner.main(agent_args() + ["ui-test", "--show-claude"]) == 0
+    assert "confirm=claude:sonnet" in capsys.readouterr().out.splitlines()
+
+
+def test_preset_cannot_enable_claude_confirm(tmp_path, fake, monkeypatch, capsys):
+    import shutil
+    monkeypatch.delenv("QA_CFG_CONFIRM")
+    folder = tmp_path / "ui-copy"
+    shutil.copytree(runner.BUILTIN / "ui-test", folder)
+    m = json.loads((folder / "workflow.json").read_text(encoding="utf-8"))
+    m["presets"]["quick"]["confirm"] = "claude"
+    (folder / "workflow.json").write_text(json.dumps(m), encoding="utf-8")
+    (fake / "tester.py").write_text(TESTER, encoding="utf-8")
+    out = tmp_path / "run"
+    runner._MODULES.clear()
+    assert runner.main(agent_args() + [str(folder), GOAL, "--set",
+                                       "scenarios=" + suite_file(tmp_path, 1),
+                                       "--out", str(out)]) == 0
+    cfg = json.loads((out / "config.json").read_text(encoding="utf-8"))
+    assert cfg["confirm"] == "local"
+    assert "preset's confirm=claude is ignored" in capsys.readouterr().err

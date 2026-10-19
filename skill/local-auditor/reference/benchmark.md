@@ -31,9 +31,9 @@ Aider polyglot, 20 exercises:
 | coder | advisor | round 1 | final | tokens | Claude cost |
 |---|---|---|---|---|---|
 | Qwen (local) | none | 11/20 | 17/20 | 15.2M | $0 |
-| Qwen | Opus, the coder asks only (21 calls) | 12/20 | 17/20 | 12.4M | $1.87 |
-| Qwen | Opus, failure call only (8 calls) | 12/20 | 18/20 | 13.0M | $0.70 |
-| Qwen | Opus, both (8 failure + 19 own calls) | 12/20 | **19/20** | 12.5M | $2.30 |
+| Qwen | Opus as advisor only (the coder asks; 21 calls) | 12/20 | 17/20 | 12.4M | $1.87 |
+| Qwen | Opus as rescue only (after a failing round; 8 calls) | 12/20 | 18/20 | 13.0M | $0.70 |
+| Qwen | Opus as advisor + rescue (8 rescue + 19 own calls) | 12/20 | **19/20** | 12.5M | $2.30 |
 | Haiku 5.5 | none | 11/20 | **20/20** | 14.7M | $1.30 |
 
 Terminal-Bench 2.0, 15 hard tasks:
@@ -41,9 +41,14 @@ Terminal-Bench 2.0, 15 hard tasks:
 | coder | advisor | round 1 | final | tokens | Claude cost |
 |---|---|---|---|---|---|
 | Qwen (local) | none | 11/15 | 13/15 | 96M | $0 |
-| Qwen | Opus, the coder asks only (11 calls) | 9/15 | 13/15 | 96M | $1.95 |
-| Qwen | Opus, both (5 failure + 16 own calls) | 10/15 | 14/15 | 114M | $3.67 |
+| Qwen | Opus as advisor only (the coder asks; 11 calls) | 9/15 | 13/15 | 96M | $1.95 |
+| Qwen | Opus as advisor + rescue (5 rescue + 16 own calls) | 10/15 | 14/15 | 114M | $3.67 |
 | Haiku 5.5 | none | 14/15 | **15/15** | 57.4M | $7.07 |
+
+These runs predate the current defaults: the rows show 19 and 16 calls of the coder's own,
+and Claude had no read tools (today's plan, advisor and rescue calls get Read, Grep and Glob unless `QWEN_CLAUDE_TOOLS=0`).
+There is no rescue-only row on Terminal-Bench. The "advisor" and "rescue" names are today's
+settings; the runs were made with the earlier `--advisor` flag and its after-failure mode.
 
 Tokens are everything the coder read and wrote, cache and subagents included. Read them as
 "how much work the coder did", not as a price.
@@ -52,7 +57,7 @@ Tokens are everything the coder read and wrote, cache and subagents included. Re
 
 **Haiku 5.5 is very good.** On Aider it matches the local model on the first try (11/20 each)
 and then corrects itself far better: 20/20, against 17/20 for Qwen alone and 19/20 for Qwen
-with Opus helping. It costs less than Qwen plus Opus there ($1.30 against $2.30). On the hard
+with Opus as advisor and rescue. It costs less than Qwen plus Opus there ($1.30 against $2.30). On the hard
 set it leads on both rounds: 14/15 on the first try and 15/15 in the end. Only one task
 (dna-assembly) needed a second round. An exact run-for-run comparison would take more runs,
 but a cheap model that reads its own failures this well is a real achievement.
@@ -64,9 +69,9 @@ first try, much better at correcting itself, and on easy tasks it is also cheape
 
 **What the local setup still offers:**
 
-- It works offline, and your code stays on your machine.
+- It works offline, and with the Claude calls off (the default) your code stays on your machine.
 - It costs nothing per token. Long runs, retries and overnight jobs have no meter.
-- On the hard set it is still cheaper: Qwen with the failure call got 14/15 for $3.67, about
+- On the hard set it is still cheaper: Qwen with Opus as advisor + rescue got 14/15 for $3.67, about
   half of Haiku's $7.07 for one task fewer. Qwen alone got 13/15 for $0.
 
 How Haiku was run and priced: same loop, through Claude Code, no advisor. Cost comes from the
@@ -76,19 +81,20 @@ Terminal-Bench requests crossed that line, which is most of why that run cost $7
 
 ## The advisor
 
-`--advisor opus` (experimental, off unless typed) lets the local coder get advice from Claude
-Opus through your own `claude` login
-([details](qwen-agent.md#advisor---advisor-model-experimental)). It makes two kinds of call:
+The Claude calls (experimental, off unless your config file or a typed flag turns one on)
+let the local coder get advice from Claude Opus through your own `claude` login
+([details](qwen-agent.md#advisor---advisor-model-experimental)). Two of them were measured:
 
-- The **coder asks** when it decides to (up to 4 times per run).
-- Under `--until-done`, the harness makes a **failure call**: after a failing round it asks
-  the advisor what went wrong, with the failing output and the round's diff, and puts the
-  answer into the next round's prompt.
+- **Advisor** (`--advisor opus`): the coder asks when it decides to (up to 4 times per run
+  by default).
+- **Rescue** (`--rescue opus`, with `--until-done`): after a failing round the harness asks
+  what went wrong, with the failing output and the round's diff, and puts the answer into
+  the next round's prompt.
 
-**The recommended use is the failure call**: `--until-done --advisor opus`. The harness, not
-the model, decides when to ask. The best Qwen row on both sets includes it. On Aider the
-failure call alone reached 18/20 for $0.70, while the coder's own asks alone stayed at 17/20
-for $1.87.
+**The recommended use is rescue**: `--until-done --rescue opus`. The harness, not the model,
+decides when to ask. The best Qwen row on both sets includes it (advisor + rescue). On Aider
+rescue alone reached 18/20 for $0.70, while the coder's own asks alone stayed at 17/20 for
+$1.87.
 
 This agrees with Anthropic's own advisor findings: "In two runs each, Claude Haiku 5.5 and
 Claude Sonnet 5.5 called the Opus 5.5 advisor on none of the 198 questions, so both pairings
@@ -96,25 +102,25 @@ scored within run-to-run noise of the executor alone." Their fix is to ask for c
 points
 ([Optimizing for cost and intelligence](https://platform.claude.com/docs/en/about-claude/models/optimizing-for-cost-and-intelligence#advisor-strategy-escalate-hard-decisions),
 [Advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool)).
-The failure call is that idea applied to the loop.
+Rescue is that idea applied to the loop.
 
 **Caveat, once:** each row is one run on 20 or 15 tasks. The results are suggestive, not
-proven. The asks-only rows ran on an earlier release with no failure call, and the
-failure-call-only row ran on a benchmark build.
+proven. The advisor-only rows ran on an earlier release with no rescue, and the
+rescue-only row ran on a benchmark build.
 
-### Why the failure call helps
+### Why rescue helps
 
 The coder sees the failing test output in its next round but often does not act on it. The
-failure call puts a second model on the same output, asks it to name the mistake, and makes
+rescue puts a second model on the same output, asks it to name the mistake, and makes
 the answer part of the prompt.
 
-- **scale-generator (Aider)** failed in both runs without the failure call. The advice read
+- **scale-generator (Aider)** failed in both runs without rescue. The advice read
   the failing assertions ("the expected output has 13 notes; `chromatic` emits 12") and named
-  the one-line fix. It passed in both runs with the failure call.
+  the one-line fix. It passed in both runs with rescue.
 - **path-tracing (Terminal-Bench)**: round 1 was all analysis and the required file was never
   written. The advice said so ("write `image.c` now, even if crude") and round 2 passed.
 
-A failure call cost about $0.09 on Aider and $0.13 on the hard set, at most one per failing
+A rescue call cost about $0.09 on Aider and $0.13 on the hard set, at most one per failing
 round. Most of the default's cost is the coder's own asks.
 
 ### The coder's own asks
@@ -139,7 +145,7 @@ reproduce the benchmark's tests, expected outputs or reference solutions from me
 every answer was read. Opus declined to quote tests ("I recognise this exercise, so I won't
 quote its tests") and judged against the spec. Once, in go-counting with only the coder's
 asks, it still recalled what the tests import; that exercise is counted as failed (18/20 raw,
-17/20 in the table). The failure-call answers reason from the failing output the coder also
+17/20 in the table). The rescue answers reason from the failing output the coder also
 sees; none quoted tests beyond it. On the hard set no answer recited tests or solutions.
 
 ## How the runs were kept honest

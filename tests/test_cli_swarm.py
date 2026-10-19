@@ -1,4 +1,5 @@
 """The qwen-swarm wrapper: everything the bash side owns, offline (fake agent)."""
+import json
 import os
 import pathlib
 import re
@@ -18,7 +19,8 @@ BASH = os.environ.get("TEST_BASH") or shutil.which("bash")
 
 def run(tmp_path, args, wrap=WRAP, **env):
     e = {k: v for k, v in os.environ.items() if not k.startswith("QWEN_")}
-    e.update(QWEN_CONFIG=str(tmp_path / "noconfig"), HOME=str(tmp_path), **env)
+    e.update(dict(dict(QWEN_CONFIG=str(tmp_path / "noconfig"), HOME=str(tmp_path),
+                       QWEN_NO_NOTICE="1"), **env))
     return subprocess.run([BASH, str(wrap), *args], capture_output=True, text=True,
                           encoding="utf-8", cwd=str(tmp_path), env=e, timeout=120)
 
@@ -83,7 +85,6 @@ def test_the_alias_keeps_its_own_help_and_version(tmp_path):
 
 # ---- backwards compatibility: qwen-deep-research must behave exactly as released ----
 import io  # noqa: E402
-import json  # noqa: E402
 
 import lib.research as rs  # noqa: E402
 
@@ -173,7 +174,7 @@ def test_legacy_check_still_runs_the_model_and_search_preflight(tmp_path):
 def test_unknown_compat_value_is_a_usage_error(tmp_path):
     # (d) a value the runner does not know is a usage error, not silently plain qwen-swarm
     e = {k: v for k, v in os.environ.items() if not k.startswith("QWEN_")}
-    e.update(QWEN_CONFIG=str(tmp_path / "noconfig"), HOME=str(tmp_path))
+    e.update(QWEN_CONFIG=str(tmp_path / "noconfig"), HOME=str(tmp_path), QWEN_NO_NOTICE="1")
     r = subprocess.run([sys.executable, str(RUNNER), "--compat", "bogus", "--agent",
                         sys.executable, "--agent", str(FAKE), "what is x?"],
                        capture_output=True, text=True, encoding="utf-8", cwd=str(tmp_path),
@@ -245,6 +246,7 @@ def test_a_browser_workflow_checks_and_preflights_without_a_search_backend(tmp_p
 
 # ---------------------------------------------------------------- config-file settings
 ENV_WORKFLOW = r'''
+import json
 import os
 def run(wf):
     # a test probe: real workflows must not read the environment
@@ -324,7 +326,7 @@ def test_config_file_settings_reach_claude_check(tmp_path):
     cc = tmp_path / "cc"
     cc.mkdir()
     (tmp_path / "noconfig").write_text(
-        'QWEN_PLAYWRIGHT_MCP="node /x/cli.js"\nQWEN_CLAUDE_BIN=%s\n' % fake, encoding="utf-8")
+        'QWEN_PLAYWRIGHT_MCP="node /x/cli.js"\nQWEN_CLAUDE_BIN=%s\nQWEN_CONFIRM=opus\n' % fake, encoding="utf-8")
     folder = make_workflow(tmp_path / "wfs", script=CLAUDE_WORKFLOW)
     out = tmp_path / "run"
     r = run(tmp_path, [str(folder), "g", "--out", str(out)], FAKE_CC_DIR=str(cc),
@@ -336,3 +338,83 @@ def test_config_file_settings_reach_claude_check(tmp_path):
     cfg = json.loads(pathlib.Path(argv[argv.index("--mcp-config") + 1]).read_text(encoding="utf-8"))
     assert cfg["mcpServers"]["playwright"]["command"] == "node"
     assert cfg["mcpServers"]["playwright"]["args"][0] == "/x/cli.js"
+
+
+def test_swarm_whats_new_shared_marker(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    env = dict(QWEN_NO_NOTICE="", XDG_STATE_HOME=str(state), **fake_env(tmp_path))
+    r = run(tmp_path, ["--list"], **env)
+    assert r.returncode == 0, r.stderr
+    assert "qwen-agent: Claude settings changed" in r.stderr
+    assert "Claude settings changed" not in r.stdout
+    assert (state / "qwen-agent" / "notice-claude-settings-1").exists()
+    # the marker qwen-agent made suppresses it in qwen-swarm, and the other way round
+    r = run(tmp_path, ["--list"], **env)
+    assert "Claude settings changed" not in r.stderr
+    (state / "qwen-agent" / "notice-claude-settings-1").unlink()
+    r = run(tmp_path, ["--check", "research"], **env)
+    assert "Claude settings changed" in r.stderr
+
+
+# ------------------------------------------------------------ Claude settings (config file only)
+
+def _claude_wf(tmp_path):
+    return str(make_workflow(tmp_path / "wfs"))
+
+
+def _units_advisor(tmp_path):
+    return [a[a.index("--advisor") + 1] for a in calls(tmp_path / "fake")]
+
+
+def test_config_file_advisor_reaches_every_unit_and_env_is_ignored(tmp_path):
+    cfg = tmp_path / "cfg"
+    cfg.write_text('QWEN_ADVISOR="${QWEN_ADVISOR:-opus}"\r\nexport QWEN_PLAN=sonnet\r\n',
+                   encoding="utf-8", newline="")
+    r = run(tmp_path, [_claude_wf(tmp_path), "g", "--out", str(tmp_path / "run")],
+            QWEN_CONFIG=str(cfg), QWEN_ADVISOR="sonnet", **fake_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert set(_units_advisor(tmp_path)) == {"opus"}          # the file's default, not the env's
+    assert all(a[a.index("--plan") + 1] == "off" for a in calls(tmp_path / "fake"))   # read-only role: no real plan
+
+
+def test_exported_env_alone_never_enables_claude(tmp_path):
+    r = run(tmp_path, [_claude_wf(tmp_path), "g", "--out", str(tmp_path / "run")],
+            QWEN_ADVISOR="opus", QWEN_PLAN="opus", QWEN_CONFIRM="opus", **fake_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert set(_units_advisor(tmp_path)) == {"off"}
+
+
+def test_show_claude_through_the_wrapper(tmp_path):
+    cfg = tmp_path / "cfg"
+    cfg.write_text("QWEN_ADVISOR=opus\nQWEN_CONFIRM=sonnet\n", encoding="utf-8")
+    r = run(tmp_path, ["ui-test", "--show-claude"], QWEN_CONFIG=str(cfg), **fake_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert "tester: plan=n/a advisor=opus rescue=n/a" in r.stdout.splitlines()
+    assert "confirm=claude:sonnet" in r.stdout.splitlines()
+    assert calls(tmp_path / "fake") == []
+
+
+def test_config_export_line_not_in_child_env(tmp_path):
+    cfg = tmp_path / "cfg"
+    cfg.write_text("export QWEN_ADVISOR=opus\nexport QWEN_PLAN=opus\nexport QWEN_CONFIRM=opus\n",
+                   encoding="utf-8")
+    r = run(tmp_path, [_claude_wf(tmp_path), "g", "--out", str(tmp_path / "run")],
+            QWEN_CONFIG=str(cfg), **fake_env(tmp_path))
+    assert r.returncode == 0, r.stderr
+    envs = [json.loads(x) for x in (tmp_path / "fake" / "env.jsonl").read_text().splitlines()]
+    assert envs
+    for e in envs:
+        assert not {"QWEN_ADVISOR", "QWEN_PLAN", "QWEN_RESCUE", "QWEN_CONFIRM"} & set(e)
+
+
+def test_config_tools_off_reaches_show_claude(tmp_path):
+    # QWEN_CLAUDE_TOOLS=0 in the config FILE (the qwen-agent children read it themselves):
+    # the runner's own line must agree, so qwen-swarm.sh exports it
+    (tmp_path / "noconfig").write_text("QWEN_CLAUDE_TOOLS=0\nQWEN_ADVISOR=opus\n", encoding="utf-8")
+    r = run(tmp_path, ["research", "q", "--show-claude"], QWEN_BASE_URL="http://127.0.0.1:9/v1")
+    assert r.returncode == 0, r.stderr
+    assert "claude read tools (plan/advisor/rescue): off" in r.stdout.splitlines()
+    r = run(tmp_path, ["research", "q", "--show-claude"], QWEN_BASE_URL="http://127.0.0.1:9/v1",
+            QWEN_CLAUDE_TOOLS="0")                     # the environment spelling still works
+    assert "claude read tools (plan/advisor/rescue): off" in r.stdout.splitlines()

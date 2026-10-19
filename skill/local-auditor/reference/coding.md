@@ -140,14 +140,18 @@ disk).
 | `--allow-dirty` | start even with uncommitted changes |
 | `--no-deviation-audit` | skip the spec-vs-diff audit after the checks pass |
 | `--advisor MODEL` | every coder round may ask a Claude model for advice |
+| `--rescue MODEL` | after a failing round that another round follows, a Claude model is asked what went wrong |
 | `--plan MODEL` | the first file edit of the run is held once for a Claude model's advice |
 
-`--advisor MODEL` is allowed with the loop (typed, as ever): the supervisor makes one
+All three are off unless the config file sets `QWEN_ADVISOR` / `QWEN_RESCUE` / `QWEN_PLAN`
+(an exported variable is ignored); a typed flag overrides the config for one run, and `off`
+turns a configured one off ([qwen-agent.md](qwen-agent.md#advisor---advisor-model-experimental)).
+`--advisor MODEL` is allowed with the loop: the supervisor makes one
 advisor state directory for the run and hands it to every coder round, so all rounds
 draw on ONE `QWEN_ADVISOR_MAX_CALLS` budget between them instead of one each, and the
 deviation audit is called without the advisor — it never spends it and never sends the
-diff out on a call nobody asked it to make. Questions and the files a round attaches
-leave this machine; `report.md` gets a `## Advisor` section with the model, the budget,
+diff out on a call nobody asked it to make. Questions, the files a round attaches and
+any file Claude reads with its read tools leave this machine; `report.md` gets a `## Advisor` section with the model, the budget,
 how many calls the run made, their total cost and how many came back unavailable.
 
 `--plan MODEL` is allowed with the loop too: one plan directory for the run, so the one

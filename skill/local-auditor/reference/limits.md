@@ -80,6 +80,28 @@ verdict; do not undo that by asking a single blended question.
 **Ask for extraction, not judgment.** Every failure mode here is the harness asking the
 model to decide something when it should have asked it to report something.
 
+## Claude calls
+
+None on a fresh install. Four settings can turn one on, all from the config file (a typed
+`--plan`, `--advisor` or `--rescue` overrides it for one run); `--show-claude` prints the
+result. What goes out, and what the model can touch:
+
+| call | what leaves the machine | Claude's tools |
+|---|---|---|
+| plan | a digest of the session's messages and tool trail (no thinking) and the task | Read, Grep, Glob |
+| advisor | the agent's questions, their context and attached files (never secret-looking ones) | Read, Grep, Glob |
+| rescue | the failing output, the round's diff and the task | Read, Grep, Glob |
+| confirm | the tester's evidence, screenshots, fixtures and a browser on the app's URL | Read + browser (unchanged) |
+
+For plan, advisor and rescue, any repository file Claude reads leaves too: the secret-file
+filter applies to attachments, not to reads. `QWEN_CLAUDE_TOOLS=0` removes the read tools.
+Every call fails open (a missing login, offline, a timeout or a refusal just means no
+advice), and every call is logged on this machine: `--until-done` runs in the run folder's
+`claude-calls.jsonl`, single runs and swarm units in `advisor-<stamp>-<pid>.md` /
+`plan-<stamp>-<pid>.md` under `QWEN_OUTDIR` or `~/.cache/qwen-agent/advisor/`, ui-test's
+confirm pass in `RUN/claude/calls.jsonl`. Swarms follow the
+same config per role; a workflow file can never turn a call on.
+
 ## The fence at a glance
 
 What each command can reach, and which flag opens what. The sections that follow give

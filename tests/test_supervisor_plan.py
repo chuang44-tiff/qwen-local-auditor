@@ -12,7 +12,7 @@ from lib import supervisor
 
 from test_supervisor import (PY, FAKE, _raise_on_call, _report_text, _run_dir, calls,  # noqa: E402,F401
                              env, script, sup)
-from test_supervisor_advisor_fail import _harness_log, _sup_audited, stub_advice  # noqa: E402,F401
+from test_supervisor_rescue import _calls_log, _sup_audited, stub_advice  # noqa: E402,F401
 
 REC = {"called": True, "skipped_reason": None, "cost_usd": 0.12, "tool": "Edit",
        "path": "value.txt", "digest_chars": 900, "cut": False, "advice": "Use the word good.",
@@ -46,12 +46,12 @@ def test_every_coder_round_gets_the_plan_and_the_audit_does_not(env):
     assert "--plan" not in audit[0] and "--plan-state" not in audit[0]
     rounds = plan_calls(tmp)
     assert [r["round"] for r in rounds] == ["1", "2"] and all(r["task"] for r in rounds)
-    [rec] = _harness_log(tmp)
-    assert (rec["trigger"], rec["round"], rec["reply"], rec["called"]) == ("plan", 1, "tried", True)
+    [rec] = _calls_log(tmp)
+    assert (rec["call"], rec["round"], rec["reply"], rec["called"]) == ("plan", 1, "tried", True)
     text = _report_text(tmp)
     assert "plan call: round 1, Edit value.txt, digest 900 chars (uncut), $0.12" in text
     assert "## Plan" in text and "Use the word good." in text and "switches: plan" in text
-    assert "## Advisor" not in text                            # --plan alone is not --advisor
+    assert "## Claude calls" not in text                           # --plan alone is not --advisor
     run_dir = _run_dir(tmp)
     assert (run_dir / "plan.md").read_text() == "THE BRIEF"
     assert (run_dir / "plan-digest.md").read_text() == "THE DIGEST"
@@ -62,24 +62,24 @@ def test_plan_record_comes_before_the_failure_record_and_is_not_counted_as_one(e
     repo, task, tmp = env
     script(tmp, [{"result": "tried", "plan_record": REC},
                  {"result": "fixed", "write": {"value.txt": "good\n"}}])
-    assert sup(repo, task, "--plan", "opus", "--advisor", "opus", "--max-rounds", "2") == 0
-    log = _harness_log(tmp)
-    assert [(r["trigger"], r["round"]) for r in log] == [("plan", 1), ("fail", 1)]
+    assert sup(repo, task, "--plan", "opus", "--rescue", "opus", "--max-rounds", "2") == 0
+    log = _calls_log(tmp)
+    assert [(r["call"], r["round"]) for r in log] == [("plan", 1), ("rescue", 1)]
     assert log[0]["reply"] == "tried" and log[1]["reply"] == "fixed"
     c = calls(tmp)
-    assert flag(c[0], "--plan-state") != flag(c[0], "--advisor-state")
+    assert "--advisor-state" not in c[0] and flag(c[0], "--plan-state")
     text = _report_text(tmp)
-    assert "harness calls: 1" in text and "harness skipped: 0" in text
+    assert "rescue calls: 1" in text and "rescue skipped: 0" in text
     assert text.count("- round 1: asked") == 1                 # the plan call is not listed there
-    assert "## Plan" in text and "## Advisor" in text
+    assert "## Plan" in text and "## Claude calls" in text
 
 
-def test_plan_only_run_has_no_harness_lines(env):
+def test_plan_only_run_has_no_rescue_lines(env):
     repo, task, tmp = env
     script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}, "plan_record": REC}])
     assert sup(repo, task, "--plan", "opus") == 0
     text = _report_text(tmp)
-    assert "harness calls" not in text and "### Advice after failing rounds" not in text
+    assert "rescue calls" not in text and "### Rescue after failing rounds" not in text
 
 
 def test_run_that_never_writes_reports_the_plan_as_not_called(env):
@@ -88,7 +88,7 @@ def test_run_that_never_writes_reports_the_plan_as_not_called(env):
     assert sup(repo, task, "--plan", "opus", "--max-rounds", "2") == 0
     text = _report_text(tmp)
     assert "plan: not called (no write)" in text and "## Plan" in text and "called: no" in text
-    assert _harness_log(tmp) == []
+    assert _calls_log(tmp) == []
     state = flag(calls(tmp)[0], "--plan-state")
     assert state and not os.path.exists(state)                 # removed after the report
 
@@ -103,7 +103,7 @@ def test_skipped_plan_call_is_noted_and_the_run_goes_on(env):
     text = _report_text(tmp)
     assert "plan skipped: Unavailable: no answer within 600s" in text
     assert "plan: not called (Unavailable: no answer within 600s)" in text
-    [rec] = _harness_log(tmp)
+    [rec] = _calls_log(tmp)
     assert rec["called"] is False and rec["reply"] == "tried"
 
 
@@ -115,7 +115,7 @@ def test_round_that_times_out_in_the_plan_call_is_noted_and_resumed(env):
     c = calls(tmp)
     assert len(c) == 2 and flag(c[1], "--resume") == "s1"
     assert "plan call ran into the round timeout" in _report_text(tmp)
-    assert len(_harness_log(tmp)) == 1                         # no second plan record
+    assert len(_calls_log(tmp)) == 1                         # no second plan record
 
 
 def test_plan_hook_killed_mid_call_is_noted_and_reported(env):
@@ -125,7 +125,7 @@ def test_plan_hook_killed_mid_call_is_noted_and_reported(env):
     script(tmp, [{"rc": 5, "result": "", "plan_count": 1},
                  {"result": "fixed", "write": {"value.txt": "good\n"}}])
     assert sup(repo, task, "--plan", "opus", "--max-rounds", "2") == 0
-    [rec] = _harness_log(tmp)
+    [rec] = _calls_log(tmp)
     assert rec["called"] is False and "timed out inside the plan call" in rec["skipped_reason"]
     text = _report_text(tmp)
     assert "plan: not called (the round timed out inside the plan call)" in text
@@ -136,7 +136,7 @@ def test_plan_hook_that_left_no_record_is_reported(env):
     repo, task, tmp = env
     script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}, "plan_count": 1}])
     assert sup(repo, task, "--plan", "opus") == 0
-    [rec] = _harness_log(tmp)
+    [rec] = _calls_log(tmp)
     assert "left no record" in rec["skipped_reason"]
 
 
@@ -177,7 +177,7 @@ def test_interrupt_during_the_round_that_made_the_plan_call_still_reports_it(env
     assert sup(repo, task, "--plan", "opus") == 130
     text = _report_text(tmp)
     assert "plan call: round 1, Edit value.txt" in text
-    [rec] = _harness_log(tmp)
+    [rec] = _calls_log(tmp)
     assert rec["reply"] is None
     assert not os.path.exists(flag(calls(tmp)[0], "--plan-state"))
 
@@ -246,3 +246,12 @@ def test_without_plan_nothing_about_plan_is_passed(env):
     assert plan_calls(tmp) == []
     text = _report_text(tmp)
     assert "## Plan" not in text and "plan:" not in text
+
+
+def test_audit_round_gets_no_advisor_flag(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}},
+                 {"result": "NO CONTRADICTIONS"}])
+    assert _sup_audited(repo, task, "--advisor", "opus", "--max-rounds", "2") == 0
+    audit = [a for a in calls(tmp) if a[a.index("-r") + 1] == "auditor"]
+    assert len(audit) == 1 and "--advisor" not in audit[0]

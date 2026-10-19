@@ -615,7 +615,8 @@ run = tmp / "run"
 run.mkdir(exist_ok=True)
 sw = swarm.Swarm([sys.executable, "-c", "pass"], run, seats=1, timeout=60)
 cfg = {"goal": "g", "depth": "quick", "items": 3, "max_agents": 1, "max_items": 1,
-       "timeout_per_item": 100, "retries": 0, "rounds": 1, "target": None}
+       "timeout_per_item": 100, "retries": 0, "rounds": 1, "target": None,
+       "claude_confirm": "opus"}
 wf = api.Workflow(m, cfg, run, sw, goal="g")
 try:
     wf.claude_check("c", [{"id": "A"}], lambda it: "ITEM=A MODE=child",
@@ -1096,3 +1097,44 @@ def test_probe_runs_once_and_not_for_cached_or_dry_runs(tmp_path, fake_cc, probe
     assert states(wf.claude_check("c", [{"id": "A"}], ask, parse, model="opus",
                                   max_calls=5)) == [("A", "ok")]
     assert not (run2 / "events.jsonl").exists()           # and it wrote no probe event
+
+
+def ask_a(it):
+    return "ITEM=%s" % it["id"]
+
+
+def test_claude_check_refused_without_permission(tmp_path, fake_cc):
+    # a custom workflow.py calling wf.claude_check with no config / no typed confirm
+    wf = workflow(tmp_path, claude_confirm="")
+    out = wf.claude_check("c", [{"id": "A"}, {"id": "B"}], ask_a, lambda t, it: t,
+                          model="opus", max_calls=5)
+    assert [r["state"] for r in out] == ["unavailable", "unavailable"]
+    assert all("Claude is off for this run (set QWEN_CONFIRM in the config, or "
+               "--set confirm=claude)" in r["why"] for r in out)
+    assert sorted(f.name for f in fake_cc.iterdir()) == []          # no claude process at all
+
+
+@pytest.mark.parametrize("conf", ["local", "none", "off"])
+def test_claude_check_refused_for_non_model_config(tmp_path, fake_cc, conf):
+    wf = workflow(tmp_path, claude_confirm=conf)
+    out = wf.claude_check("c", [{"id": "A"}], ask_a, lambda t, it: t, model="opus", max_calls=5)
+    assert out[0]["state"] == "unavailable" and list(fake_cc.iterdir()) == []
+
+
+def test_claude_check_preset_alone_cannot_permit(tmp_path, fake_cc):
+    wf = workflow(tmp_path, claude_confirm="", confirm="claude")     # a workflow.json preset
+    out = wf.claude_check("c", [{"id": "A"}], ask_a, lambda t, it: t, model="opus", max_calls=5)
+    assert out[0]["state"] == "unavailable" and list(fake_cc.iterdir()) == []
+
+
+def test_claude_check_allowed_with_config(tmp_path, fake_cc):
+    wf = workflow(tmp_path, claude_confirm="opus")
+    out = wf.claude_check("c", [{"id": "A"}], ask_a, lambda t, it: t, model="opus", max_calls=5)
+    assert out[0]["state"] == "ok"
+    assert any(f.name.startswith("call.") for f in fake_cc.iterdir())
+
+
+def test_claude_check_allowed_with_typed_confirm(tmp_path, fake_cc):
+    wf = workflow(tmp_path, claude_confirm="", confirm="claude", claude_typed_confirm=True)
+    out = wf.claude_check("c", [{"id": "A"}], ask_a, lambda t, it: t, model="opus", max_calls=5)
+    assert out[0]["state"] == "ok"

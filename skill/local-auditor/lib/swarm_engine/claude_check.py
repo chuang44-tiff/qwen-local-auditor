@@ -445,6 +445,9 @@ def run(wf, name, items, prompt, parse, *, model, max_calls, budget_usd=2.0, bro
         if total > staging.MAX_BYTES:
             raise ValueError("claude_check stage=%r holds %.1f MB, over the limit of %d MB"
                              % (str(stage), total / 1048576.0, staging.MAX_BYTES // 1048576))
+    if api.claude_checks(wf.claude_perms) is None and wf.check is None:
+        # Claude was not turned on for this run: no item is asked, no process is made
+        return [_result(it, "unavailable", None, api.CLAUDE_OFF_WHY) for it in items]
     stage_sha = wf.stage_digest(str(stage)) if stage is not None else ""   # staging's walk
     env = advisor_mcp.clean_env(os.environ)
     cache = wf.load(key)

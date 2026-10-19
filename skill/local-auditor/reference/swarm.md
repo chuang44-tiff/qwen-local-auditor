@@ -157,7 +157,7 @@ its patch. `--target` itself is never an agent's working directory unless the fe
 | `wf.target` | the target directory (a `pathlib.Path`) or `None` |
 | `wf.agent(name, role, prompt, parse)` | one agent, unit `name-1`; returns `parse(text)`, or `None` when it failed (then `wf.last_unit` has `ok`, `why`, `deadline`). Options: `cache=False`, `always=True` (runs past the deadline), `item="goal"` (the deadline log label), `stage=DIR` (below) |
 | `wf.fan_out(name, role, items, prompt, parse)` | deals `items` in groups of <= `--max-agents` units holding <= `--max-items` items each and runs every unit of the call in ONE phase (`--seats` alone limits concurrency; the group number only names units); `prompt(batch)` -> str, `parse(text, batch)` -> list of rows. Returns `Result`: `.rows`, `.dropped_items`, `.not_run_items`, `.units`, `.ok`. Options: `item_id=`, `max_items=` (e.g. 1 = one item per agent), `stage=DIR` (a fresh copy of DIR in each unit's folder as `fixtures/`, made once per unit and kept for its retries and repair round; DIR's content hash joins the unit's cache key), `repair=TEXT` (this call's repair-round prompt; `{why}` is filled in), `unit_ids=True` (units named `name-<item id>` instead of by position, so skipping an item does not move another unit's cache key; needs `item_id=` and `max_items=1`) |
-| `wf.claude_check(name, items, prompt, parse, model=M, max_calls=N)` | one `claude -p` per item through the user's claude login (below); returns one `{item, state, data, why}` per item, in order. Options: `budget_usd=2.0`, `browser=False`, `stage=DIR`, `read_dirs=()`, `item_id=`, `timeout=600`, `max_turns=40` |
+| `wf.claude_check(name, items, prompt, parse, model=M, max_calls=N)` | one `claude -p` per item through the user's claude login (below); returns one `{item, state, data, why}` per item, in order. Options: `budget_usd=2.0`, `browser=False`, `stage=DIR`, `read_dirs=()`, `item_id=`, `timeout=600`, `max_turns=40`. Refused (every item `unavailable`, no process) unless the config's `QWEN_CONFIRM` names a model or `--set confirm=claude` is typed |
 | `wf.event(kind, **fields)` | one line in `RUN/events.jsonl` (below); an engine kind is a `ValueError` |
 | `wf.vote(name, role, claims, voters, prompt, parse)` | claim-major vote slots — `(claim, k)` with `k` = 0..`voters`-1, dealt so no agent holds two slots of one claim (`voters` above `--max-agents` is an error). `prompt(batch)` and `parse(text, batch)` get the batch as that list of `(claim, k)` tuples; `parse` returns rows with `claim` (a claim id) and `verdict` (`supported`, `refuted`, `unclear`) — a row naming a claim this vote never asked about, or whose `verdict` is not a string, is ignored. `claim_id=fn` says how a claim is identified (default `c["id"]`); it also labels `run.log`'s deadline lines. Returns `{claim_id: verdict}` (majority of the votes requested) with `.cast`, `.requested`, `.result` |
 | `wf.rounds()` | `for r in wf.rounds():` yields 1, 2, ... until the `rounds` knob, the deadline, or `wf.converged` |
@@ -212,8 +212,8 @@ results = wf.claude_check(name, items, prompt, parse, *, model, max_calls, budge
                           timeout=600, max_turns=40)
 ```
 
-A workflow may have Claude check a list of items through the user's own `claude` login;
-ui-test's confirm pass is built on it. Each item is one `claude -p` run, one after another:
+A workflow may ask for a Claude check of a list of items, but only the user's settings allow it: the call proceeds only when the config file's `QWEN_CONFIRM` names a model (or `--set confirm=claude` is typed, for a workflow with that knob); otherwise every item comes back `unavailable` with why "Claude is off for this run (set QWEN_CONFIRM in the config, or --set confirm=claude)" and no `claude` process starts. `--show-claude` and the run-start summary print `claude checks: off` or `claude checks: <model>` for every workflow. A workflow may have Claude check a list of items through the user's own `claude` login;
+ui-test's confirm pass is built on it (the only swarm use of it today; it is the confirm setting, not plan or advisor). Each item is one `claude -p` run, one after another:
 `prompt(item)` is the question and `parse(text, item)` reads the answer (raise `ValueError`
 for an unusable one). The binary is `QWEN_CLAUDE_BIN` or `claude`, looked up on `PATH` for
 every call (qwen-swarm exports `QWEN_CLAUDE_BIN` and `QWEN_PLAYWRIGHT_MCP` from the config
@@ -351,6 +351,24 @@ earlier version re-runs, on resume, the tool-less roles that used to get the rev
 and writer), the roles whose default effort changed (research's searcher, reader and
 verifier; optimize's checker and reviewer; debug's triager and reviewer; ui-test's
 tester), and every web-fence unit (its grants now include the `page` tool).
+
+### Claude calls in a swarm
+
+Off on a fresh install. The config file's `QWEN_PLAN` / `QWEN_ADVISOR` are the defaults for
+every role they apply to (advisor any role; plan only a role whose fence writes, today
+debug's prober and optimize's implementer; rescue applies to no swarm role), and an exported
+variable of the same name is ignored. `--claude ROLE:KEY=MODEL[,KEY=MODEL...]` (repeatable)
+overrides them for one role in one run, `KEY` being `advisor` or `plan`, `MODEL` a model or
+`off`: `--claude prober:advisor=off` leaves the prober local while every other role gets the
+configured advisor. Neither a `workflow.json` nor a `workflow.py` can turn Claude on (see `wf.claude_check` below). `--show-claude` (also with
+`--resume RUN`) prints each role's effective settings, `claude checks:`, `claude read tools (plan/advisor/rescue):` (the `claude checks:` pass always has Read) and ui-test's confirm, then exits
+without launching anything. The ui-test confirm pass is its own setting, `QWEN_CONFIRM`
+(below). Read tools (Read, Grep, Glob) are on for plan and advisor calls unless
+`QWEN_CLAUDE_TOOLS=0`. A repair session (a resumed unit) gets `--advisor` but never `--plan`.
+A swarm unit is a single `qwen-agent` run, so its Claude calls are logged as single runs are
+(`advisor-<stamp>-<pid>.md` / `plan-<stamp>-<pid>.md` in `QWEN_OUTDIR` or
+`~/.cache/qwen-agent/advisor/`), not in the run folder; only ui-test's confirm pass logs to
+`RUN/claude/calls.jsonl`. What each call sends is as in [qwen-agent.md](qwen-agent.md#advisor---advisor-model-experimental).
 
 ## The run folder
 
@@ -584,7 +602,7 @@ qwen-swarm ui-test "RUN NAME" --set scenarios=SUITE.md --out RUN_DIR [--set base
 | `scenarios` | none: required | the suite file |
 | `base` | the file's `base:` line | where the app under test listens |
 | `fixtures` | the file's `fixtures:` line | the folder of files the scenarios upload |
-| `confirm` | `claude` | who re-checks each FAIL/BLOCKED: `claude`, `local` or `none`; anything else is exit 2 |
+| `confirm` | `local` | who re-checks each FAIL/BLOCKED: `local`, `none` or `claude`; anything else is exit 2. The config's `QWEN_CONFIRM` sets it; a workflow preset cannot make it `claude` |
 | `confirm_model` | `opus` | `claude --model` for `confirm=claude` |
 | `confirm_max` | `10` | Claude calls per run |
 
@@ -671,9 +689,9 @@ expectations the tester said failed (the whole scenario when it was blocked), pr
 probe (`browser_evaluate`, the console or the request list) to looking, reads each
 expectation's exact words, and answers one json block `{"id", "verdict", "evidence": [...]}`.
 
-- `confirm=claude` (the default): `wf.claude_check` with `confirm_model`, a browser, the
+- `confirm=claude` (only from `QWEN_CONFIRM` or a typed `--set confirm=claude`): `wf.claude_check` with `confirm_model`, a browser, the
   fixtures staged, the tester's browser folder readable, at most `confirm_max` calls.
-- `confirm=local`: role `confirmer` on the `browser-probe` fence, one unit per row named
+- `confirm=local` (the default): role `confirmer` on the `browser-probe` fence, one unit per row named
   `confirm-<id>`, with the usual cache and resume and no cap.
 - `confirm=none`: no pass; `results.json` holds what it held before the pass existed, and
   while any non-PASS row has no final verdict "What did not pass" says "No confirm pass
@@ -694,15 +712,14 @@ row is NEEDS_HUMAN without a call. Words from the page under test are not claude
 a prompt-injected or junk answer fails only that row. A row that already has a session
 verdict is not sent to the confirmer at all.
 
-**What leaves the machine.** With `confirm=claude`, the default and a saved setting rather
-than a typed flag, each FAIL/BLOCKED scenario's text, the tester's report and screenshots, and
+**What leaves the machine.** Nothing, by default: `confirm=local` keeps the check on the local
+model. With `confirm=claude` (the config file's `QWEN_CONFIRM`, or a typed `--set confirm=claude`),
+each FAIL/BLOCKED scenario's text, the tester's report and screenshots, and
 a browser session on the app's base URL go to Claude (`confirm_model`) through your claude
 login. The run says so on stderr when it starts, fresh or resumed (a line beginning
 `confirm=claude:`). For a private app, or to
-stay offline, `--set confirm=local` keeps the check on the local model and
-`--set confirm=none` skips it. A `--resume` of a run made before these knobs existed fills
-each from the preset and names it on stderr, so that run gets the default confirm pass, and
-the notice says so before any call.
+stay offline, leave it at `local`, or `--set confirm=none` to skip it. A `--resume` of a run
+made before these knobs existed fills each from the preset and names it on stderr.
 
 `results.json` rows that were checked carry `confirmation` and `final` too. `report.md` gains
 a `confirmed` column, a "## False alarms" section (the tester said FAIL or BLOCKED, the

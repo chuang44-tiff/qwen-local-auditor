@@ -77,3 +77,5 @@ explicitly asked you to accept that prompt: the permission decision is theirs. `
   only job that needs the internet (search plus fetched pages); every other route runs
   without it — but a swarm `sandbox` agent has a shell, and that shell is the user's own,
   with their network.
+
+If a qwen-agent or qwen-swarm run prints the "Claude settings changed" notice, relay it to the user verbatim.

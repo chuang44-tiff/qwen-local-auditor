@@ -50,9 +50,14 @@ round after the checks first pass, and subagent delegation — `--probe` is NOT 
 for a coding loop and stays typed: it runs the whole loop in a sandbox and returns a
 `patch:` instead of editing your tree. `--shallow` restores the plain loop; `--deep`
 types all four (`reference/coding.md`, "Depth: the rounds are deep by default").
-`--advisor MODEL` lets every round ask a Claude model for advice through your `claude`
-login on ONE budget for the run (`QWEN_ADVISOR_MAX_CALLS`, default 4, the deviation audit
-never gets it); the code and questions it sends leave this machine.
+Claude calls are off unless the config file turns them on (`QWEN_ADVISOR`, `QWEN_RESCUE`,
+`QWEN_PLAN`; an exported variable is ignored) or you type `--advisor MODEL`, `--rescue MODEL`
+or `--plan MODEL` for one run; `off` turns a configured one off. Advisor: every round may ask
+through your `claude` login on ONE budget for the run (`QWEN_ADVISOR_MAX_CALLS`, default 4;
+the deviation audit never gets it). Rescue: after a failing round, Claude is asked what went
+wrong and the advice goes into the next round. Claude gets read tools on the repo
+(`QWEN_CLAUDE_TOOLS=0` removes them). The code, questions, failing output and any file it
+reads leave this machine. `qwen-agent --show-claude` prints the effective settings.
 
 ## 3. Read the result
 
@@ -77,3 +82,5 @@ The coder records every deliberate departure from the spec as a `## DEVIATION`
 block (SPEC, DID, WHY, EVIDENCE). A departure without one keeps the task open.
 Decide each recorded deviation yourself: accept it, or change the spec.
 To audit a finished run against the spec, use `local-sweep` with `--builder deviations`.
+
+If a qwen-agent or qwen-swarm run prints the "Claude settings changed" notice, relay it to the user verbatim.

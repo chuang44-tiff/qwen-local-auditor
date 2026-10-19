@@ -24,6 +24,20 @@ QWEN_BASE_URL="${QWEN_BASE_URL:-http://127.0.0.1:8000}"
 # Where the claude executable is when it is not on PATH (install.sh's rc=8 names this).
 # QWEN_CLAUDE_BIN="${QWEN_CLAUDE_BIN:-claude}"
 
+# Claude calls (off unless you set them). Only THIS file turns one on: an exported
+# QWEN_PLAN / QWEN_ADVISOR / QWEN_RESCUE / QWEN_CONFIRM is ignored. Each value is a model
+# name (opus, sonnet, an id) or off. A typed --plan / --advisor / --rescue overrides it for
+# one run. What leaves the machine: SECURITY.md. `qwen-agent --show-claude` prints the result.
+# QWEN_PLAN="${QWEN_PLAN:-opus}"        # review the plan before the first file edit
+# QWEN_ADVISOR="${QWEN_ADVISOR:-opus}"  # the agent's ask tool (QWEN_ADVISOR_MAX_CALLS, default 4)
+# QWEN_RESCUE="${QWEN_RESCUE:-opus}"    # after a failing --until-done round
+# QWEN_CONFIRM="${QWEN_CONFIRM:-opus}"  # ui-test double-check: a model, local (default) or none
+# Plan, advisor and rescue calls may read files in your repository (Read, Grep, Glob);
+# 0 turns that off. Per-call timeout (seconds) and the claude binary they run:
+# QWEN_CLAUDE_TOOLS="${QWEN_CLAUDE_TOOLS:-1}"
+# QWEN_ADVISOR_TIMEOUT="${QWEN_ADVISOR_TIMEOUT:-600}"
+# QWEN_ADVISOR_CLAUDE="${QWEN_ADVISOR_CLAUDE:-claude}"
+
 # Pin the interpreter used to parse results. Probed by RUNNING it: on Windows a
 # bare `python3` is often a Microsoft Store stub that cannot execute anything.
 # QWEN_PYTHON="${QWEN_PYTHON:-python}"

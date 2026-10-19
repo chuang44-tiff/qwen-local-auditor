@@ -431,7 +431,7 @@ def _advisor_budget():
 
 
 def _advisor_asks_off():
-    """QWEN_ADVISOR_MAX_CALLS=0: the agent's ask is off. The loop's own failure call is not."""
+    """QWEN_ADVISOR_MAX_CALLS=0: the agent's ask is off. The loop's own rescue is not."""
     return _advisor_budget() == "0"
 
 
@@ -506,13 +506,35 @@ def _plan_records(plan_dir):
 
 def _keep_gate_records(plan_dir, run_dir):
     """Copy the hook's plan-gate records (the held re-issue after the advice) into
-    advisor-harness.jsonl before the plan dir goes. Best effort: a log, never a failure."""
-    gate = [r for r in _plan_records(plan_dir) if r.get("trigger") == "plan-gate"]
+    claude-calls.jsonl before the plan dir goes. Best effort: a log, never a failure."""
+    gate = [r for r in _plan_records(plan_dir) if r.get("call") == "plan-gate"]
     if not gate or not run_dir:
         return
     with contextlib.suppress(OSError):
-        with open(os.path.join(run_dir, "advisor-harness.jsonl"), "a", encoding="utf-8") as fh:
+        with open(os.path.join(run_dir, "claude-calls.jsonl"), "a", encoding="utf-8") as fh:
             fh.write("".join(json.dumps(r) + "\n" for r in gate))
+
+
+def _keep_call_logs(run_dir, **dirs):
+    """Copy every Claude call record (model, seconds, cost, tools, turns) into
+    claude-calls.jsonl before the state dirs go, each named by its `call`: plan, ask (the
+    agent's ask tool) or rescue (the loop's call after a failing round). Best effort."""
+    if not run_dir:
+        return
+    out = []
+    for name, d in dirs.items():
+        if not d:
+            continue
+        call = "ask" if name == "advisor" else name
+        with contextlib.suppress(OSError):
+            with open(os.path.join(d, "calls.jsonl"), encoding="utf-8") as fh:
+                for ln in fh:
+                    with contextlib.suppress(ValueError):
+                        out.append(json.dumps(dict(json.loads(ln), call=call)) + "\n")
+    if out:
+        with contextlib.suppress(OSError):
+            with open(os.path.join(run_dir, "claude-calls.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write("".join(out))
 
 
 def _plan_spent(plan_dir):
@@ -526,7 +548,7 @@ PLAN_TIMEOUT_NOTE = "plan call ran into the round timeout"
 
 def _plan_lines(plan, recs):
     """(header lines, `## Plan` section lines) of report.md for a --plan run: the model and
-    what the hook did, read from the records in advisor-harness.jsonl. Without a record the
+    what the hook did, read from the records in claude-calls.jsonl. Without a record the
     run never wrote a file, so nothing was held."""
     if not plan:
         return [], []
@@ -554,8 +576,8 @@ def _plan_lines(plan, recs):
     return head, sec + [""]
 
 
-# --advisor-triggers fail: the supervisor's own advisor call after a failing round.
-HARNESS_Q = ("The agent's last round failed the checks below. Answer as a numbered list: "
+# --rescue: the supervisor's own Claude call after a failing round.
+RESCUE_Q = ("The agent's last round failed the checks below. Answer as a numbered list: "
              "1. The most likely cause, naming the specific mistake and the line or input "
              "it concerns. 2. The change to make. 3. RUN: the one check that proves it.")
 ADVICE_BLOCK = """
@@ -587,7 +609,7 @@ def _cut(text, n):
 
 
 def harness_context(fails, diff, task, limit=advisor_mcp.MAX_CONTEXT):
-    """The failure call's context: failing output first (it is what the advice is about),
+    """The rescue's context: failing output first (it is what the advice is about),
     then the round's diff, then the task, each cut to fit `limit` in that priority."""
     heads = ("FAILING CHECKS:\n", "\n\nDIFF SINCE THE START OF THE RUN:\n", "\n\nTHE TASK:\n")
     room = limit - sum(len(h) for h in heads) - 3 * _CUT_MARK
@@ -649,7 +671,7 @@ def _check_files(items, failing, repo):
 
 
 def _attachments(check_files, repo, start, n=5):
-    """The failure call's files: the failing checks' own scripts first, then what the
+    """The rescue's files: the failing checks' own scripts first, then what the
     run changed, deduplicated, at most n in all (advisor_mcp takes no more than 5)."""
     out = []
     for p in list(check_files) + changed_files(repo, start):
@@ -658,9 +680,27 @@ def _attachments(check_files, repo, start, n=5):
     return out[:n]
 
 
-def harness_advice(model, state_dir, budget, log_path, repo, start, fails, task, check_files=()):
-    """One failure call through advisor_mcp.ask, on the harness's OWN state dir and
-    budget (the local model's count is never touched). (advice or None, info).
+def claude_tools_for(call):
+    """Do the read-only tools go with this Claude call (plan, ask or rescue)? On by default;
+    QWEN_CLAUDE_TOOLS=0 turns them off for every call. QWEN_ADVISOR_TOOLS is a bench-only
+    comma list of scopes that narrows it: 1 = plan+rescue, plan, rescue (alias fail), ask;
+    unknown parts are ignored."""
+    if os.environ.get("QWEN_CLAUDE_TOOLS") == "0":
+        return False
+    raw = os.environ.get("QWEN_ADVISOR_TOOLS") or ""
+    if not raw.strip():
+        return True
+    scopes = {p.strip() for p in raw.split(",")}
+    if "fail" in scopes:
+        scopes.add("rescue")
+    if "1" in scopes:
+        scopes.update(("plan", "rescue"))
+    return call in scopes
+
+
+def rescue_advice(model, state_dir, budget, log_path, repo, start, fails, task, check_files=()):
+    """One rescue call through advisor_mcp.ask, on the rescue's OWN state dir and
+    budget (the local model's and the advisor's count are never touched). (advice or None, info).
 
     No secret leaves the machine: every changed path advisor_mcp.looks_secret names is
     kept out of the diff (by pathspec) and out of the new-file list, and _attachments
@@ -669,9 +709,10 @@ def harness_advice(model, state_dir, budget, log_path, repo, start, fails, task,
     env.update({"QA_ADVISOR_MODEL": model, "QA_ADVISOR_STATE": state_dir,
                 "QA_ADVISOR_MAX_CALLS": str(budget),
                 "QA_ADVISOR_TIMEOUT": os.environ.get("QWEN_ADVISOR_TIMEOUT") or "600",
-                "QA_ADVISOR_LOG": log_path or "",
+                "QA_ADVISOR_LOG": log_path or "", "QA_CLAUDE_CALL": "rescue",
                 "QA_ADVISOR_CLAUDE": (os.environ.get("QWEN_ADVISOR_CLAUDE")
                                       or os.environ.get("QWEN_CLAUDE_BIN") or "claude")})
+    env["QA_ADVISOR_TOOLS"] = "1" if claude_tools_for("rescue") else ""
     try:
         # -z, not --name-only's lines: porcelain would octal-quote a non-ASCII name
         # (core.quotePath), and an escaped pathspec matches nothing -- the secret it
@@ -695,7 +736,7 @@ def harness_advice(model, state_dir, budget, log_path, repo, start, fails, task,
                if p and not advisor_mcp.looks_secret(p)]
         if new:
             diff += "\nNew files (not shown above):\n" + "\n".join(new) + "\n"
-        text = advisor_mcp.ask(HARNESS_Q, harness_context(fails, diff, task),
+        text = advisor_mcp.ask(RESCUE_Q, harness_context(fails, diff, task),
                                _attachments(check_files, repo, start), env, repo)
     except Exception as e:      # Refused, Unavailable, anything: the loop goes on without it
         return None, {"called": False, "skipped_reason": "%s: %s" % (type(e).__name__, e),
@@ -712,7 +753,7 @@ def harness_advice(model, state_dir, budget, log_path, repo, start, fails, task,
 
 def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, start, repo, denied=(),
             agent_err="", notes=(), tools=None, transcript_found=False, switches=(), depth=None,
-            advisor=None, plan=None):
+            advisor=None, plan=None, rescue=None):
     diff = _git(repo, "diff", start)
     new = _new_files(repo)
     for rel in new:
@@ -729,32 +770,29 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
                   ["| %s | %d |" % (name, cnt) for name, cnt in
                    sorted((tools or {}).items(), key=lambda kv: (-kv[1], kv[0]))]
                   ) if transcript_found else ["(no transcript found)"]
-    # The harness's own failure calls, one record per attempt (advice and reply None
-    # when the next round never ran). `calls` counts only the records whose ask went
-    # out; the attempts that were skipped without a call are `skipped`, so the money
-    # line never hides a round that went unasked. No trigger, no file, no lines:
-    # without the failure trigger the Advisor section reads exactly as before.
-    # Unreadable records are no records -- a reporting gap, never a run failure.
-    harness_path = os.path.join(run_dir, "advisor-harness.jsonl")
-    harness_seen = os.path.isfile(harness_path)
-    harness_recs = []
-    if harness_seen:
-        try:
-            with open(harness_path, encoding="utf-8") as fh:
-                harness_recs = [json.loads(line) for line in fh if line.strip()]
-        except (OSError, ValueError):
-            harness_recs = []
-    # The plan call's record (trigger "plan") shares the file; every other record is a
-    # failure call (older records have no trigger).
-    plan_recs = [r for r in harness_recs if r.get("trigger") == "plan"]
-    harness_recs = [r for r in harness_recs if r.get("trigger") not in ("plan", "plan-gate")]
-    harness_seen = harness_seen and (bool(harness_recs) or not plan_recs)
+    # The rescue calls, one record per attempt (advice and reply None when the next
+    # round never ran). `calls` counts only the records whose ask went out; the attempts
+    # that were skipped without a call are `skipped`, so the money line never hides a
+    # round that went unasked. Every record carries its `call` (plan, plan-gate, rescue);
+    # the per-call logs merged in at the end of the run have no `called` and are not
+    # these. Unreadable records are no records -- a reporting gap, never a run failure.
+    calls_path = os.path.join(run_dir, "claude-calls.jsonl")
+    run_recs = []
+    try:
+        with open(calls_path, encoding="utf-8") as fh:
+            run_recs = [json.loads(line) for line in fh if line.strip()]
+    except (OSError, ValueError):
+        run_recs = []
+    run_recs = [r for r in run_recs if isinstance(r, dict) and "called" in r]
+    plan_recs = [r for r in run_recs if r.get("call") == "plan"]
+    rescue_recs = [r for r in run_recs if r.get("call") == "rescue"]
     plan_head, plan_section = _plan_lines(plan[0] if plan else None, plan_recs)
-    harness_called = sum(1 for r in harness_recs if r.get("called"))
-    harness_lines = (["harness calls: %d" % harness_called,
-                      "harness skipped: %d" % (len(harness_recs) - harness_called),
-                      "harness cost_usd: %g" % sum(r.get("cost_usd") or 0 for r in harness_recs)]
-                     if harness_seen else [])
+    rescue_called = sum(1 for r in rescue_recs if r.get("called"))
+    rescue_lines = (["rescue: %s" % rescue,
+                     "rescue calls: %d" % rescue_called,
+                     "rescue skipped: %d" % (len(rescue_recs) - rescue_called),
+                     "rescue cost_usd: %g" % sum(r.get("cost_usd") or 0 for r in rescue_recs)]
+                    if rescue else [])
     text = "\n".join([
         "# until-done report", "",
         "stop: %s (exit %d)" % (reason, code),
@@ -768,16 +806,17 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
         *plan_head, "",
         "## Checklist", "", "| # | item | status | evidence |", "|---|---|---|---|", *rows, "",
         "## Tool use", "", *tool_lines, "",
-        # Only an --advisor run gets the section: what the option spent, over every round.
-        # The harness lines count its own failure calls from the run's record file; they
+        # Only an --advisor or --rescue run gets the section: what the options spent, over
+        # every round. The rescue lines count its own calls from the run's record file; they
         # never mix with the agent's counts above (a separate budget on a separate dir).
-        *(["## Advisor", "", *_advisor_lines(advisor), *harness_lines, ""] if advisor else []),
-        *(["### Advice after failing rounds", "",
+        *(["## Claude calls", "", *(_advisor_lines(advisor) if advisor else []), *rescue_lines, ""]
+          if advisor or rescue else []),
+        *(["### Rescue after failing rounds", "",
            *["- round %d: %s\n\n  advice:\n\n  %s\n\n  next reply (start):\n\n  %s\n" % (
                h["round"], "asked" if h["called"] else "skipped (%s)" % h["skipped_reason"],
                (h.get("advice") or "-").replace("\n", "\n  "),
-               (h.get("reply") or "-").replace("\n", "\n  ")) for h in harness_recs]]
-          if harness_recs else []),
+               (h.get("reply") or "-").replace("\n", "\n  ")) for h in rescue_recs]]
+          if rescue_recs else []),
         *plan_section,
         "## Decision log", "", decisions.render(log), "",
         "## Diff", "", "```", _git(repo, "diff", "--stat", start).rstrip(), "```",
@@ -920,7 +959,8 @@ def _run(o):
     mine = False
     run_dir = session = None
     advisor_dir = None                # --advisor: this run's ONE advisor state dir (finally removes it)
-    pending = None                    # the harness record waiting for the next round's reply
+    rescue_dir = None                 # --rescue: this run's ONE rescue state dir (finally removes it)
+    pending = None                    # the rescue record waiting for the next round's reply
     plan_dir = None                   # --plan: this run's ONE plan dir (finally removes it)
     plan_taken = False                # the plan call's record has been copied to the run dir
     report_path = None                # the report.md of this run, once written (what a
@@ -996,7 +1036,7 @@ def _run(o):
         return (o.plan, plan_dir) if plan_dir is not None else None
 
     def take_plan(reply, rnd, rc):
-        """Copy the plan call's record into run_dir/advisor-harness.jsonl once, with the
+        """Copy the plan call's record into run_dir/claude-calls.jsonl once, with the
         reply of the round it happened in. A record the hook never wrote (it was killed or
         crashed after the call was made) is made up from the counter. Safe to call again."""
         nonlocal plan_taken
@@ -1014,9 +1054,9 @@ def _run(o):
         else:
             return
         plan_taken = True
-        rec["trigger"] = "plan"
+        rec["call"] = "plan"
         rec["reply"] = (reply or "")[:1500] if reply is not None else None
-        with open(os.path.join(run_dir, "advisor-harness.jsonl"), "a", encoding="utf-8") as fh:
+        with open(os.path.join(run_dir, "claude-calls.jsonl"), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
         for name in ("plan.md", "plan-digest.md"):        # the full brief and the digest as sent
             with contextlib.suppress(OSError):
@@ -1027,14 +1067,14 @@ def _run(o):
             notes.append("plan skipped: %s" % rec.get("skipped_reason"))
 
     def flush_pending():
-        """Write the pending harness record to run_dir/advisor-harness.jsonl. The loop
+        """Write the pending rescue record to run_dir/claude-calls.jsonl. The loop
         calls it when the round the record asks about has answered (reply set), and every
-        path that writes the report calls it first: a failure call whose next round never
+        path that writes the report calls it first: a rescue call whose next round never
         ran is still a call this run made, and report.md must say so."""
         nonlocal pending
         take_plan(None, rounds, None)
         if pending is not None:
-            with open(os.path.join(run_dir, "advisor-harness.jsonl"), "a",
+            with open(os.path.join(run_dir, "claude-calls.jsonl"), "a",
                       encoding="utf-8") as fh:
                 fh.write(json.dumps(pending) + "\n")
             pending = None
@@ -1084,18 +1124,22 @@ def _run(o):
             # read it. Outside the repo and outside run_dir: qwen-test's worktree and the
             # rounds' cwd must not find a cloud-facing tool lying around.
             advisor_dir = tempfile.mkdtemp(prefix="qwen-advisor-run-")
-            # The line states the agent's ask budget, 0 (off) included; the failure call below
-            # still uses the dir.
+            # The line states the agent's ask budget, 0 (off) included.
             print("until-done: advisor %s via your claude login for every coder round; "
                   "asks: %s" % (o.advisor, _asks_text()),
                   file=sys.stderr)
-            if "fail" in o.advisor_triggers:
-                # The harness asks on its OWN state dir and budget, inside the run's:
-                # one sweep takes both, and the local model's call count is untouched.
-                os.makedirs(os.path.join(advisor_dir, "harness"))
-                print("until-done: the harness asks %s after each failing round "
-                      "(at most %d calls, besides the agent's own)"
-                      % (o.advisor, max(0, o.max_rounds - 1)), file=sys.stderr)
+        if o.rescue:
+            # The rescue asks on its OWN state dir and budget, apart from the advisor's
+            # (--advisor may be off, and the agent's asks never touch it). Removed in the
+            # finally below, like the others.
+            rescue_dir = tempfile.mkdtemp(prefix="qwen-rescue-run-")
+            if o.max_rounds <= 1:
+                print("until-done: rescue %s is unused: --max-rounds 1 leaves no round "
+                      "after a failing one" % o.rescue, file=sys.stderr)
+            else:
+                print("until-done: rescue %s after each failing round via your claude "
+                      "login (at most %d calls); the failing output and the diff leave "
+                      "this machine" % (o.rescue, o.max_rounds - 1), file=sys.stderr)
         if o.plan:
             # ONE plan dir for the whole loop, like the advisor's: the hook spends the one
             # plan call in whichever round writes first, and every later round finds it
@@ -1125,7 +1169,7 @@ def _run(o):
                                code=EXIT_HARNESS, rounds=rounds, session=session,
                                tokens=tokens, results=results, log=log, start=start,
                                repo=run_dir, denied=denied, switches=_switches(o),
-                               depth=getattr(o, "depth", None), advisor=advisor_info(), plan=plan_info())
+                               depth=getattr(o, "depth", None), advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
                 report_path = path
                 print("report: %s" % path)
                 return EXIT_HARNESS
@@ -1157,7 +1201,7 @@ def _run(o):
                                           and not _plan_spent(plan_dir) else 0))
             take_plan(r["result"], rounds, r["rc"])
             if pending is not None:
-                # This round is the answer the pending failure call was waiting for:
+                # This round is the answer the pending rescue was waiting for:
                 # record what it replied (capped -- the log is a summary, not an archive)
                 # and the record is complete.
                 pending["reply"] = (r.get("result") or "")[:1500]
@@ -1167,9 +1211,10 @@ def _run(o):
             # (~660 s with the default timeout): every later round would sit on it that
             # long before it could ask. This call_agent has returned, so the round's
             # agent process is gone and no ask can be in flight -- a lock here is dead.
-            if advisor_dir is not None:
-                with contextlib.suppress(OSError):
-                    os.rmdir(os.path.join(advisor_dir, "lock"))
+            for d in (advisor_dir, rescue_dir):
+                if d is not None:
+                    with contextlib.suppress(OSError):
+                        os.rmdir(os.path.join(d, "lock"))
             # The tree as the agent left it, taken once and before any check runs:
             # a `cmd` check runs in the live repo, so one that writes a file would
             # otherwise make a round that changed nothing look like progress.
@@ -1306,8 +1351,8 @@ def _run(o):
                          "No shell is available this run; use Read, Grep and Glob.")
                 feedback += ("\n%d Bash calls were denied last round. %s"
                              % (len(r["denied"]), fence))
-            if advisor_dir is not None and "fail" in o.advisor_triggers and rounds < o.max_rounds:
-                # The last round follows this prompt, so ask the advisor about its
+            if rescue_dir is not None and rounds < o.max_rounds:
+                # The last round follows this prompt, so ask Claude about its
                 # failure now: the advice rides into the next prompt, and the record
                 # waits for that round's reply (flushed above, or by flush_pending when
                 # the loop ends). A skipped call leaves the plain NOT_DONE prompt.
@@ -1316,22 +1361,22 @@ def _run(o):
                     # checks themselves all passed, so there is no failing output the
                     # advisor could be told about. Record the skip like any other.
                     why = "no failing checks (unlogged deviations only)"
-                    pending = {"trigger": "fail", "called": False, "skipped_reason": why,
+                    pending = {"call": "rescue", "called": False, "skipped_reason": why,
                                "cost_usd": None,
                                "round": rounds, "advice": None, "reply": None}
-                    notes.append("advisor after round %d skipped: %s" % (rounds, why))
+                    notes.append("rescue after round %d skipped: %s" % (rounds, why))
                 else:
-                    advice, info = harness_advice(
-                        o.advisor, os.path.join(advisor_dir, "harness"),
+                    advice, info = rescue_advice(
+                        o.rescue, rescue_dir,
                         max(1, o.max_rounds - 1),
-                        os.path.join(run_dir, "advisor-harness.md"), repo, start,
+                        os.path.join(run_dir, "rescue.md"), repo, start,
                         _fails_text(failing), task_text,
                         check_files=_check_files(task.items, failing, repo))
-                    pending = dict(info, trigger="fail", round=rounds, advice=advice, reply=None)
+                    pending = dict(info, call="rescue", round=rounds, advice=advice, reply=None)
                     if advice:
                         feedback += ADVICE_BLOCK.format(advice=advice)
                     else:
-                        notes.append("advisor after round %d skipped: %s"
+                        notes.append("rescue after round %d skipped: %s"
                                      % (rounds, info["skipped_reason"]))
         patch = finish_probe()
         flush_pending()
@@ -1340,7 +1385,7 @@ def _run(o):
                        denied=denied, agent_err=agent_err, notes=notes,
                        tools=tool_totals, transcript_found=transcript_found,
                        switches=_switches(o), depth=getattr(o, "depth", None),
-                       advisor=advisor_info(), plan=plan_info())
+                       advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
         report_path = path
         print("until-done: %s after %d round(s); session %s" % (reason, rounds, session or "-"))
         if patch:
@@ -1369,7 +1414,7 @@ def _run(o):
                            denied=denied, notes=notes,
                            tools=tool_totals, transcript_found=transcript_found,
                            switches=_switches(o), depth=getattr(o, "depth", None),
-                           advisor=advisor_info(), plan=plan_info())
+                           advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
             report_path = path
             # A dead terminal (the window closed under the run) must not turn
             # the interrupt into exit 1: an OSError escaping this handler would
@@ -1409,10 +1454,9 @@ def _run(o):
                 shutil.rmtree(lock, ignore_errors=True)
             # The advisor's counter, lock and call log are this run's alone: whatever
             # exits, they go with it (the same sweep the finally below makes).
-            if advisor_dir is not None:
-                shutil.rmtree(advisor_dir, ignore_errors=True)
-            if plan_dir is not None:
-                shutil.rmtree(plan_dir, ignore_errors=True)
+            for d in (advisor_dir, rescue_dir, plan_dir):
+                if d is not None:
+                    shutil.rmtree(d, ignore_errors=True)
             os._exit(EXIT_INTERRUPTED)
         return EXIT_INTERRUPTED
     except Exception as exc:
@@ -1442,7 +1486,7 @@ def _run(o):
                        denied=denied, agent_err=agent_err, notes=notes,
                        tools=tool_totals, transcript_found=transcript_found,
                        switches=_switches(o), depth=getattr(o, "depth", None),
-                       advisor=advisor_info(), plan=plan_info())
+                       advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
         report_path = path
         with contextlib.suppress(OSError):
             if patch:
@@ -1465,8 +1509,10 @@ def _run(o):
         # The advisor state dir outlives the loop only until report.md has read it: no
         # exit path (limit, done, interrupt, crash) leaves a run's counter and call log
         # behind, and every one of them reports before it gets here.
-        if advisor_dir is not None:
-            shutil.rmtree(advisor_dir, ignore_errors=True)
+        _keep_call_logs(run_dir, advisor=advisor_dir, plan=plan_dir, rescue=rescue_dir)
+        for d in (advisor_dir, rescue_dir):
+            if d is not None:
+                shutil.rmtree(d, ignore_errors=True)
         if plan_dir is not None:
             _keep_gate_records(plan_dir, run_dir)
             shutil.rmtree(plan_dir, ignore_errors=True)
@@ -1550,9 +1596,9 @@ def main(argv=None):
     # state dir and hands it to every coder round, so one budget covers the run. It is
     # not part of the passthrough (that would put it in the deviation audit's call too).
     ap.add_argument("--advisor", default=None)
-    # --advisor-triggers: when the supervisor itself asks the advisor. "fail" (the default
-    # with --advisor) asks after every failing round that another round follows.
-    ap.add_argument("--advisor-triggers", default=None)
+    # --rescue: the model the supervisor itself asks after a failing round that another
+    # round follows. Independent of --advisor: its own state dir and budget.
+    ap.add_argument("--rescue", default=None)
     # --plan: the model that advises once, when the run first writes a file. Like --advisor
     # it is the loop's own option, never part of the passthrough (the audit would get it).
     ap.add_argument("--plan", default=None)
@@ -1561,19 +1607,6 @@ def main(argv=None):
     except SystemExit:
         return EXIT_USAGE
     o.passthrough = passthrough
-    if o.advisor_triggers is not None and not o.advisor:
-        print("until-done: --advisor-triggers needs --advisor", file=sys.stderr)
-        return EXIT_USAGE
-    trig = (o.advisor_triggers if o.advisor_triggers is not None else "fail").split(",")
-    if not o.advisor:
-        trig = []
-    elif trig == ["none"]:
-        trig = []
-    elif not trig or any(t not in ("fail",) for t in trig):
-        print("until-done: --advisor-triggers takes fail or none (got %r)"
-              % o.advisor_triggers, file=sys.stderr)
-        return EXIT_USAGE
-    o.advisor_triggers = trig
     return run(o)
 
 

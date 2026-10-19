@@ -61,7 +61,8 @@ def workflow(tmp_path, deadline=None, **cfg_changes):
     m = manifest.load(folder)
     cfg = {"goal": "g", "depth": "quick", "items": 3, "max_agents": 3, "max_items": 2,
            "timeout_per_item": 100, "retries": 0, "effort": None, "role_effort": {},
-           "hours": None, "deadline": None, "rounds": 1, "target": None}
+           "hours": None, "deadline": None, "rounds": 1, "target": None,
+           "claude_confirm": "opus"}          # wf.claude_check needs the config to allow it
     cfg.update(cfg_changes)
     run = tmp_path / "run"
     run.mkdir(exist_ok=True)
@@ -385,7 +386,8 @@ def browser_workflow(tmp_path, fake, web_seats=1):
     m = manifest.load(folder)
     cfg = {"goal": "g", "depth": "quick", "items": 3, "max_agents": 3, "max_items": 2,
            "timeout_per_item": 100, "retries": 0, "effort": None, "role_effort": {},
-           "hours": None, "deadline": None, "rounds": 1, "target": None}
+           "hours": None, "deadline": None, "rounds": 1, "target": None,
+           "claude_confirm": "opus"}          # wf.claude_check needs the config to allow it
     run = tmp_path / "run"
     run.mkdir(exist_ok=True)
     sw = swarm.Swarm([sys.executable, str(FAKE)], run, seats=2, timeout=60, backoff=0)
@@ -645,7 +647,8 @@ def test_a_browser_probe_role_gets_its_folder_and_the_eval_flag(tmp_path, fake):
     sw = swarm.Swarm([sys.executable, str(FAKE)], run, seats=1, timeout=60, backoff=0)
     cfg = {"goal": "g", "depth": "quick", "items": 1, "max_agents": 2, "max_items": 1,
            "timeout_per_item": 100, "retries": 0, "effort": None, "role_effort": {},
-           "hours": None, "deadline": None, "rounds": 1, "target": None}
+           "hours": None, "deadline": None, "rounds": 1, "target": None,
+           "claude_confirm": "opus"}          # wf.claude_check needs the config to allow it
     wf = api.Workflow(m, cfg, run, sw, goal="g")
     res = wf.fan_out("confirm", "prober", items(1), prompt,
                      lambda text, batch: steps.extract_json(text))

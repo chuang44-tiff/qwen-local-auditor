@@ -1259,17 +1259,19 @@ def test_advisor_rounds_share_one_state_dir(env, capsys):
     assert not os.path.exists(dirs.pop())               # no leftover state dir either
 
 
-def test_advisor_budget_zero_says_asks_off_but_keeps_the_failure_call(env, capsys, monkeypatch):
+def test_advisor_budget_zero_says_asks_off_but_keeps_the_rescue(env, capsys, monkeypatch):
     # QWEN_ADVISOR_MAX_CALLS=0 turns the agent's ask off, and the startup line says so. The
-    # loop's own failure call is not the agent's ask: it still runs on the run's state dir,
-    # and its notice still says so.
+    # loop's own rescue is not the agent's ask: it runs on its own state dir, and its
+    # notice still says so.
     repo, task, tmp = env
     monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "0")
+    monkeypatch.setattr(supervisor, "rescue_advice", lambda *a, **k: (
+        None, {"called": False, "skipped_reason": "stubbed", "cost_usd": None}))
     script(tmp, [{"result": "tried"}, {"result": "fixed", "write": {"value.txt": "good\n"}}])
-    assert sup(repo, task, "--advisor", "opus") == 0
+    assert sup(repo, task, "--advisor", "opus", "--rescue", "opus") == 0
     err = capsys.readouterr().err
     assert "asks: 0 (off)" in err
-    assert "the harness asks opus after each failing round" in err
+    assert "rescue opus after each failing round" in err
 
 
 def test_advisor_budget_junk_is_an_error_not_zero(env, monkeypatch):
@@ -1362,7 +1364,7 @@ def test_advisor_max_calls_zero_says_asks_off_in_startup_line_and_report(env, ca
     assert ("until-done: advisor opus via your claude login for every coder round; "
             "asks: 0 (off)") in capsys.readouterr().err
     argv = calls(tmp)[0]
-    assert "--advisor" in argv and "--advisor-state" in argv      # the failure call still has its dir
+    assert "--advisor" in argv and "--advisor-state" in argv      # the agent still has its dir
     assert "--advisor-ask" not in argv                           # no such flag: the env carries it
     assert "asks: 0 (off)" in _report_text(tmp)
 
@@ -1395,7 +1397,7 @@ def test_advisor_report_section(env):
                                "unavailable": "no answer within 600s"}]}])
     assert sup(repo, task, "--advisor", "opus") == 0
     text = _report_text(tmp)
-    assert "## Advisor" in text
+    assert "## Claude calls" in text
     assert "model: opus" in text and "asks: at most 4 across the run" in text
     assert "calls: 2" in text and "cost_usd: 0.5" in text and "unavailable: 1" in text
 
@@ -1404,7 +1406,7 @@ def test_no_advisor_no_report_section(env):
     repo, task, tmp = env
     script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
     assert sup(repo, task) == 0
-    assert "## Advisor" not in _report_text(tmp)
+    assert "## Claude calls" not in _report_text(tmp)
     assert all("--advisor" not in a for a in calls(tmp))
 
 
@@ -1453,7 +1455,7 @@ def test_advisor_dir_removed_when_a_round_raises(env, monkeypatch):
     state = argv[argv.index("--advisor-state") + 1]
     assert not os.path.exists(state), "the crashed run left its advisor counter behind"
     text = _report_text(tmp)
-    assert "## Advisor" in text and "calls: 1" in text and "cost_usd: 0.5" in text
+    assert "## Claude calls" in text and "calls: 1" in text and "cost_usd: 0.5" in text
     assert "error: RuntimeError" in text
 
 
@@ -1469,7 +1471,7 @@ def test_advisor_dir_removed_on_keyboard_interrupt(env, monkeypatch):
     assert not os.path.exists(state), "the interrupted run left its advisor counter behind"
     text = _report_text(tmp)
     assert "stop: interrupted (exit 130)" in text
-    assert "## Advisor" in text and "calls: 1" in text and "cost_usd: 0.5" in text
+    assert "## Claude calls" in text and "calls: 1" in text and "cost_usd: 0.5" in text
 
 
 def test_asks_line_and_report_survive_an_interrupted_run(env, capsys, monkeypatch):
@@ -1589,8 +1591,8 @@ def test_advice_block_has_the_advice_response_block():
     assert b.rstrip().endswith("End with visible text.")
 
 
-def test_harness_q_asks_for_a_numbered_cause_fix_and_run_line():
-    q = supervisor.HARNESS_Q
+def test_rescue_q_asks_for_a_numbered_cause_fix_and_run_line():
+    q = supervisor.RESCUE_Q
     assert "numbered list" in q and "1. The most likely cause" in q
     assert "2. The change to make." in q and "3. RUN:" in q
 

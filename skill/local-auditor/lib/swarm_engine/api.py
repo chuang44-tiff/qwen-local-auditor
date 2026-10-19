@@ -23,6 +23,37 @@ _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _UNIT_ID = re.compile(r"[A-Za-z0-9._-]+")   # an item id fan_out(unit_ids=True) names a unit by
 
 
+def claude_for(m, cfg, role):
+    """One role's Claude settings: {"plan": MODEL|"off"|None, "advisor": MODEL|"off"}.
+    Precedence: --claude (cfg["claude"]) > the config file's defaults (cfg["claude_default"],
+    copied from QA_CFG_* by the runner) > off. plan is None for a role that cannot write
+    (shown as n/a, never passed). The manifest has no say: it can never turn a call on."""
+    over = (cfg.get("claude") or {}).get(role) or {}
+    dflt = cfg.get("claude_default") or {}
+    out = {k: over.get(k) or dflt.get(k) or "off" for k in ("plan", "advisor")}
+    if not m.roles[role].can_plan:
+        out["plan"] = None
+    return out
+
+
+def claude_checks(cfg):
+    """What wf.claude_check may do this run: the model name (or "on (--set confirm=claude)"
+    for a typed --set confirm=claude) when Claude is permitted, else None. Only the config
+    file's QWEN_CONFIRM (cfg["claude_confirm"], copied by the runner) or a typed
+    --set confirm=claude (cfg["claude_typed_confirm"]) permits it; neither a workflow.json
+    preset nor a workflow.py can."""
+    conf = str(cfg.get("claude_confirm") or "").strip()
+    if conf and conf not in ("local", "none", "off"):
+        return conf
+    if cfg.get("claude_typed_confirm") and cfg.get("confirm") == "claude":
+        return str(cfg.get("confirm_model") or "").strip() or "on (--set confirm=claude)"
+    return None
+
+
+CLAUDE_OFF_WHY = ("Claude is off for this run (set QWEN_CONFIRM in the config, or "
+                  "--set confirm=claude)")
+
+
 class Empty(Exception):
     """wf.fail(): the workflow has nothing usable to report (exit 5)."""
 
@@ -101,10 +132,17 @@ def _sha(text):
     return hashlib.sha256((text or "").encode("utf-8", "surrogateescape")).hexdigest()
 
 
+PERM_KEYS = ("claude", "claude_default", "claude_confirm", "claude_typed_confirm",
+             "confirm", "confirm_model")
+
+
 class Workflow:
     def __init__(self, manifest, cfg, run, sw, *, goal, mcp=None, web_seats=None,
                  start=None, keep_sandboxes=False, check=None):
         self.manifest, self.cfg, self.run_dir, self.sw = manifest, cfg, pathlib.Path(run), sw
+        # What the user permitted, taken before any workflow code runs. The gate (claude_for,
+        # claude_checks) reads this snapshot, never the live self.cfg a workflow can edit.
+        self._perms_json = json.dumps({k: cfg.get(k) for k in PERM_KEYS})
         self.goal = goal
         self.target = pathlib.Path(cfg["target"]) if cfg.get("target") else None
         self.mcp, self.web_seats = mcp, web_seats
@@ -158,6 +196,17 @@ class Workflow:
         """--role-effort beats --effort beats the manifest's role effort; else None."""
         per_role = self.cfg.get("role_effort") or {}
         return per_role.get(role) or self.cfg.get("effort") or self._role(role).effort or None
+
+    def _claude(self, role):
+        """The role's {"plan", "advisor"} Claude settings ("off" = disabled); plan is None
+        for a role that cannot write. See claude_for."""
+        self._role(role)
+        return claude_for(self.manifest, self.claude_perms, role)
+
+    @property
+    def claude_perms(self):
+        """A fresh copy of the permission snapshot: editing it changes nothing."""
+        return json.loads(self._perms_json)
 
     def _role_list(self, key):
         """A stored --deep/--shallow role list. Only a list counts: a hand-edited string
@@ -262,7 +311,9 @@ class Workflow:
         f = fences.unit_fields(r.fence, self.mcp)
         u = swarm.Unit(name=name, role_file=r.file, prompt=prompt, parse=None, timeout=timeout,
                        retries=self.cfg.get("retries") or 0, effort=self._effort(role),
-                       ignore_deadline=always, deep=self._deep(role), **f)
+                       ignore_deadline=always, deep=self._deep(role),
+                       claude={k: v for k, v in self._claude(role).items() if v is not None},
+                       **f)
         u.cache = cache
         u.repair_text = repair
         if r.fence == "read":

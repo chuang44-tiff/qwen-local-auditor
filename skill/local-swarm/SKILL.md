@@ -24,43 +24,37 @@ For research, load `local-deep-research` instead: it covers that workflow fully.
 
     qwen-swarm debug "SYMPTOM" --target REPO --out RUN_DIR [--set repro="CMD"] [--set tests="CMD"] [--depth quick|standard|deep|overnight]
 
-`RUN_DIR` is outside `REPO`: a run writes its prompts, patches, logs and sandboxes into its
-run folder, so a run folder inside the target (or a target inside it) is refused (exit 2).
-`repro` must exit non-zero while the bug is there. Without the knob the triager proposes a
-reproduction instead, and the run reproduces and checks patches against that command: it
-is logged in `run.log` as the triager's, and it runs only in a sandbox of the target.
-The debug workflow never writes REPO: probers work in throwaway copies, every candidate
-patch is checked in a fresh copy (repro, then tests), a patch that edits test files is
-flagged and cannot win, and reviewers vote on root cause vs symptom suppression.
-Patches land in `RUN/patches/<n>.diff`; the user applies one with `git apply`.
+`RUN_DIR` is outside `REPO`: a run folder inside the target (or the reverse) is refused (exit 2).
+`repro` must exit non-zero while the bug is there. Without it the triager proposes one (logged
+in `run.log` as the triager's; it runs only in a sandbox). The debug workflow never writes REPO:
+probers work in throwaway copies, every candidate patch is checked in a fresh copy (repro, then
+tests), a patch that edits test files cannot win, and reviewers vote on root cause vs symptom
+suppression. Patches land in `RUN/patches/<n>.diff`; the user applies one with `git apply`.
 
 For a UI suite the scenario file is the `scenarios` knob (the same `# Suite:` markdown
 `qwen-agent --scenarios` takes; its format is in `reference/qwen-agent.md`), and the goal only
 names the run:
 
-    qwen-swarm ui-test "RUN NAME" --set scenarios=SUITE.md --out RUN_DIR [--set base=URL] [--set confirm=claude|local|none]
+    qwen-swarm ui-test "RUN NAME" --set scenarios=SUITE.md --out RUN_DIR [--set base=URL] \
+      [--set confirm=claude|local|none]
 
 One `browser` agent runs one scenario, its screenshots kept in `RUN/browser/<unit>`, and every
 answer is scored by the same `lib/scenarios.py` that wrote the prompt: `RUN/results.json` and
-the report say PASS/FAIL/BLOCKED (or NOT RUN, when the deadline kept its unit from
-starting) per scenario. A tester that ends without its result block is asked once more. The
-app must already be listening at the suite's URLs, and a missing `--set scenarios=` or a suite
-that does not parse is exit 2 naming its line before an agent starts. Files a scenario
-uploads go in the folder the suite's `fixtures: DIR` line names (relative to the suite;
-`--set fixtures=DIR` overrides it): every tester gets its own copy and each file's absolute path.
-A link pointing outside that folder is refused, and the folder is taken as constant for the
-run; keep it non-secret -- the confirmer can read the fixtures and every tester's evidence,
-and a hostile page could prompt-inject a tester into posting what it can read.
+the report say PASS/FAIL/BLOCKED (or NOT RUN, when the deadline kept its unit from starting)
+per scenario. A tester that ends without its result block is asked once more. The app must
+already be listening at the suite's URLs; a missing `--set scenarios=` or a suite that does not
+parse is exit 2 naming its line. Files a scenario uploads go in the folder the suite's
+`fixtures: DIR` line names (relative to the suite; `--set fixtures=DIR` overrides it): every
+tester gets its own copy and each file's absolute path. A link pointing outside it is refused;
+keep it non-secret -- the confirmer can read the fixtures and every tester's evidence, and a
+hostile page could prompt-inject a tester into posting what it can read.
 
-Every FAIL or BLOCKED is re-checked before it counts. By default Claude (`confirm_model`,
-default opus; at most `confirm_max` = 10 calls a run) re-runs it in a browser of its own
-through the user's claude login, so the scenario, the tester's report and screenshots and a
-browser session on the app leave this machine; the run says so when it starts. Tell the user
-before a run on a private app: `--set confirm=local` keeps the check on the local model,
-`--set confirm=none` skips it. Each such row ends CONFIRMED (real), FALSE_ALARM (it works;
-the report lists these apart) or NEEDS_HUMAN (no answer, e.g. offline). Under `confirm=local`
-a FALSE_ALARM is advisory: reported, but the row still counts -- only a Claude or a
-`--record-verdict` FALSE_ALARM clears a row.
+Every FAIL or BLOCKED is re-checked before it counts, on the local model by default
+(`--set confirm=local`; `--set confirm=none` skips it). Claude does it only when the config file's QWEN_CONFIRM names
+a model or `--set confirm=claude` says so (`confirm_model`, at most `confirm_max` = 10 calls):
+then the scenario, the tester's report and screenshots and a browser session on the app leave
+this machine. A row ends CONFIRMED, FALSE_ALARM (listed apart) or NEEDS_HUMAN. A local
+FALSE_ALARM is advisory: the row still counts; only a Claude or `--record-verdict` one clears it.
 
 ## 2. Otherwise write a workflow
 
@@ -88,14 +82,20 @@ Rules that keep a workflow resumable:
   shallow: the review round is a second call per unit. A fence `none` role has no tools,
   so it never gets the review round; `--deep` gives it only the subagent nudge.
 
-Before launching anything (step 3), run
+Before launching (step 3), run `qwen-swarm --check ./my-workflow` until it passes: it
+validates the manifest and dry-runs `run(wf)` twice against fake agents (a `check.py` beside
+the workflow can supply realistic fake answers).
 
-    qwen-swarm --check ./my-workflow
+## 3. Show the manifest, sign off Claude, then run in the background
 
-until it passes: it validates the manifest and dry-runs `run(wf)` twice against fake
-agents; a `check.py` beside the workflow can supply realistic fake answers.
-
-## 3. Show the user the manifest, then run in the background
+Sign-off, before EVERY launch: run `qwen-swarm WORKFLOW --show-claude` with the intended
+options (for a resume: `qwen-swarm --resume RUN --show-claude`, plus any new `--claude`) and
+show the user its lines; say which calls are on, with which model, whether read tools are on (`claude read tools (plan/advisor/rescue):` line; `claude checks:` always has Read) and
+that code leaves the machine; ask "Use your global Claude settings for this run?". Yes: launch
+as shown. No: offer per-role choices, all off included, and add
+`--claude ROLE:advisor=MODEL|off[,plan=MODEL|off]` (repeatable; plan only for roles that edit;
+ui-test confirm is `--set confirm=`). Swarms only: local-coder, local-auditor, local-agent and
+sweeps need no sign-off. If a qwen-agent or qwen-swarm run prints the "Claude settings changed" notice, relay it to the user verbatim.
 
 Show the roles with their fences and the knobs of the chosen depth (the run prints this
 summary to stderr first, too). Start it with run_in_background; with `--target`, `--out`

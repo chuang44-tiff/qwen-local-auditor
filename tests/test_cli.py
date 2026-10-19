@@ -126,6 +126,7 @@ def run(tmp_path, args, server=None, fake=None, extra=None, timeout=90, cwd=None
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("QWEN_", "CLAUDE_", "ANTHROPIC_"))}
     env["QWEN_CONFIG"] = posix(tmp_path / "no-such-config")   # never read the dev's own
+    env["QWEN_NO_NOTICE"] = "1"       # the one-time what-changed notice has its own tests
     env["FAKE_RECORD"] = posix(tmp_path / "record.txt")
     if server is not None:
         env["QWEN_BASE_URL"] = base_url(server)

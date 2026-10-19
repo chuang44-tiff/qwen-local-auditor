@@ -15,7 +15,7 @@ are the authoritative texts; this page arranges the same facts for lookup.
 | Python 3.8+ | stdlib only; used to parse results, build sweeps and run the swarm engine (the test suite needs 3.10+) |
 | curl >= 7.55, git | curl 7.55 is the floor because preflight hands its headers to curl on stdin (`-H @-`), so the key never appears on an argv; `git` for `qwen-sweep --builder diff`, for the throwaway worktrees `--test` uses, for `--until-done`'s clean-tree check, and for the sandbox copies a `qwen-swarm` workflow runs in |
 | tmux | only for `qwen-cc` (interactive sessions); Windows has none: run `qwen-agent --interactive` in a terminal there |
-| internet | needed by research (a search backend and pages to fetch): `qwen-deep-research`, `qwen-swarm research`, or a workflow with a `search` or `web` fence; and a browser's first run needs it too, for the `@playwright/mcp` npm package and the Playwright browser install it drives (`npx -y @playwright/mcp@0.0.83 --help` fetches the package, `npx playwright install chromium` the browser; [`qwen-agent.md`](qwen-agent.md) "Scripted UI suites"). No other fence adds a search or fetch tool, but a `browser` role drives a real browser, which opens whatever URL it is told to, and a `sandbox` agent's Bash is your shell, with your network ([`swarm.md`](swarm.md)) |
+| internet | needed by the Claude calls if you turn any on (plan, advisor, rescue, confirm: they use your `claude` login), and by research (a search backend and pages to fetch): `qwen-deep-research`, `qwen-swarm research`, or a workflow with a `search` or `web` fence; and a browser's first run needs it too, for the `@playwright/mcp` npm package and the Playwright browser install it drives (`npx -y @playwright/mcp@0.0.83 --help` fetches the package, `npx playwright install chromium` the browser; [`qwen-agent.md`](qwen-agent.md) "Scripted UI suites"). No other fence adds a search or fetch tool, but a `browser` role drives a real browser, which opens whatever URL it is told to, and a `sandbox` agent's Bash is your shell, with your network ([`swarm.md`](swarm.md)) |
 
 CI runs the whole suite on Linux, macOS (including `/bin/bash` 3.2) and Windows Git Bash.
 
@@ -105,7 +105,9 @@ QWEN_PYTHON="${QWEN_PYTHON:-python}"
 ```
 
 Precedence, highest first: flags, then the environment, then the config file, then the
-built-in defaults.
+built-in defaults. The one exception is the four Claude settings below: only the config file
+(or a typed flag, for one run) can turn a call on, and an exported variable of the same name
+is ignored.
 
 ## Environment variables
 
@@ -146,6 +148,26 @@ built-in defaults.
 The child process never inherits the parent Claude Code session's control channel, its
 provider routing (Bedrock, Vertex, Foundry), `ANTHROPIC_API_KEY`, custom headers or model
 overrides: every model alias is pointed at the served model.
+
+### Claude calls (all off unless the config file sets them)
+
+| variable | default | meaning |
+|---|---|---|
+| `QWEN_PLAN` | off | model (or `off`): review the plan once before the first file edit of a run that can write. Config file only; `--plan MODEL` overrides it for one run |
+| `QWEN_ADVISOR` | off | model (or `off`): the agent's `ask` tool. Config file only; `--advisor MODEL` / `--advisor off` overrides it for one run |
+| `QWEN_RESCUE` | off | model (or `off`): after a failing `--until-done` round that another round follows. Skipped on a single run. Config file only; `--rescue MODEL` overrides |
+| `QWEN_CONFIRM` | `local` | `qwen-swarm ui-test` double-check: a model, `local`, `none`, or `off` (= `local`). Config file, or a typed `--set confirm=...`; a workflow preset cannot enable Claude |
+| `QWEN_CLAUDE_TOOLS` | on | `0` (config or environment) takes the read tools (Read, Grep, Glob) away from plan, advisor and rescue calls; confirm's tools are unchanged |
+| `QWEN_ADVISOR_MAX_CALLS` | `4` | the agent's ask budget per run; `0` is refused (use `--advisor off`) |
+| `QWEN_ADVISOR_TIMEOUT` | `600` | seconds per call, every kind |
+| `QWEN_ADVISOR_CLAUDE` | `QWEN_CLAUDE_BIN` | the claude executable these calls run |
+| `QWEN_ADVISOR_TOOLS` | *(default scope)* | bench-only: a comma list scoping the advisor's read tools; empty means the default |
+| `QWEN_NO_NOTICE` | | `1` suppresses the one-time notice about these settings, shown on the first run |
+
+Sweeps, swarms and deep research follow the same config. `--show-claude` (on `qwen-agent`
+and `qwen-swarm`) prints the effective settings and exits. A model name uses
+`[A-Za-z0-9._:-]`. What leaves the machine for each call: [`SECURITY.md`](../../../SECURITY.md)
+and [`limits.md`](limits.md#claude-calls).
 
 ### Tests and coding loops (`--test`, `qwen-test`, `--until-done`)
 

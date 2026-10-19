@@ -10,7 +10,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 B="${TEST_BASH:-$BASH}"
 FAKE="$(mktemp -d)"
 export HOME="$FAKE" USERPROFILE="$FAKE"
-unset XDG_CONFIG_HOME CLAUDE_CONFIG_DIR QWEN_INSTALL_FORCE_COPY
+unset XDG_CONFIG_HOME XDG_STATE_HOME CLAUDE_CONFIG_DIR QWEN_INSTALL_FORCE_COPY
 fail() { echo "FAIL: $1"; [ -f "$FAKE/install.log" ] && sed 's/^/  | /' "$FAKE/install.log"; rm -rf "$FAKE"; exit 1; }
 run_install() { "$B" "$REPO/install.sh" "$@" >"$FAKE/install.log" 2>&1 || fail "install.sh $* returned $?"; }
 
@@ -54,6 +54,18 @@ done
 "$B" "$FAKE/.local/bin/qwen-cc" --version >/dev/null 2>&1 || fail "the qwen-cc forwarder does not run"
 "$B" "$FAKE/.local/bin/qwen-deep-research" --version >/dev/null 2>&1 || fail "the qwen-deep-research forwarder does not run"
 "$B" "$FAKE/.local/bin/qwen-swarm" --version >/dev/null 2>&1 || fail "the qwen-swarm forwarder does not run"
+
+# A fresh install (new config) writes the one-time notice marker: nothing changed for
+# someone who never had the old defaults. An upgrade (config already there) must not.
+MARK=".local/state/qwen-agent/notice-claude-settings-1"
+[ -f "$FAKE/$MARK" ] || fail "a fresh install did not create the notice marker"
+UP="$(mktemp -d)"
+mkdir -p "$UP/.config/qwen-agent"
+echo 'QWEN_MODEL="old"' > "$UP/.config/qwen-agent/config"
+HOME="$UP" USERPROFILE="$UP" "$B" "$REPO/install.sh" --no-preflight >"$FAKE/upgrade.log" 2>&1 \
+  || { sed 's/^/  | /' "$FAKE/upgrade.log"; rm -rf "$UP"; fail "upgrade install failed"; }
+[ ! -e "$UP/$MARK" ] || { rm -rf "$UP"; fail "an upgrade created the notice marker"; }
+rm -rf "$UP"
 
 # An untouched config means there is no server to check yet: say what to do next.
 run_install

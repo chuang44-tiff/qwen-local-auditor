@@ -83,6 +83,13 @@ def unit_fields(fence, mcp=None):
     raise ValueError("unknown fence %r" % fence)
 
 
+def can_write(fence):
+    """True when the fence's toolset includes Edit or Write (today only `sandbox`): the
+    roles that can hold a plan-mode first edit. Derived from unit_fields, not a list."""
+    tools = set(unit_fields(fence, mcp="-")["toolset"].split(","))
+    return bool(tools & {"Edit", "Write"})
+
+
 def needs_search(manifest):
     return any(r.fence in WEB_FENCES for r in manifest.roles.values())
 

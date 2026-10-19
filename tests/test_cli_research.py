@@ -27,7 +27,7 @@ def run(tmp_path, args, **env):
     # A developer's own QWEN_* (a base URL, a search backend) must not leak into
     # a wrapper test: strip every one of them, then add back what the test names.
     e = {k: v for k, v in os.environ.items() if not k.startswith("QWEN_")}
-    e.update(QWEN_CONFIG=str(tmp_path / "noconfig"), HOME=str(tmp_path), **env)
+    e.update(QWEN_CONFIG=str(tmp_path / "noconfig"), HOME=str(tmp_path), **dict(dict(QWEN_NO_NOTICE="1"), **env))
     return subprocess.run([BASH, str(WRAP), *args], capture_output=True, text=True, encoding="utf-8",
                           cwd=str(tmp_path), env=e, timeout=120)
 

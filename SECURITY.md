@@ -3,13 +3,14 @@
 ## What runs where
 
 Everything in this repository runs **on your own machine**, against a model server you run
-yourself. The commands that run a model start a separate `claude` process on this host and point
+yourself. The one exception is the optional Claude calls below, which are off on a fresh
+install. The commands that run a model start a separate `claude` process on this host and point
 it at your server: the child does not inherit your interactive session's API key,
 provider routing or model overrides from the environment. One known gap: an
 `env.ANTHROPIC_BASE_URL` set in a Claude Code settings file can still redirect the child;
 a fix that pins the endpoint is planned. These tools add no telemetry, no update check and
 no account of their own (the `claude` CLI's own background traffic follows Claude Code's
-settings); the config file, run folders, logs and advisor logs are written on this machine
+settings); the config file, run folders, logs and Claude-call records are written on this machine
 and stay there.
 
 What the fences are, and are not. They decide which tools a session gets; they are not
@@ -22,22 +23,40 @@ model-written JavaScript under node unsandboxed, and a swarm's `sandbox` role ha
 that is yours. The fence at a glance:
 [reference/limits.md](skill/local-auditor/reference/limits.md).
 
-## The three things that can leave the machine
+## What can leave the machine
 
-1. **The cloud advisor — opt-in only.** `qwen-agent --advisor MODEL` lets a session ask a
-   Claude model for advice through your own `claude` login: one question, its evidence and
-   up to 5 non-secret files, at most 4 calls per run. No environment variable or config
-   line turns it on, so sweeps and swarms never send code out through it.
-2. **`qwen-swarm ui-test`'s confirm pass — ON by default.** With the default
-   `confirm=claude`, each FAIL/BLOCKED scenario (up to `confirm_max` of them) goes to
-   Claude through your own `claude` login: the scenario, the tester's report and screenshots,
-   the fixture files, and a live browser session on the app's URL. `--set confirm=local`
-   keeps the re-check on your local model, `--set confirm=none` skips it. The run says so
-   on stderr before the first call.
-3. **The research commands' web access.** `qwen-deep-research`, and a `qwen-swarm`
-   workflow whose roles have a `search` or `web` fence, go online on purpose: queries go to
-   the search backend you configured and pages are fetched. A `browser` fence opens
-   whatever URL an agent is told to open.
+A fresh install sends nothing to Claude: no call is on until **your config file**
+(`~/.config/qwen-agent/config`) turns one on. An exported `QWEN_PLAN`, `QWEN_ADVISOR`,
+`QWEN_RESCUE` or `QWEN_CONFIRM` is ignored, and a typed `--plan`, `--advisor` or `--rescue`
+affects one run only. Each call goes through your own `claude` login. Sweeps, swarms and deep
+research follow the same config; neither a swarm's `workflow.json` nor its `workflow.py` (through the engine API) can turn a call on: `wf.claude_check` is refused unless the config's `QWEN_CONFIRM` names a model or `--set confirm=claude` is typed.
+`--show-claude` prints what a command would use without running it.
+
+1. **Plan** (`QWEN_PLAN`, `--plan`): once, before the session's first file edit, a digest
+   of its messages and tool trail (no thinking) and the task.
+2. **Advisor** (`QWEN_ADVISOR`, `--advisor`): the agent's `ask` tool, at most
+   `QWEN_ADVISOR_MAX_CALLS` (4) calls per run: its question, the context it writes and up to
+   5 non-secret files it attaches.
+3. **Rescue** (`QWEN_RESCUE`, `--rescue`): after a failing `--until-done` round, the failing
+   output, the round's diff and the task.
+4. **Confirm** (`QWEN_CONFIRM`, `qwen-swarm ui-test`): the default is `local`, which keeps the
+   re-check on your model. With `claude` (the config or a typed `--set confirm=claude`; a
+   workflow preset cannot enable it) each FAIL/BLOCKED scenario, up to `confirm_max`, sends
+   the scenario, the tester's report and screenshots, the fixture files, and a live browser
+   session on the app's URL. The run says so on stderr before the first call.
+
+For plan, advisor and rescue, Claude also gets **read tools** (Read, Grep, Glob) on your
+repository whenever the call is on, so any file it chooses to read leaves the machine, not
+only what is listed above. The secret-file filter covers attachments, not these reads.
+`QWEN_CLAUDE_TOOLS=0` turns the read tools off. Every call is logged on this machine: `--until-done` runs write
+`claude-calls.jsonl` in the run folder, single runs and swarm units write
+`advisor-<stamp>-<pid>.md` / `plan-<stamp>-<pid>.md` in `QWEN_OUTDIR` or
+`~/.cache/qwen-agent/advisor/`, and ui-test's confirm pass writes `RUN/claude/calls.jsonl`.
+
+Separately, **the research commands' web access** is on purpose: `qwen-deep-research`, and a
+`qwen-swarm` workflow whose roles have a `search` or `web` fence, send queries to the search
+backend you configured and fetch pages. A `browser` fence opens whatever URL an agent is told
+to open. See [limits.md](skill/local-auditor/reference/limits.md#claude-calls).
 
 Two consequences worth stating plainly: the URL you point a run at is reached *from this
 machine*, and a hostile page under test can try to prompt-inject an agent into sending what

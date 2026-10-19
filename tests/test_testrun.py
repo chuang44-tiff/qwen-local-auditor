@@ -425,3 +425,18 @@ def test_split_command_keeps_windows_backslashes():
         r"C:\Py\python.exe", "-m", "pytest", r"C:\My Repo\tests", "-q"]
     assert testrun.split_command("python3 -m pytest 'a b' -q", windows=False) == [
         "python3", "-m", "pytest", "a b", "-q"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs bash")
+def test_wrapper_drops_claude_settings_from_the_config(repo, tmp_path):
+    cfg = tmp_path / "config"
+    dump = tmp_path / "env.txt"
+    cfg.write_text("export QWEN_ADVISOR=opus\nexport QWEN_PLAN=opus\n", encoding="utf-8")
+    (repo / "dump.py").write_text(
+        "import os, sys\nopen(sys.argv[1], 'w').write('\\n'.join(k + '=' + v for k, v in os.environ.items()))\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "dump")
+    p = run_wrapper(repo, QWEN_CONFIG=str(cfg), QWEN_TEST_CMD="%s dump.py %s" % (PY, dump))
+    assert p.returncode == 0, (p.stdout, p.stderr)
+    names = {line.split("=", 1)[0] for line in dump.read_text(encoding="utf-8").splitlines()}
+    assert names and not names & {"QWEN_ADVISOR", "QWEN_PLAN", "QWEN_RESCUE", "QWEN_CONFIRM"}

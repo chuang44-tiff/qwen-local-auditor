@@ -93,6 +93,43 @@ def test_ok_call_returns_advice_and_logs(adv):
     [rec] = records(adv["state"])
     assert (rec["n"], rec["model"], rec["cost_usd"], rec["unavailable"]) == (1, "claude-opus-test", 0.12, None)
     assert isinstance(rec["seconds"], float)
+    assert rec["call"] == "ask" and "trigger" not in rec and "source" not in rec
+
+
+@posix_only
+def test_record_names_the_call_from_the_env(adv):
+    for name, call in (("a", "rescue"), ("b", "plan")):
+        state = adv["state"].parent / name
+        state.mkdir()
+        env = dict(adv["env"], QA_ADVISOR_STATE=str(state), QA_CLAUDE_CALL=call)
+        am.ask("Q?", "C", None, env, str(adv["root"]))
+        assert [r["call"] for r in records(state)] == [call]
+
+
+@posix_only
+def test_tools_mode_reads_the_root_read_only(adv):
+    env = dict(adv["env"], QA_ADVISOR_TOOLS="1")
+    am.ask("Is the plan right?", "", None, env, str(adv["root"]))
+    argv = json.loads((adv["calls"] / "argv.1").read_text())
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+    assert argv[argv.index("--max-turns") + 1] == str(am.TOOL_TURNS)
+    assert "--allowedTools" not in argv and "--dangerously-skip-permissions" not in argv
+    cwd_lines = (adv["calls"] / "cwd.1").read_text().splitlines()
+    assert cwd_lines[0] == os.path.realpath(adv["root"]) and "a.py" in cwd_lines[1:]
+    assert (adv["root"] / "a.py").exists()                   # the root is never removed
+    brief = (adv["calls"] / "stdin.1").read_text()
+    assert "YOU CAN READ THE CODE" in brief and "You cannot run anything or see" not in brief
+    [rec] = records(adv["state"])
+    assert rec["tools"] is True
+
+
+@posix_only
+def test_tools_mode_is_off_unless_exactly_1(adv):
+    am.ask("q", "", None, dict(adv["env"], QA_ADVISOR_TOOLS="yes"), str(adv["root"]))
+    argv = json.loads((adv["calls"] / "argv.1").read_text())
+    assert argv[argv.index("--tools") + 1] == "" and argv[-1] == "1"
+    assert "YOU CAN READ THE CODE" not in (adv["calls"] / "stdin.1").read_text()
+    assert records(adv["state"])[0]["tools"] is False
 
 
 @posix_only

@@ -12,6 +12,12 @@ The environment comes from the MCP config qwen-agent writes:
   QA_ADVISOR_TIMEOUT    seconds per call (default 600)
   QA_ADVISOR_LOG        markdown file each question and answer is appended to
   QA_ADVISOR_CLAUDE     the claude binary (default: claude on PATH)
+  QA_ADVISOR_TOOLS      "1": the call may read the agent's working directory (Read, Grep,
+                        Glob; up to TOOL_TURNS turns). Set by qwen-agent for the plan hook,
+                        the ask server and the rescue unless QWEN_CLAUDE_TOOLS=0 turns the
+                        read tools off. The bench-only QWEN_ADVISOR_TOOLS is a comma list
+                        of scopes that narrows it: 1 (plan and rescue), plan, rescue
+                        (alias fail), ask.
 
   advisor_mcp.py                                  serve MCP on stdin/stdout
   advisor_mcp.py --ask Q [--context C] [--path P]  one call; the answer on stdout (exit 3 if unavailable)
@@ -29,6 +35,13 @@ MAX_CONTEXT = 12000
 MAX_PATHS = 5
 MAX_FILE = 40000
 MAX_FILES_TOTAL = 120000
+TOOL_TURNS = 12
+READ_TOOLS = "Read,Grep,Glob"
+TOOLS_NOTE = (
+    "\n\nYOU CAN READ THE CODE. Your working directory is the agent's repository. Use Read, "
+    "Grep and Glob (read-only) to check the agent's claims and plan against the actual "
+    "files before you advise: a few targeted reads, at most 8 tool calls, then answer. "
+    "You cannot run or change anything.")
 BRIEF_HEAD = (
     "You are advising another AI agent that is auditing or changing code. You cannot run "
     "anything or see anything beyond what is below. Reply in at most 350 words, as a "
@@ -179,12 +192,17 @@ def _record(state, rec):
         fh.write(json.dumps(rec) + "\n")
 
 
-def _run(claude, model, brief, timeout, env):
-    """(answer, model actually used, cost) from one clean claude -p run."""
-    argv = [claude, "-p", "--model", model, "--tools", "", "--strict-mcp-config",
+def _run(claude, model, brief, timeout, env, read_root=None):
+    """(answer, model actually used, cost, turns) from one clean claude -p run.
+
+    read_root: EXPERIMENTAL. The run starts there with read-only tools and up to
+    TOOL_TURNS turns. No --allowedTools: Claude Code then allows reads only inside its
+    working directory and denies the rest (no one to ask in -p)."""
+    tools, turns = (READ_TOOLS, TOOL_TURNS) if read_root else ("", 1)
+    argv = [claude, "-p", "--model", model, "--tools", tools, "--strict-mcp-config",
             "--setting-sources", "", "--no-session-persistence",
-            "--output-format", "json", "--max-turns", "1"]
-    cwd = tempfile.mkdtemp(prefix="qla-advisor-")
+            "--output-format", "json", "--max-turns", str(turns)]
+    cwd = read_root or tempfile.mkdtemp(prefix="qla-advisor-")
     try:
         p = subprocess.run(argv, input=brief, cwd=cwd, env=env, capture_output=True,
                            text=True, encoding="utf-8", errors="replace", timeout=timeout)
@@ -193,7 +211,8 @@ def _run(claude, model, brief, timeout, env):
     except OSError as e:
         raise Unavailable("could not start claude (%s)" % (e.strerror or e))
     finally:
-        shutil.rmtree(cwd, ignore_errors=True)
+        if not read_root:
+            shutil.rmtree(cwd, ignore_errors=True)
     obj = None
     for line in reversed((p.stdout or "").strip().splitlines()):
         if line.strip().startswith("{"):
@@ -210,7 +229,8 @@ def _run(claude, model, brief, timeout, env):
         raise Unavailable("claude reported an error: %s" % why.strip()[:200])
     used = ",".join(sorted((obj.get("modelUsage") or {}).keys())) or model
     cost = obj.get("total_cost_usd")
-    return res.strip(), used, cost if isinstance(cost, (int, float)) else None
+    return (res.strip(), used, cost if isinstance(cost, (int, float)) else None,
+            obj.get("num_turns"))
 
 
 def _log(path, n, budget, model, question, context, notes, answer):
@@ -246,6 +266,11 @@ def ask(question, context, paths, env, root, limit=MAX_CONTEXT):
     named = env.get("QA_ADVISOR_CLAUDE") or "claude"
     claude = shutil.which(named, path=env.get("PATH")) or named
     brief = build_brief(question, context, files)
+    read_root = os.path.realpath(root) if env.get("QA_ADVISOR_TOOLS") == "1" and root else None
+    if read_root:
+        brief = brief.replace(BRIEF_HEAD, BRIEF_HEAD.replace(
+            "You cannot run anything or see anything beyond what is below. ", "") + TOOLS_NOTE, 1)
+    call = env.get("QA_CLAUDE_CALL") or "ask"      # which Claude call this is: ask, plan, rescue
     lk = _lock(state, timeout)
     try:
         n = _count(state)
@@ -255,13 +280,16 @@ def ask(question, context, paths, env, root, limit=MAX_CONTEXT):
             fh.write(str(n + 1))
         t0 = time.time()
         try:
-            answer, used, cost = _run(claude, model, brief, timeout, clean_env(env))
+            answer, used, cost, turns = _run(claude, model, brief, timeout, clean_env(env),
+                                             read_root)
         except Unavailable as e:
-            _record(state, {"n": n + 1, "model": model, "seconds": round(time.time() - t0, 1),
-                            "cost_usd": None, "unavailable": str(e)})
+            _record(state, {"call": call, "n": n + 1, "model": model,
+                            "seconds": round(time.time() - t0, 1), "cost_usd": None,
+                            "unavailable": str(e), "tools": bool(read_root)})
             raise
-        _record(state, {"n": n + 1, "model": used, "seconds": round(time.time() - t0, 1),
-                        "cost_usd": cost, "unavailable": None})
+        _record(state, {"call": call, "n": n + 1, "model": used,
+                        "seconds": round(time.time() - t0, 1), "cost_usd": cost, "unavailable": None,
+                        "tools": bool(read_root), "turns": turns})
     finally:
         try:
             os.rmdir(lk)

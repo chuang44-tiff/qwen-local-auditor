@@ -1,0 +1,17 @@
+qwen-agent: Claude settings changed (shown once)
+  Claude is now OFF unless the config file turns it on. Four settings, each a model name or off:
+    QWEN_PLAN      a review of the plan before the first edit (runs that can write)
+    QWEN_ADVISOR   the agent's ask tool only
+    QWEN_RESCUE    a call after a failing --until-done round
+    QWEN_CONFIRM   the ui-test double-check (a model, local or none)
+  Read tools (Read, Grep, Glob) are on whenever a call is on; QWEN_CLAUDE_TOOLS=0 turns them off.
+  A typed --plan, --advisor or --rescue overrides the config for one run.
+  --advisor-triggers was replaced by --rescue MODEL.
+  --advisor no longer includes the call after a failing --until-done round: add --rescue MODEL (or QWEN_RESCUE in the config).
+  An exported QWEN_PLAN etc. no longer counts; only the config file does:
+    @CONFIG@
+  To restore the old behaviour, add what you used to rely on:
+    # QWEN_PLAN=opus
+    # QWEN_ADVISOR=opus
+    # QWEN_RESCUE=opus
+    # QWEN_CONFIRM=opus

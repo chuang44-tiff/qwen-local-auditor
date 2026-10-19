@@ -57,6 +57,7 @@ def append_line(path, line):
 
 
 append_line(d / "calls.jsonl", json.dumps(argv))
+append_line(d / "env.jsonl", json.dumps({k: v for k, v in os.environ.items() if k.startswith("QWEN_")}))
 signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))
 live = d / "live"
 live.mkdir(exist_ok=True)

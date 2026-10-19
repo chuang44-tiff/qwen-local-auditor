@@ -70,6 +70,8 @@ combined with `--test`.
 | `--web` (`QWEN_WEB=1`) | adds `WebFetch` to the toolset and the grants, for every role and for the fixed `--test` grant list. Never `WebSearch`: a server-side tool that local servers reject with a 400 (`body.tools.0.input_schema Field required`); search needs an MCP server. With `--test` it warns that tests can be gamed by fetching upstream answers |
 | `--subagents` (`QWEN_SUBAGENTS=1`) | adds the `Task` tool so the model can hand broad reading to a subagent. Same model, same tool limits, one more concurrent request: leave it off on a small GPU. Subagents run in the foreground (every run but `--interactive` sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`): one that reported after the answer would start another turn, and the reply to it would replace the answer as the result |
 | `--advisor MODEL` | ask a Claude model for advice through your claude login (see Advisor); off by default |
+| `--rescue MODEL` | with `--until-done`: after a failing round, ask a Claude model what went wrong (see Rescue); off by default |
+| `--show-claude` | print which Claude calls (plan, advisor, rescue) this run would make, and why one is skipped, then exit; nothing runs |
 | `--plan MODEL` | hold the run's first file edit once and get advice on it from a Claude model (see Planning); off by default |
 | `--permission-mode M` | passed through to claude (e.g. `acceptEdits`, `plan`) |
 | `-C, --cd DIR` | chdir before running; tool access is rooted at cwd. Scope it tightly: a bounded directory is the single biggest lever on output quality |
@@ -488,45 +490,41 @@ Qwen session is the executor. It is experimental and not proven effective: Qwen 
 trained to use an advisor, so it decides on its own when to ask; the session's note tells it
 to ask readily and to act on the answer. In a blind audit A/B it found 2 more of 51 known
 bugs, which is below our bar of 3. Its calls helped classify findings, not find them. Under
-`--until-done` the harness also asks after each failing round (`--advisor-triggers`, below);
-on our benchmarks that call fixed most first-round failures, while the coder's own asks mostly
+`--until-done` the call after a failing round is a separate setting, rescue (below);
+on our benchmarks it fixed most first-round failures, while the coder's own asks mostly
 came at the wrong time ([benchmark](benchmark.md#the-advisor)). Read
 the advisor log: the advice is not binding, and the session can ignore it.
 
 The session gets one more tool, `ask`: it sends one self-contained question, the evidence,
 and up to 5 files (40 KB each, 120 KB in all, inside the working directory) to a Claude
 model through **your own `claude` login**, and gets advice back as a tool result. Each call
-is one `claude -p` run with no tools, no settings, no hooks and one turn, so one call is one
-request to that model, at Anthropic's default effort. The Qwen session keeps doing the work;
-the advisor never edits or runs anything.
+is one `claude -p` run with no settings and no hooks, at Anthropic's default effort. It gets
+the read tools Read, Grep and Glob on the working directory, so it can look at the code it
+is advised about (`QWEN_CLAUDE_TOOLS=0` turns them off; `QWEN_ADVISOR_TOOLS` is a bench-only
+scope list, empty meaning the default). The Qwen session keeps doing the work; the advisor
+never edits or runs anything.
 
-`--advisor-triggers LIST` — with `--until-done --advisor`: when the loop asks the advisor
-itself. `fail` (the default): after every failing round that another round follows, its advice
-goes into the next round's prompt; these calls do not count toward the agent's own ask budget
-(`QWEN_ADVISOR_MAX_CALLS`) — at most `--max-rounds` − 1 such calls per run; each is logged in
-`advisor-harness.md` and listed in report.md's Advisor section with the next round's reply.
-`none`: only the agent asks. `plan` is not a trigger (exit 2): use `--plan MODEL`.
-
-- Off unless you type `--advisor MODEL`. No environment variable or config line turns it on, so sweeps and swarms never send code out through it.
-- One named exception elsewhere: the `ui-test` swarm workflow's confirm pass is on by default
-  (a saved `--set` knob, not a typed flag). It asks Claude through the same login to re-check
-  each FAIL/BLOCKED scenario, with the scenario, the tester's report and screenshots and a
-  browser on the app, and says so when the run starts. `--set confirm=local` keeps the
-  check on the local model, `--set confirm=none` turns it off
+- Off unless you turn it on: `QWEN_ADVISOR=MODEL` in the config file, or `--advisor MODEL`
+  for one run (`--advisor off` turns a configured one off for one run). An exported
+  `QWEN_ADVISOR` is ignored, and so are the old `QWEN_ADVISOR_*` names as switches. Sweeps,
+  swarms and deep research follow the config too (a swarm role can be set with
+  `--claude ROLE:advisor=MODEL`), so a configured advisor is on for them as well. A config
+  value that cannot apply to a run is skipped and shown on the `claude:` stderr line; a typed
+  one that cannot apply is a usage error. `--show-claude` prints the result and exits.
+- `qwen-swarm ui-test`'s confirm pass is a separate setting, `QWEN_CONFIRM`, `local` by
+  default; it asks Claude only when the config or a typed `--set confirm=claude` says so
   ([swarm.md](swarm.md#the-ui-test-workflow)).
-- `--until-done` turns the advisor on for its coder rounds only when you type `--advisor MODEL` on the `--until-done` command itself: every round of the loop then gets the advisor
-  through ONE budget shared by the whole run (the loop makes one state directory and hands it to each round with the internal `--advisor-state DIR`), and its deviation audit
+- Under `--until-done` a configured or typed advisor reaches every coder round through ONE budget shared by the whole run (the loop makes one state directory and hands it to each round with the internal `--advisor-state DIR`), and its deviation audit
   never gets it.
-- `QWEN_ADVISOR_MAX_CALLS` (default 4 when unset or empty) is the agent's own ask budget. `0` turns the
-  agent's ask off: no advisor tool and no ask note, while the loop's failure call
-  (`--advisor-triggers fail`) stays on; `0` with `--advisor-triggers none`, or on a single-shot
-  run without `--until-done` or `--advisor-state`, exits 2 (nothing for the advisor to do), and a
-  negative or non-numeric value exits 2. Under `--until-done` the run states the budget at the start and in
-  report.md (`asks: 0 (off)` or `asks: at most N across the run`); a single-shot run states it at
-  the start as `at most N calls this run`. The budget is shared by the first answer, the review round and
-  subagents — and, under `--until-done`, by every round and review round of the loop.
-  It is a whole number of at most six digits.
-  `QWEN_ADVISOR_TIMEOUT` (default 600 s) applies per call.
+- `QWEN_ADVISOR_MAX_CALLS` (default 4 when unset or empty) is the agent's own ask budget. `0`
+  is refused (exit 2): use `--advisor off` to turn the advisor off. A negative or non-numeric
+  value exits 2. Under `--until-done` the run states the budget at the start and in report.md
+  (`asks: at most N across the run`); a single-shot run states it at the start as
+  `at most N calls this run`. The budget is shared by the first answer, the review round and
+  subagents — and, under `--until-done`, by every round and review round of the loop. It is
+  a whole number of at most six digits. Rescue and plan have their own budgets, below.
+  `QWEN_ADVISOR_TIMEOUT` (default 600 s) applies per call of every kind, and
+  `QWEN_ADVISOR_CLAUDE` names the claude binary they run (default `QWEN_CLAUDE_BIN`).
 - A missing login, no network, a usage limit, a timeout or a spent budget come back as
   `ADVISOR UNAVAILABLE: ...` and the session carries on; the exit code is unchanged.
 - Every question and answer is appended to `advisor-<stamp>-<pid>.md` in `QWEN_OUTDIR` when you set it, else in `~/.cache/qwen-agent/advisor/` (never the tree under audit).
@@ -548,26 +546,57 @@ goes into the next round's prompt; these calls do not count toward the agent's o
   "credential" or "secret", key and certificate files (`.pem`, `.key`, `.p12`, `.pfx`, `.jks`,
   `.keystore`, `.kdbx`, `.asc`, `.gpg`), and anything under `.git`, `.ssh`, `.aws`, `.gnupg`,
   `.kube` or `.docker`. The session gets "looks like a secret, not attached".
-- **Privacy:** questions and attached files leave this machine. The startup line says so
-  even with `-q`. Only the `claude` login is used: no `ANTHROPIC_*` variable reaches the
+- **Privacy:** questions, their context and attached files leave this machine, and so does
+  any repository file Claude chooses to read with its read tools (the secret-file filter above
+  covers attachments, not those reads). The startup line says so even with `-q`. Only the `claude` login is used: no `ANTHROPIC_*` variable reaches the
   advisor, so Bedrock, Vertex and API-key-only setups get "unavailable".
 - Not with `--interactive` (a person is there to ask).
+
+## Rescue (`--rescue MODEL`, with `--until-done`)
+
+`QWEN_RESCUE=MODEL` in the config file, or `--rescue MODEL` on the command, makes the
+`--until-done` loop ask a Claude model what went wrong after a failing round that another
+round follows. The call gets the failing output, the round's diff and the task; its advice
+goes into the next round's prompt. At most `--max-rounds` − 1 such calls per run; they do not
+count toward the advisor's ask budget, and the setting is independent of `--advisor`.
+`--rescue off` turns a configured one off for one run. On a single run, with no
+`--until-done`, a config value is skipped (and the `claude:` line says so) and a typed one is
+a usage error. It replaces the old trigger-list flag for the loop's own call, which now exits 2 naming
+`--rescue MODEL`.
+
+- Like the other calls it uses your `claude` login, gets Read, Grep and Glob on the working
+  directory (`QWEN_CLAUDE_TOOLS=0` removes them), and fails open: no login, a timeout or a
+  refusal just means no advice. **The failing output and diff leave this machine**, and so does
+  any repository file Claude reads.
+- Each call's question and answer is in `rescue.md` in the run folder, and report.md's
+  "Claude calls" and "Rescue after failing rounds" sections list it with the next round's reply.
+
+### Records of Claude calls
+
+Every plan, advisor and rescue call of an `--until-done` run is in the run folder's
+`claude-calls.jsonl`, whose rows carry a `call` field: `plan`, `plan-gate`, `ask` (the
+advisor's tool) or `rescue`. The file holds two kinds of row: run records, which have a
+`called` key (true or false, with the reason a call was skipped), and per-call log rows
+(model, seconds, cost, tools, turns). Read the rows with both shapes in mind.
 
 ## Planning (`--plan MODEL`, experimental)
 
 `--plan MODEL` holds the session's first file edit once. A Claude Code `PreToolUse` hook
-(`lib/advisor_hook.py`) sends MODEL a digest of the session so far and the task, with no
-tools, and denies that one edit with the advice as the reason. The session reads the advice in
-the tool result and re-issues the edit. It uses your own `claude` login, once per run.
+(`lib/advisor_hook.py`) sends MODEL a digest of the session so far and the task, and denies that one edit with the advice as the reason. The session reads the advice in
+the tool result and re-issues the edit. It uses your own `claude` login, once per run, with
+the read tools Read, Grep and Glob on the working directory (`QWEN_CLAUDE_TOOLS=0` removes them).
 
-- Off unless typed. Needs a run that can write (`-r coder`, `--write`, `--test` on a coder).
-  Refused with `--interactive` and with `--resume`. Combines with `--advisor`; the two keep
+- Off unless the config file sets `QWEN_PLAN=MODEL` or you type `--plan MODEL` (`--plan off`
+  turns a configured one off for one run). Needs a run that can write (`-r coder`, `--write`,
+  `--test` on a coder); from the config it is skipped on a read-only run (the `claude:` line
+  says so), typed it is refused, and with `--interactive` or `--resume` a typed one is refused while a configured one is skipped (the `claude:` line says so). Combines with `--advisor`; the two keep
   separate budgets and logs.
 - The digest is the session's visible messages in order, one line per tool call (what it
   opened, searched or ran, with the outcome) and the edit it is about to make. The model's
   thinking and file contents are never included; a path that looks like a secret is
   withheld. It is capped at 40000 characters, cutting earlier messages first.
-  **The digest leaves this machine**; the startup line says so even with `-q`.
+  **The digest leaves this machine**, and so does any repository file Claude reads with its
+  read tools; the startup line says so even with `-q`.
 - The session's system note tells it to write a `PLAN:` briefing (goal, what it found,
   files, change, check, what it is unsure of) just before its first edit, since that
   briefing is all the reviewer learns of its reasoning, and to answer the advice with an
@@ -575,7 +604,7 @@ the tool result and re-issues the edit. It uses your own `claude` login, once pe
 - After the advice, the re-issued edit is held once more, with no model call, if the
   session has neither written the `ADVICE RESPONSE` block nor run a single non-edit tool
   (a read, a search, a test). The reason names what is missing; the edit after that is
-  never held. It is recorded as `trigger: plan-gate` in `advisor-harness.jsonl`.
+  never held. It is recorded as `call: plan-gate` in `claude-calls.jsonl`.
 - Fail-open: a missing login, a timeout (`QWEN_ADVISOR_TIMEOUT`, 600 s), a refusal or a
   crashed hook lets the edit through. A call refused by Claude's safeguards is recorded
   as `refused by Claude's safeguards`. The one call is spent even when it fails; a second
@@ -584,7 +613,7 @@ the tool result and re-issues the edit. It uses your own `claude` login, once pe
   the one held, in whichever round makes it, and the deviation audit never gets the option. While
   the call is unspent a round's timeout grows by `QWEN_ADVISOR_TIMEOUT`. `report.md` gets
   `plan: ...` header lines and a `## Plan` section; the record is also in
-  `advisor-harness.jsonl` (`trigger: plan`), with `plan.md` (the full brief and answer) and
+  `claude-calls.jsonl` (`call: plan`), with `plan.md` (the full brief and answer) and
   `plan-digest.md` beside it.
 - A single run logs to `plan-<stamp>-<pid>.md` next to the advisor log, and `--json` adds
   `qwen_agent.plan` = `{model, called, round, tool, path, digest_chars, cut, cost_usd,

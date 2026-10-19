@@ -52,6 +52,21 @@ def _depth_shallow_into_run(monkeypatch):
     monkeypatch.setattr(test_cli, "run", run)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _state_home_in_tmp(tmp_path_factory):
+    """The one-time notice writes a marker under XDG_STATE_HOME: a test run must never
+    touch the developer's real one (runners that do not pass QWEN_NO_NOTICE land here)."""
+    old = os.environ.get("XDG_STATE_HOME")
+    os.environ["XDG_STATE_HOME"] = str(tmp_path_factory.mktemp("xdg-state"))
+    os.environ["QWEN_NO_NOTICE"] = "1"   # a runner that forgets it stays quiet; notice tests set ""
+    yield
+    os.environ.pop("QWEN_NO_NOTICE", None)
+    if old is None:
+        del os.environ["XDG_STATE_HOME"]
+    else:
+        os.environ["XDG_STATE_HOME"] = old
+
+
 @pytest.fixture(autouse=True)
 def _no_qwen_swarm_env(monkeypatch):
     """A developer's QWEN_SWARM_* or QWEN_DR_* shell settings must not change test results."""

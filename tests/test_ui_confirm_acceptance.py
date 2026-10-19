@@ -159,8 +159,9 @@ def test_confirm_counts_only_the_broken_expectation(tmp_path, fake, monkeypatch,
     monkeypatch.setenv("QWEN_CLAUDE_BIN", str(_fake_claude(tmp_path)))
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(tmp_path / "claude-calls.jsonl"))
     monkeypatch.setenv("QWEN_EXEC_RETRY_BACKOFF", "0 0")
+    monkeypatch.setenv("QA_CFG_CONFIRM", "opus")                 # the config file's QWEN_CONFIRM=opus
     out = tmp_path / "run"
-    assert _run(fake, out) == 4                                  # defaults: confirm=claude
+    assert _run(fake, out) == 4                                  # confirm=claude from the config
     rows = {r["id"]: r for r in json.loads((out / "results.json").read_text(encoding="utf-8"))}
     assert rows["upload-notes"]["status"] == "PASS"
     assert "confirmation" not in rows["upload-notes"]            # a PASS is never re-checked
