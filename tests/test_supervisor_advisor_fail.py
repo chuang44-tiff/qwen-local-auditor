@@ -508,4 +508,4 @@ def test_report_lists_harness_calls(env, stub_advice):
     assert "Use the word good." in text
     # The agent's own advisor lines are separate lines of their own (the rounds asked
     # nobody, so their count is 0) -- the harness lines neither replace nor inflate them.
-    assert "\ncalls: 0\n" in text and "budget: 4" in text
+    assert "\ncalls: 0\n" in text and "asks: at most 4 across the run" in text

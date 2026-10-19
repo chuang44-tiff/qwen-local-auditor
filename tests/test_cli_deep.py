@@ -103,7 +103,7 @@ def sha(text):
 def test_existing_role_texts_are_unchanged(tmp_path, server, fake):
     # sha256 of the built-in role texts as released; the deep variants live beside them
     pinned = {"auditor": "dbcc0b8e488b3f4fc5ab2afc65903656dcb84b2cb55d7e467e7ba55c25d47e81",
-              "coder": "ef4b57eae82a310a5b8cb9595d53e1be6719bb21e46d5d27252409b1d56ce652",
+              "coder": "7445a4abdc26fbdc109a96f6d03053d06d48d33aaae21f2cfc48bd587d530c1e",
               "mechanic": "1648791f6b4b6e46f0c62696bb763bae30b5bb9aa3d8ac8a8d924ab27f34238d"}
     for role, digest in pinned.items():
         shutil.rmtree(str(tmp_path / "calls")); (tmp_path / "calls").mkdir()
@@ -714,13 +714,14 @@ def test_until_done_gives_the_review_round_to_the_supervisor(tmp_path):
     assert "--review-round" in argv[:sep] and "--review-round" not in argv[sep + 1:]
 
 
-def _until_done_argv(tmp_path, args):
+def _until_done_argv(tmp_path, args, extra=None):
     fakepy = tmp_path / "fakepy"
     fakepy.write_text('#!/usr/bin/env bash\n[ "$1" = -c ] && exit 0\n'
                       'for a in "$@"; do printf "ARG:%s\\n" "$a"; done > "$FAKE_RECORD"\n',
                       encoding="utf-8", newline="\n")
     fakepy.chmod(0o755)
-    r = run(tmp_path, ["--until-done", "t.md", *args], extra={"QWEN_PYTHON": posix(fakepy)})
+    r = run(tmp_path, ["--until-done", "t.md", *args],
+            extra=dict({"QWEN_PYTHON": posix(fakepy)}, **(extra or {})))
     if r.returncode != 0:
         return r, None
     return r, [ln[4:] for ln in (tmp_path / "record.txt").read_text(encoding="utf-8").splitlines()

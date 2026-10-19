@@ -1248,7 +1248,7 @@ def test_advisor_rounds_share_one_state_dir(env, capsys):
     script(tmp, [{"result": "tried"}, {"result": "fixed", "write": {"value.txt": "good\n"}}])
     assert sup(repo, task, "--advisor", "opus") == 0
     assert ("until-done: advisor opus via your claude login for every coder round; "
-            "at most 4 calls across the whole run") in capsys.readouterr().err
+            "asks: at most 4 across the run") in capsys.readouterr().err
     c = calls(tmp)
     assert len(c) == 2
     dirs = set()
@@ -1257,6 +1257,85 @@ def test_advisor_rounds_share_one_state_dir(env, capsys):
         dirs.add(argv[argv.index("--advisor-state") + 1])
     assert len(dirs) == 1
     assert not os.path.exists(dirs.pop())               # no leftover state dir either
+
+
+def test_advisor_budget_zero_says_asks_off_but_keeps_the_failure_call(env, capsys, monkeypatch):
+    # QWEN_ADVISOR_MAX_CALLS=0 turns the agent's ask off, and the startup line says so. The
+    # loop's own failure call is not the agent's ask: it still runs on the run's state dir,
+    # and its notice still says so.
+    repo, task, tmp = env
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "0")
+    script(tmp, [{"result": "tried"}, {"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--advisor", "opus") == 0
+    err = capsys.readouterr().err
+    assert "asks: 0 (off)" in err
+    assert "the harness asks opus after each failing round" in err
+
+
+def test_advisor_budget_junk_is_an_error_not_zero(env, monkeypatch):
+    # qwen-agent.sh refuses a non-number first. Reached directly, junk must not read as 0 (which
+    # would turn the agent's ask off without saying so): the supervisor fails instead.
+    repo, task, tmp = env
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "many")
+    script(tmp, [{"result": "tried"}, {"result": "fixed", "write": {"value.txt": "good\n"}}])
+    with pytest.raises(ValueError):
+        sup(repo, task, "--advisor", "opus")
+
+
+def test_advisor_budget_reads_leading_zeros_as_the_number(monkeypatch):
+    # The same number qwen-agent.sh and the advisor server use: "007" is 7, "00" is off.
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "007")
+    assert supervisor._advisor_budget() == "7"
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "00")
+    assert supervisor._advisor_budget() == "0"
+    assert supervisor._advisor_asks_off()
+
+
+def test_advisor_budget_negative_is_an_error_not_printed(monkeypatch):
+    # qwen-agent.sh refuses a negative budget first. Reached directly, it must not be printed
+    # as this run's budget: the server would enforce its default 4 while the notice said -1.
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "-1")
+    with pytest.raises(ValueError):
+        supervisor._advisor_budget()
+
+
+def test_advisor_budget_longer_than_six_characters_is_an_error_not_printed(monkeypatch):
+    # qwen-agent.sh refuses seven or more characters first; reached directly, the same
+    # rule applies, so the notice never states a budget the shell would refuse.
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "1234567")
+    with pytest.raises(ValueError):
+        supervisor._advisor_budget()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX environment bytes")
+def test_advisor_budget_non_utf8_is_an_error_not_zero(monkeypatch):
+    # A non-UTF-8 byte reaches os.environ as a surrogate escape: junk, never 0.
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "\udcff")
+    with pytest.raises(ValueError):
+        supervisor._advisor_budget()
+
+
+@pytest.mark.parametrize("raw", [" 3", "+3", "3_000", "\N{ARABIC-INDIC DIGIT THREE}", "3" + chr(10)])
+def test_advisor_budget_takes_only_ascii_digits_like_the_shell(monkeypatch, raw):
+    # qwen-agent.sh accepts only 0-9 (its *[!0-9]* case). int() also takes spaces, a sign, an
+    # underscore and other digits: reached directly, those must be refused, not read as a number.
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", raw)
+    with pytest.raises(ValueError):
+        supervisor._advisor_budget()
+
+
+def test_advisor_budget_refused_before_any_directory_is_made(env, monkeypatch):
+    # The refusal comes before the lock, the run's directory and the advisor's: a refused
+    # run leaves nothing behind, and the advisor dir is never made.
+    repo, task, tmp = env
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "many")
+
+    def no_advisor_dir(*a, **k):
+        raise AssertionError("the advisor dir was made before the budget was refused")
+    monkeypatch.setattr(supervisor.tempfile, "mkdtemp", no_advisor_dir)
+    with pytest.raises(ValueError):
+        sup(repo, task, "--advisor", "opus")
+    assert not (tmp / "state").exists()
 
 
 def test_advisor_is_not_given_to_the_deviation_audit(env):
@@ -1275,6 +1354,36 @@ def test_advisor_is_not_given_to_the_deviation_audit(env):
     assert "--advisor" not in audit[0] and "--advisor-state" not in audit[0]
 
 
+def test_advisor_max_calls_zero_says_asks_off_in_startup_line_and_report(env, capsys, monkeypatch):
+    repo, task, tmp = env
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "0")
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--advisor", "opus") == 0
+    assert ("until-done: advisor opus via your claude login for every coder round; "
+            "asks: 0 (off)") in capsys.readouterr().err
+    argv = calls(tmp)[0]
+    assert "--advisor" in argv and "--advisor-state" in argv      # the failure call still has its dir
+    assert "--advisor-ask" not in argv                           # no such flag: the env carries it
+    assert "asks: 0 (off)" in _report_text(tmp)
+
+
+def test_advisor_max_calls_budget_is_stated_in_startup_line_and_report(env, capsys, monkeypatch):
+    repo, task, tmp = env
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "3")
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--advisor", "opus") == 0
+    assert "asks: at most 3 across the run" in capsys.readouterr().err
+    assert "asks: at most 3 across the run" in _report_text(tmp)
+
+
+def test_advisor_max_calls_unset_or_empty_states_four_asks(env, capsys, monkeypatch):
+    repo, task, tmp = env
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "")
+    script(tmp, [{"result": "fixed", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task, "--advisor", "opus") == 0
+    assert "asks: at most 4 across the run" in capsys.readouterr().err
+
+
 def test_advisor_report_section(env):
     # What the one budget spent, over every round of the run: two calls, one answered
     # (0.5) and one that came back unavailable (no cost to add).
@@ -1287,7 +1396,7 @@ def test_advisor_report_section(env):
     assert sup(repo, task, "--advisor", "opus") == 0
     text = _report_text(tmp)
     assert "## Advisor" in text
-    assert "model: opus" in text and "budget: 4" in text
+    assert "model: opus" in text and "asks: at most 4 across the run" in text
     assert "calls: 2" in text and "cost_usd: 0.5" in text and "unavailable: 1" in text
 
 
@@ -1363,6 +1472,18 @@ def test_advisor_dir_removed_on_keyboard_interrupt(env, monkeypatch):
     assert "## Advisor" in text and "calls: 1" in text and "cost_usd: 0.5" in text
 
 
+def test_asks_line_and_report_survive_an_interrupted_run(env, capsys, monkeypatch):
+    # The startup line prints before the first round, so an interrupt on a later round leaves
+    # it said; the report written on the 130 path states the same asks.
+    repo, task, tmp = env
+    monkeypatch.setenv("QWEN_ADVISOR_MAX_CALLS", "3")
+    script(tmp, [{"result": "tried", "advisor": ASKED}, {"result": "fixed"}])
+    _raise_on_call(monkeypatch, 2, KeyboardInterrupt())
+    assert sup(repo, task, "--advisor", "opus") == 130
+    assert "asks: at most 3 across the run" in capsys.readouterr().err
+    assert "asks: at most 3 across the run" in _report_text(tmp)
+
+
 def _cmd_only(task):
     task.write_text("# Goal\nMake the value good.\n\n"
                     "- [ ] value is good -- check: cmd %s check.py\n" % PY.replace("\\", "/"))
@@ -1430,3 +1551,55 @@ def test_test_checks_without_a_test_command_still_exit_2(env, monkeypatch, capsy
     assert sup(repo, task) == 2
     assert "the checklist has test checks but QWEN_TEST_CMD is not set" in capsys.readouterr().err
     assert not (tmp / "record.jsonl").exists()            # no round ran
+
+
+def test_not_done_prompt_demands_visible_text_and_drops_continue():
+    p = supervisor.NOT_DONE.format(fails="TEST ALL FAILED", unlogged="")
+    assert p.startswith("Not done.") and "TEST ALL FAILED" in p
+    assert "DO THIS NOW." in p and "visible text" in p
+    assert "Delete any scratch or probe file" in p
+    assert not p.rstrip().endswith("Continue.") and "Continue." not in p
+
+
+def test_review_round_prompt_tells_to_delete_scratch_files():
+    for check_it in (supervisor.CHECK_TEST, supervisor.CHECK_NONE):
+        p = supervisor.REVIEW_ROUND.format(check_it=check_it)
+        assert p.startswith("Review round: every check passes.")
+        assert "Delete every scratch or probe file you created in this round." in p
+        assert "For each case, " + check_it + "." in p
+        assert "HOLDS <evidence>" in p and "FIXED <path:line>" in p
+    assert "qwen-test" not in supervisor.REVIEW_ROUND.format(check_it=supervisor.CHECK_NONE)
+
+
+def test_first_prompt_numbers_its_rules_and_nests_the_shell_line():
+    for shell in (supervisor.SHELL_TEST, supervisor.SHELL_NONE):
+        p = supervisor.FIRST.format(shell=shell, task="THE TASK", log="THE LOG")
+        assert "RULES.\n1. The harness, not you, decides when you are done." in p
+        assert "\n   " + shell + "\n2. You cannot tick or edit checklist items." in p
+        assert "4. Create no scratch, probe or throwaway files" in p
+        assert "5. End EVERY turn with visible text" in p
+        assert "# The task\n\nTHE TASK\n" in p and "# Decisions recorded so far\n\nTHE LOG" in p
+
+
+def test_advice_block_has_the_advice_response_block():
+    b = supervisor.ADVICE_BLOCK.format(advice="1. check x")
+    assert "# Advice from a stronger model on these failures\n\n1. check x\n" in b
+    assert "ADVICE RESPONSE:\n1. DONE <evidence>\n2. REJECTED <evidence>" in b
+    assert "is\n   not evidence" in b or "not evidence" in " ".join(b.split())
+    assert b.rstrip().endswith("End with visible text.")
+
+
+def test_harness_q_asks_for_a_numbered_cause_fix_and_run_line():
+    q = supervisor.HARNESS_Q
+    assert "numbered list" in q and "1. The most likely cause" in q
+    assert "2. The change to make." in q and "3. RUN:" in q
+
+
+def test_second_round_prompt_carries_the_do_this_now_steps(env):
+    repo, task, tmp = env
+    script(tmp, [{"result": "a"}, {"result": "b", "write": {"value.txt": "good\n"}}])
+    assert sup(repo, task) == 0
+    c = calls(tmp)
+    p1, p2 = _prompt_of(c[0]), _prompt_of(c[1])
+    assert "RULES." in p1 and "5. End EVERY turn with visible text" in p1
+    assert p2.startswith("Not done.") and "DO THIS NOW." in p2 and "TEST ALL FAILED" in p2

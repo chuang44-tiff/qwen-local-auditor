@@ -61,6 +61,13 @@ def _no_qwen_swarm_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_advisor_budget_env(monkeypatch):
+    """A developer's QWEN_ADVISOR_MAX_CALLS shell setting must not change the expected budget
+    text; the tests that need a budget set it themselves."""
+    monkeypatch.delenv("QWEN_ADVISOR_MAX_CALLS", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _claude_probe_off(monkeypatch):
     """The claude availability probe (claude_check.probe, and with it ui-test's run-start
     notice) never runs against this machine's real claude or network from a test. Probe

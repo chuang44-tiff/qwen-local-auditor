@@ -36,7 +36,7 @@ NUDGE = "Delegate more than feels necessary."
 # deliberate change of what the model is told, and must re-pin here.
 CHANGED_TEXTS = {
     "auditor-deep": "ce9eca260b0eaf65b4ac2a997ad6721788c443ed43ed63c025c2e14a00fe3d5a",
-    "coder-deep": "a8f7959a293ae82b767a71f2f458ae57fd73ec52e7c92231ba48b1ab4808e888",
+    "coder-deep": "cbdb915e03009c08d7869036f3c11ff21452c94cecf2416d7336f27e9a148836",
     "review-prompt": "c2b5781be228b67eec746341255f7cf0d604b8a4c398734e86947a436440194f",
 }
 
@@ -44,7 +44,7 @@ CHANGED_TEXTS = {
 UNCHANGED_TEXTS = {
     "plain": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "auditor": "dbcc0b8e488b3f4fc5ab2afc65903656dcb84b2cb55d7e467e7ba55c25d47e81",
-    "coder": "ef4b57eae82a310a5b8cb9595d53e1be6719bb21e46d5d27252409b1d56ce652",
+    "coder": "7445a4abdc26fbdc109a96f6d03053d06d48d33aaae21f2cfc48bd587d530c1e",
     "mechanic": "1648791f6b4b6e46f0c62696bb763bae30b5bb9aa3d8ac8a8d924ab27f34238d",
     # the tester text carries the black-box sentence (the source-reaching browser
     # tools are hidden by default)

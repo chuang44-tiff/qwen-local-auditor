@@ -8,7 +8,7 @@ Every failure is a tool result that says so: the session never breaks on the adv
 The environment comes from the MCP config qwen-agent writes:
   QA_ADVISOR_MODEL      the advisor model (opus, sonnet, or a model id)
   QA_ADVISOR_STATE      the run's private directory: call counter, lock, calls.jsonl
-  QA_ADVISOR_MAX_CALLS  calls per run (default 4), shared by every session of the run
+  QA_ADVISOR_MAX_CALLS  calls per run (default 4; 0 = none), shared by every session of the run
   QA_ADVISOR_TIMEOUT    seconds per call (default 600)
   QA_ADVISOR_LOG        markdown file each question and answer is appended to
   QA_ADVISOR_CLAUDE     the claude binary (default: claude on PATH)
@@ -31,21 +31,25 @@ MAX_FILE = 40000
 MAX_FILES_TOTAL = 120000
 BRIEF_HEAD = (
     "You are advising another AI agent that is auditing or changing code. You cannot run "
-    "anything or see anything beyond what is below. Answer the question directly: say which "
-    "option you would take and why, what evidence would change your mind, and the one check "
-    "the agent should run next. Be brief (under 400 words). If the question cannot be "
-    "answered from what is given, say exactly what is missing.")
+    "anything or see anything beyond what is below. Reply in at most 350 words, as a "
+    "numbered list of findings, most important first. Each finding is one imperative "
+    "sentence the agent can act on, plus the file, line or input it concerns. First check "
+    "whether the agent's premise is wrong (a misread task, a wrong assumption stated as "
+    "fact); if so, finding 1 says exactly that and what is true instead. Then name the most "
+    "likely cause or the input that breaks its plan, and end with 'RUN: <one command or "
+    "check>'. Explain the cause and the fix. If the question cannot be answered from what "
+    "is given, say exactly what is missing and stop.")
 TOOL = {
     "name": "ask",
     "description": (
-        "Ask a stronger model ONE self-contained question. Best use: send a plan or a change "
-        "and ask what input or situation breaks it. Also ask when you are unsure which approach "
-        "to take, when a check or test fails and you do not know why, when your approach is not "
-        "converging (the same failure after two attempts), or when the harness reports a failure "
-        "you do not understand. It sees only what you send: the question, the evidence, and up to "
-        "5 files (paths inside the working directory). It cannot search the codebase. Take its "
-        "answer seriously: act on each concrete finding and run the check it names; if you "
-        "disagree, say why with evidence or ask a follow-up. Calls are limited per run."),
+        "Ask a stronger model ONE self-contained question. Call it at the moments your "
+        "instructions list. Arguments: question = what you did or plan, then 'what input "
+        "or situation breaks it?' or 'why does this fail?'; context = the exact failing "
+        "output, what you tried and changed; paths = up to 5 files (inside the working "
+        "directory). It sees only what you send and cannot search the codebase. The answer "
+        "is a numbered list: reply with an ADVICE RESPONSE block, one line per number, "
+        "DONE or REJECTED plus evidence. Your memory is not evidence. "
+        "Calls are limited per run."),
     "inputSchema": {"type": "object",
                     "properties": {
                         "question": {"type": "string", "description": "one self-contained question"},
@@ -74,11 +78,12 @@ def clean_env(env):
 
 
 def _int(v, default):
+    """int(v) as given (0 included); the default only for a negative, empty or non-number."""
     try:
         n = int(v)
     except (TypeError, ValueError):
         return default
-    return n if n > 0 else default
+    return n if n >= 0 else default
 
 
 SECRET_DIRS = {".git", ".ssh", ".aws", ".gnupg", ".kube", ".docker"}
@@ -222,20 +227,20 @@ def _log(path, n, budget, model, question, context, notes, answer):
         pass                                     # the log is a convenience, never a failure
 
 
-def ask(question, context, paths, env, root):
+def ask(question, context, paths, env, root, limit=MAX_CONTEXT):
     if not isinstance(question, str) or not question.strip():
         raise Refused("the question is empty: send one self-contained question")
     context = context if isinstance(context, str) else ""
-    if len(context) > MAX_CONTEXT:
+    if len(context) > limit:
         raise Refused("the context is %d characters; the limit is %d. Shorten it to the "
-                      "evidence that matters." % (len(context), MAX_CONTEXT))
+                      "evidence that matters." % (len(context), limit))
     files, notes = read_paths(paths, root)
     state = env.get("QA_ADVISOR_STATE")
     if not state or not os.path.isdir(state):
         raise Unavailable("no advisor state directory (start the run with qwen-agent --advisor)")
     model = env.get("QA_ADVISOR_MODEL") or "opus"
     budget = _int(env.get("QA_ADVISOR_MAX_CALLS"), 4)
-    timeout = _int(env.get("QA_ADVISOR_TIMEOUT"), 600)
+    timeout = _int(env.get("QA_ADVISOR_TIMEOUT"), 600) or 600     # a 0 s timeout kills every call
     # which() even for a configured name: Windows CreateProcess finds neither claude.cmd nor
     # a bare name the way a shell does.
     named = env.get("QA_ADVISOR_CLAUDE") or "claude"

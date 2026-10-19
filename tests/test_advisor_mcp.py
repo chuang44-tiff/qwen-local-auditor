@@ -254,3 +254,65 @@ def test_tool_description_asks_what_breaks_it():
     d = am.TOOL["description"]
     assert "what input or situation breaks it" in d
     assert "cannot search the codebase" in d
+
+
+def test_int_keeps_zero_and_defaults_negative_or_junk():
+    assert am._int("0", 4) == 0
+    assert am._int("7", 4) == 7
+    assert am._int("-1", 4) == 4
+    assert am._int("x", 4) == 4
+    assert am._int(None, 4) == 4
+    assert am._int("", 4) == 4
+
+
+def test_int_non_utf8_text_defaults_and_is_not_zero():
+    # A non-UTF-8 byte in the environment reaches the server as a surrogate escape: junk.
+    assert am._int("\udcff", 4) == 4
+
+
+@posix_only
+def test_budget_zero_is_a_spent_budget_not_the_default(adv):
+    adv["env"]["QA_ADVISOR_MAX_CALLS"] = "0"
+    with pytest.raises(am.Unavailable, match="budget of 0 advisor calls"):
+        am.ask("q", "", None, adv["env"], str(adv["root"]))
+    assert not list(adv["calls"].glob("argv.*"))             # never reached claude
+
+
+@posix_only
+def test_unset_or_empty_budget_still_means_four(adv):
+    adv["env"]["QA_ADVISOR_MAX_CALLS"] = ""
+    am.ask("q", "", None, adv["env"], str(adv["root"]))
+    assert len(records(adv["state"])) == 1
+
+
+@posix_only
+def test_timeout_zero_still_means_the_default(adv):
+    # only the BUDGET keeps 0; a 0-second timeout would kill every call at once
+    adv["env"]["QA_ADVISOR_TIMEOUT"] = "0"
+    am.ask("q", "", None, adv["env"], str(adv["root"]))
+    assert len(records(adv["state"])) == 1
+
+
+def test_brief_head_asks_for_a_numbered_list_and_a_run_line():
+    h = am.BRIEF_HEAD
+    assert "numbered list of findings" in h and "at most 350 words" in h
+    assert "'RUN: <one command or check>'" in h
+    assert "premise is wrong" in h and "finding 1 says exactly that" in h
+    assert "which option you would take" not in h
+
+
+def test_tool_description_names_the_advice_response_block():
+    d = am.TOOL["description"]
+    assert "ADVICE RESPONSE block" in d and "DONE or REJECTED" in d
+    assert "not evidence" in d
+
+
+@posix_only
+def test_ask_limit_argument_replaces_the_context_cap(adv):
+    big = "c" * (am.MAX_CONTEXT + 500)
+    with pytest.raises(am.Refused, match="the limit is 12000"):
+        am.ask("q", big, None, adv["env"], str(adv["root"]))
+    out = am.ask("q", big, None, adv["env"], str(adv["root"]), limit=am.MAX_CONTEXT + 1000)
+    assert "Take option A" in out
+    with pytest.raises(am.Refused, match="the limit is 100"):
+        am.ask("q", "c" * 101, None, adv["env"], str(adv["root"]), limit=100)

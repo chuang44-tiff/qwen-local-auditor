@@ -225,7 +225,7 @@ def test_ask_note_names_the_moments_to_ask(tmp_path, server, fake):
     assert "unsure which approach to take" in note
     assert "not converging" in note
     assert "a failure you do not understand" in note
-    assert "Take its answer seriously" in note
+    assert "HOW TO USE THE ANSWER" in note
 
 
 # ------------------------------------------------------- --advisor-triggers
@@ -247,7 +247,6 @@ def test_advisor_triggers_default_is_not_typed(tmp_path):
 
 @pytest.mark.parametrize("args,msg", [
     (["--advisor-triggers", "fail"], "--advisor-triggers needs --advisor"),
-    (["--advisor", "opus", "--advisor-triggers", "plan"], "--advisor-triggers takes fail or none"),
     # an empty value is a value: "no triggers given" is the absence of the flag, and an
     # empty string would otherwise slip through every [ -n ] test as if it had not been typed
     (["--advisor", "opus", "--advisor-triggers", ""], "--advisor-triggers takes fail or none"),
@@ -272,3 +271,190 @@ def test_ask_note_mentions_harness_advice(tmp_path, server, fake):
     assert r.returncode == 0, r.stderr
     note = sys_prompt(calls(tmp_path)[0][0])
     assert "Advice from a stronger model" in note
+
+
+# ------------------------------------------------- QWEN_ADVISOR_MAX_CALLS = the ask budget
+
+def test_advisor_triggers_plan_points_to_the_plan_flag(tmp_path):
+    r, _ = _until_done_argv(tmp_path, ["--advisor", "opus", "--advisor-triggers", "plan"])
+    assert r.returncode == 2 and "use --plan MODEL" in r.stderr
+    r, _ = _until_done_argv(tmp_path, ["--advisor", "opus", "--advisor-triggers", "fail,plan"])
+    assert r.returncode == 2 and "use --plan MODEL" in r.stderr
+
+
+@pytest.mark.parametrize("value", ["-1", "x", "2.5", "1234567"])
+def test_advisor_max_calls_env_that_is_not_a_whole_number_is_refused(tmp_path, server, fake, value):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV, QWEN_ADVISOR_MAX_CALLS=value))
+    assert r.returncode == 2
+    assert "QWEN_ADVISOR_MAX_CALLS must be a whole number (0 turns the agent's ask off)" in r.stderr
+    assert not list((tmp_path / "calls").glob("argv.*"))          # no claude started
+
+
+def test_advisor_max_calls_env_is_not_checked_without_advisor(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "-C", posix(repo), "hi"], server, fake,
+           extra=dict(DEEP_ENV, QWEN_ADVISOR_MAX_CALLS="x"))
+    assert r.returncode == 0, r.stderr
+
+
+def test_advisor_max_calls_empty_means_the_default_of_four(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV, QWEN_ADVISOR_MAX_CALLS=""))
+    assert r.returncode == 0, r.stderr
+    (a1, _), _ = calls(tmp_path)
+    assert "at most 4 calls this run" in sys_prompt(a1)
+
+
+def test_advisor_max_calls_two_is_stated_in_the_ask_note(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV, QWEN_ADVISOR_MAX_CALLS="2"))
+    assert r.returncode == 0, r.stderr
+    (a1, _), _ = calls(tmp_path)
+    assert "at most 2 calls this run" in sys_prompt(a1)
+    assert advisor_cfg(tmp_path)["env"]["QA_ADVISOR_MAX_CALLS"] == "2"
+
+
+@pytest.mark.parametrize("value", ["0000000", " 2", "+2", "2\n", "1_0"])
+def test_advisor_max_calls_env_padded_signed_or_underscored_is_refused(tmp_path, server, fake, value):
+    # The check reads the raw text: a run of seven or more characters, a space, a sign,
+    # a newline or an underscore is not a whole number, even when its value would be.
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV, QWEN_ADVISOR_MAX_CALLS=value))
+    assert r.returncode == 2
+    assert "QWEN_ADVISOR_MAX_CALLS must be a whole number" in r.stderr
+    assert not list((tmp_path / "calls").glob("argv.*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX environment bytes")
+def test_advisor_max_calls_env_non_utf8_is_refused(tmp_path, server, fake):
+    # Python hands the byte 0xff to the script unchanged: not a digit, so refused.
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV, QWEN_ADVISOR_MAX_CALLS="\udcff"))
+    assert r.returncode == 2
+    assert "QWEN_ADVISOR_MAX_CALLS must be a whole number" in r.stderr
+    assert not list((tmp_path / "calls").glob("argv.*"))
+
+
+@pytest.mark.parametrize("value, shown", [("007", "7"), ("999999", "999999")])
+def test_advisor_max_calls_digits_are_read_as_the_number(tmp_path, server, fake, value, shown):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV, QWEN_ADVISOR_MAX_CALLS=value))
+    assert r.returncode == 0, r.stderr
+    (a1, _) = calls(tmp_path)[0]
+    assert "at most %s calls this run" % shown in sys_prompt(a1)
+    assert advisor_cfg(tmp_path)["env"]["QA_ADVISOR_MAX_CALLS"] == shown
+
+
+def test_advisor_state_dir_with_spaces_is_used(tmp_path, server, fake):
+    # The state dir is a path argument the script passes on: a space in it must not split it.
+    repo = dirty_repo(tmp_path)
+    d = tmp_path / "shared dir"; d.mkdir()
+    r = go(tmp_path, ["--shallow", "-r", "auditor", "-q", "--advisor", "opus",
+                      "--advisor-state", posix(d), "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "shared").exists()
+    [cfg] = list(d.glob("advisor-*.json"))
+    srv = json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["qla_advisor"]
+    assert same_path(srv["env"]["QA_ADVISOR_STATE"]) == same_path(str(d))
+
+
+def test_advisor_max_calls_zero_single_shot_is_refused(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV, QWEN_ADVISOR_MAX_CALLS="0"))
+    assert r.returncode == 2
+    assert "nothing for the advisor to do: QWEN_ADVISOR_MAX_CALLS=0 without --until-done" in r.stderr
+    assert not list((tmp_path / "calls").glob("argv.*"))
+
+
+def test_advisor_max_calls_zero_with_triggers_none_is_refused(tmp_path):
+    r, _ = _until_done_argv(tmp_path, ["--advisor", "opus", "--advisor-triggers", "none"],
+                            extra={"QWEN_ADVISOR_MAX_CALLS": "0"})
+    assert r.returncode == 2
+    assert ("nothing for the advisor to do: QWEN_ADVISOR_MAX_CALLS=0 with "
+            "--advisor-triggers none") in r.stderr
+
+
+def test_advisor_max_calls_zero_is_accepted_under_until_done(tmp_path):
+    r, argv = _until_done_argv(tmp_path, ["--advisor", "opus"],
+                               extra={"QWEN_ADVISOR_MAX_CALLS": "0"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "--advisor-ask" not in argv                     # no flag exists: the env carries it
+
+
+def test_advisor_max_calls_zero_round_has_no_server_tool_or_ask_note(tmp_path, server, fake):
+    # A supervisor round (--advisor-state) with a 0 budget: the loop owns the state dir, but
+    # the coder gets no qla_advisor MCP server, no ask tool grant and no ask note.
+    repo = dirty_repo(tmp_path)
+    d = tmp_path / "shared"; d.mkdir()
+    r = go(tmp_path, ["--shallow", "-r", "auditor", "-q", "--advisor", "opus",
+                      "--advisor-state", posix(d), "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV, QWEN_ADVISOR_MAX_CALLS="0"))
+    assert r.returncode == 0, r.stderr
+    assert "advisor:" not in r.stderr
+    (a1, _) = calls(tmp_path)[0]
+    assert "mcp__qla_advisor__ask" not in (flag(a1, "--allowed-tools") or "")
+    assert "ask a stronger model" not in sys_prompt(a1)
+    assert not list((tmp_path / "calls").glob("cfg.*advisor.json"))
+    assert list(d.iterdir()) == []                          # not even a config of its own
+
+
+def test_ask_note_has_advice_response_block_and_memory_rule(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stderr
+    note = sys_prompt(calls(tmp_path)[0][0])
+    assert "ADVICE RESPONSE:\n1. DONE <" in note and "\n2. REJECTED <" in note
+    assert "is not evidence" in note
+    assert "WHEN NOT TO ASK." in note and "EVERY TURN." in note
+    assert "visible text" in note and "Delete any scratch or probe file" in note
+
+
+def test_ask_note_trigger_list_is_closed_and_observable(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stderr
+    note = sys_prompt(calls(tmp_path)[0][0])
+    assert "Ask in exactly these cases and no others:" in note
+    assert "3 or more files" in note
+    assert "the SAME check or test fails twice in a row" in note
+    assert "Ask on the second failure, not the fifth." in note
+    assert "Use it: a question costs little" not in note
+
+
+def test_ask_note_shell_escapes_render_literally(tmp_path, server, fake):
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "auditor", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stderr
+    note = sys_prompt(calls(tmp_path)[0][0])
+    assert "with the `ask` tool" in note and "\\`" not in note
+    assert '"why does this fail?"' in note and '"I observed X; you say Y; which is right?"' in note
+    assert '\\"' not in note and "$_adv" not in note
+
+
+def test_product_advisor_prompts_carry_no_fair_play_wording(tmp_path, server, fake):
+    from lib import advisor_mcp, supervisor
+    repo = dirty_repo(tmp_path)
+    r = go(tmp_path, ["-r", "coder", "--advisor", "opus", "-C", posix(repo), "hi"],
+           server, fake, extra=dict(DEEP_ENV))
+    assert r.returncode == 0, r.stderr
+    texts = [sys_prompt(calls(tmp_path)[0][0]), advisor_mcp.BRIEF_HEAD,
+             advisor_mcp.TOOL["description"], supervisor.FIRST, supervisor.NOT_DONE,
+             supervisor.REVIEW_ROUND, supervisor.HARNESS_Q, supervisor.ADVICE_BLOCK]
+    assert "ADVICE RESPONSE:" in texts[0] and "CODER" in texts[0]       # the real prompt was read
+    assert "ADVICE RESPONSE block" in advisor_mcp.TOOL["description"] and "ADVICE RESPONSE:" in supervisor.ADVICE_BLOCK
+    for t in texts:
+        low = t.lower()
+        for banned in ("fair play", "fair-play", "from memory", "reference solution"):
+            assert banned not in low, (banned, t[:60])

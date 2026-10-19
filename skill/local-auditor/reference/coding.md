@@ -140,6 +140,7 @@ disk).
 | `--allow-dirty` | start even with uncommitted changes |
 | `--no-deviation-audit` | skip the spec-vs-diff audit after the checks pass |
 | `--advisor MODEL` | every coder round may ask a Claude model for advice |
+| `--plan MODEL` | the first file edit of the run is held once for a Claude model's advice |
 
 `--advisor MODEL` is allowed with the loop (typed, as ever): the supervisor makes one
 advisor state directory for the run and hands it to every coder round, so all rounds
@@ -148,6 +149,9 @@ deviation audit is called without the advisor — it never spends it and never s
 diff out on a call nobody asked it to make. Questions and the files a round attaches
 leave this machine; `report.md` gets a `## Advisor` section with the model, the budget,
 how many calls the run made, their total cost and how many came back unavailable.
+
+`--plan MODEL` is allowed with the loop too: one plan directory for the run, so the one
+plan call is made in whichever round writes first ([details](qwen-agent.md#planning---plan-model-experimental)).
 
 ### Depth: the rounds are deep by default
 

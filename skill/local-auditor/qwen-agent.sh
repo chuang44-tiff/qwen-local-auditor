@@ -137,7 +137,15 @@ ADVISOR_STATE=""    # --advisor-state DIR: the supervisor's state dir shared by 
 ADVISOR_TRIGGERS="" # --advisor-triggers LIST: when the --until-done supervisor asks the advisor itself (fail|none)
 ADVISOR_TRIGGERS_SET=0  # 1 once --advisor-triggers was GIVEN, even with an empty value: the
                     # empty string is a value to refuse, not the same thing as "never given"
+ADVISOR_ASK_EFF=4   # the agent's ask budget: a valid QWEN_ADVISOR_MAX_CALLS, else 4 (0 = no ask tool, no ask note)
 ADVISOR_DIR_OWN=0   # 1 only when this run mktemp'd ADVISOR_DIR itself; only then may cleanup remove it
+PLAN=""             # --plan MODEL: a Claude model that advises once, when the run first writes a file (off when empty; the typed flag only)
+PLAN_FLAG=""        # the typed --plan value ("off" is accepted and means none)
+PLAN_STATE=""       # --plan-state DIR: the supervisor's plan dir shared by every round (internal)
+PLAN_DIR=""         # the run's private plan dir (call counter, plan.jsonl, settings file, logs)
+PLAN_DIR_OWN=0      # 1 only when this run mktemp'd PLAN_DIR itself; only then may cleanup remove it
+PLAN_SETTINGS=""    # the --settings file that names the PreToolUse hook (lib/advisor_hook.py)
+PLAN_LOG=""         # the plan call's full brief and answer
 DESKTOP=""          # --desktop APP: drive one desktop application through qla-desktop (lib/desktop.py)
 DESKTOP_ROOT=""     # where desktop run folders go (QWEN_DESKTOP_DIR), absolute before the -C chdir
 DESKTOP_DIR=""      # this run's folder: screenshots, the saved window size, bin/qla-desktop
@@ -527,7 +535,8 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
       --advisor MODEL  Let the session ask a Claude model (opus, sonnet, or an id) for
                        advice through your own claude login: one tool, ask, with no tools
                        of its own. Typed flag only (no env var). At most
-                       QWEN_ADVISOR_MAX_CALLS calls (4) per run, QWEN_ADVISOR_TIMEOUT
+                       QWEN_ADVISOR_MAX_CALLS calls (4; 0 turns the agent's ask off and
+                       leaves the loop's failure call on) per run, QWEN_ADVISOR_TIMEOUT
                        seconds (600) each. Allowed with --until-done: every coder round
                        gets the advisor through ONE budget shared by the whole run, and
                        the deviation audit never gets it. Questions and attached files
@@ -540,7 +549,19 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
                        itself. fail (default): after every failing round that another
                        round follows, its advice goes into the next round's prompt;
                        these calls do not count toward the agent's own
-                       QWEN_ADVISOR_MAX_CALLS. none: only the agent asks.
+                       ask budget. none: only the agent asks. (plan is not a trigger: use --plan MODEL.)
+      --plan MODEL     Hold this run's FIRST file edit once and ask a Claude model (opus,
+                       sonnet, an id, or off) for advice through your own claude login: a
+                       PreToolUse hook sends it a digest of the session's messages and tool
+                       trail (no thinking, no file contents) and the task, with no tools; the
+                       edit comes back denied with the advice as the reason and the model
+                       re-issues it.
+                       One call per run, QWEN_ADVISOR_TIMEOUT seconds (600). Typed flag only
+                       (no env var). Needs a run that can write (-r coder, --write). Not with
+                       --interactive or --resume. Allowed with --until-done: the first write
+                       of the whole run is the one held. The digest leaves this machine.
+      --plan-state DIR internal: used by --until-done (the supervisor hands its one shared
+                       plan dir to each coder round)
       --scenarios FILE Scripted UI suite for the tester: implies --browser and
                        -r tester. The file (format: reference/qwen-agent.md,
                        "Scripted UI suites") is validated FIRST -- a parse error
@@ -834,11 +855,15 @@ ROLE_EOF
   DID: <what you did instead>
   WHY: <the reason>
   EVIDENCE: <the TEST line or path:line that forced it>
-- Finish with a terse list of the files you changed.
+- Create no scratch, probe or test files you do not intend to keep (no tests/test_zz_*,
+  no hidden scratch directories). Delete any you made before you stop.
 - Before you stop, compare your actual output with every explicit requirement in the spec
   (names, headers, exact messages, output shape). Read the files you wrote.
 - Do not add leniency the spec did not ask for (trimming, normalising, accepting malformed
   input), and do not special-case the examples.
+- Reply format, every turn, in this order: 1. the ADVICE RESPONSE block IF advice arrived
+  this turn; 2. DEVIATION blocks; 3. a terse list of the files you changed; 4. the check
+  result. Never end a turn with thinking only.
 ROLE_EOF
       ;;
     mechanic)
@@ -1088,6 +1113,12 @@ while [ $# -gt 0 ]; do
                           # reach the case below and be refused there, not read as "no
                           # --advisor-triggers" by every later test of the variable.
                           ADVISOR_TRIGGERS="$2"; ADVISOR_TRIGGERS_SET=1; shift 2 ;;
+    --plan)               need_arg "$1" $(($#-1))
+                          [ -n "$2" ] || { die "--plan needs a model (opus, sonnet, a model id, or off)"; exit $QA_USAGE; }
+                          PLAN_FLAG="$2"; shift 2 ;;
+    --plan-state)         need_arg "$1" $(($#-1))
+                          [ -n "$2" ] || { die "--plan-state needs a directory"; exit $QA_USAGE; }
+                          PLAN_STATE="$2"; shift 2 ;;
     --scenarios)          need_arg "$1" $(($#-1))
                           # The same empty-value trap as --mcp-config: an empty
                           # path would survive every later [ -n "$SCENARIOS" ] as
@@ -1188,12 +1219,51 @@ esac
 # --advisor-triggers steers the SUPERVISOR's own failure calls: it exists only for
 # --until-done, where the loop asks the advisor after a failing round.
 if [ "$ADVISOR_TRIGGERS_SET" = 1 ]; then
+  case ",$ADVISOR_TRIGGERS," in
+    *,plan,*) die "--advisor-triggers plan is not a trigger: use --plan MODEL"; exit $QA_USAGE ;;
+  esac
   [ -n "$ADVISOR" ] || { die "--advisor-triggers needs --advisor"; exit $QA_USAGE; }
   [ -n "$UNTIL_DONE" ] || { die "--advisor-triggers needs --until-done (the supervisor makes these calls)"; exit $QA_USAGE; }
   case "$ADVISOR_TRIGGERS" in
     fail|none) ;;
     *) die "--advisor-triggers takes fail or none (got $ADVISOR_TRIGGERS)"; exit $QA_USAGE ;;
   esac
+fi
+# QWEN_ADVISOR_MAX_CALLS is the agent's own `ask` budget: unset or empty = 4, 0 = ask off
+# (no qla_advisor server, no ask note; the supervisor's failure call is a separate thing).
+# Checked only when --advisor is on, so an unrelated run never trips on it.
+if [ -n "$ADVISOR" ] && [ -n "${QWEN_ADVISOR_MAX_CALLS:-}" ]; then
+  _adv_bad=0
+  case "$QWEN_ADVISOR_MAX_CALLS" in *[!0-9]*) _adv_bad=1 ;; esac
+  [ "${#QWEN_ADVISOR_MAX_CALLS}" -le 6 ] || _adv_bad=1
+  [ "$_adv_bad" -eq 0 ] || { die "QWEN_ADVISOR_MAX_CALLS must be a whole number (0 turns the agent's ask off)"; exit $QA_USAGE; }
+  ADVISOR_ASK_EFF=$((10#$QWEN_ADVISOR_MAX_CALLS))
+  unset _adv_bad
+  if [ "$ADVISOR_ASK_EFF" -eq 0 ]; then
+    # A supervisor round (--advisor-state) is not single-shot: the loop owns the failure call.
+    if [ -z "$UNTIL_DONE" ] && [ -z "$ADVISOR_STATE" ]; then
+      die "nothing for the advisor to do: QWEN_ADVISOR_MAX_CALLS=0 without --until-done (there is no failure call outside the loop)"; exit $QA_USAGE
+    fi
+    if [ "$ADVISOR_TRIGGERS_SET" = 1 ] && [ "$ADVISOR_TRIGGERS" = none ]; then
+      die "nothing for the advisor to do: QWEN_ADVISOR_MAX_CALLS=0 with --advisor-triggers none"; exit $QA_USAGE
+    fi
+  fi
+fi
+# --plan holds the first file write of the run once (lib/advisor_hook.py). Like --advisor,
+# only the typed flag turns it on: no env var or config line can send a digest of the
+# session to the cloud unasked.
+PLAN="$PLAN_FLAG"
+[ "$PLAN" = off ] && PLAN=""
+case "$PLAN" in
+  *[!A-Za-z0-9._:-]*) die "--plan: not a model name: $PLAN"; exit $QA_USAGE ;;
+esac
+[ -z "$PLAN_STATE" ] || [ -n "$PLAN" ] || { die "--plan-state needs --plan"; exit $QA_USAGE; }
+# A resumed session's first write here is not its first write. (The --until-done supervisor
+# resumes its own rounds with --plan-state: one plan for the whole run, held in whichever
+# round writes first.)
+if [ -n "$PLAN" ] && [ -z "$PLAN_STATE" ] && [ -n "$RESUME_ID" ]; then
+  die "--plan cannot be combined with --resume: the first write of a resumed session is not its first write"
+  exit $QA_USAGE
 fi
 if   [ "$SHALLOW" -eq 1 ];       then DEPTH_MODE="shallow"   # the flag wins over the env
 elif [ "$DEEP" -eq 1 ];          then DEPTH_MODE="deep"
@@ -1283,6 +1353,10 @@ if [ "$INTERACTIVE" -eq 1 ]; then
       # Internal flag of the until-done supervisor; an interactive run has no rounds
       # to hand a shared state dir to, exactly like --advisor itself.
       --advisor-state|--advisor-state=*) _ia_refuse "--advisor-state" ;;
+      # A hook that holds a write needs a headless run to deny it in; the same goes for
+      # the internal flag that hands the hook its state.
+      --plan|--plan=*)                   _ia_refuse "--plan" ;;
+      --plan-state|--plan-state=*)       _ia_refuse "--plan-state" ;;
       # --browser writes its own MCP config and grants its tools as a headless run
       # does; an interactive session passes neither, so the browser would not come.
       --browser|--browser=*)             _ia_refuse "--browser" ;;
@@ -1310,6 +1384,17 @@ if [ -n "$ADVISOR_STATE" ]; then
   # the -d check and the config written inside it want this shell's own (physical_dir).
   command -v cygpath >/dev/null 2>&1 && ADVISOR_STATE="$(cygpath -u "$ADVISOR_STATE")"
   [ -d "$ADVISOR_STATE" ] || { die "--advisor-state: not a directory: $ADVISOR_STATE"; exit $QA_USAGE; }
+fi
+
+# --------------------------------------------------------- --plan-state validation
+# INTERNAL flag, like --advisor-state: the --until-done supervisor makes ONE plan
+# directory for the run and hands it to each coder round, so the one plan call is spent
+# once for all of them. A typed --plan-state under --until-done is refused in the block
+# below.
+if [ -n "$PLAN_STATE" ]; then
+  case "$PLAN_STATE" in /*|[A-Za-z]:*) ;; *) PLAN_STATE="$PWD/$PLAN_STATE" ;; esac
+  command -v cygpath >/dev/null 2>&1 && PLAN_STATE="$(cygpath -u "$PLAN_STATE")"
+  [ -d "$PLAN_STATE" ] || { die "--plan-state: not a directory: $PLAN_STATE"; exit $QA_USAGE; }
 fi
 
 # --------------------------------------------------------- --browser refusals
@@ -1539,6 +1624,7 @@ if [ -n "$UNTIL_DONE" ]; then
   # separate one per round. --advisor-state is the supervisor's own flag: typed, it
   # would aim the rounds at a directory no supervisor made for this run.
   [ -z "$ADVISOR_STATE" ] || { die "--until-done: --advisor-state is passed by the supervisor to its own rounds; drop --advisor-state"; exit $QA_USAGE; }
+  [ -z "$PLAN_STATE" ] || { die "--until-done: --plan-state is passed by the supervisor to its own rounds; drop --plan-state"; exit $QA_USAGE; }
   FWD=()
   _skip=0
   for a in ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}; do
@@ -1573,6 +1659,10 @@ if [ -n "$UNTIL_DONE" ]; then
       --advisor=*)        ;;
       --advisor-triggers) _skip=1 ;;
       --advisor-triggers=*) ;;
+      # --plan belongs to the supervisor too: it hands --plan --plan-state to each coder
+      # round and the deviation audit gets neither.
+      --plan)             _skip=1 ;;
+      --plan=*)           ;;
       # One review round after the checks pass is the supervisor's, not each round's.
       --review-round) ;;
       # The supervisor owns the probe sandbox: one for the whole loop. Each round runs
@@ -1651,6 +1741,10 @@ if [ -n "$UNTIL_DONE" ]; then
   # SET, not -n: by here a given value is proven fail|none (the check above refused
   # anything else), and passing it on is exactly what the flag was typed for.
   [ "$ADVISOR_TRIGGERS_SET" = 1 ] && SUP_ARGS+=(--advisor-triggers "$ADVISOR_TRIGGERS")
+  [ -n "$PLAN" ] && SUP_ARGS+=(--plan "$PLAN")
+  # While the plan call is still unspent the supervisor lengthens a round's --timeout by
+  # the advisor's: it needs the timeout this run computed, whether or not one was typed.
+  [ -n "$PLAN" ] && [ "$NO_TIMEOUT" -eq 0 ] && export QWEN_TIMEOUT="$TIMEOUT"
   # The supervisor's own failure call runs claude itself: give it the same binary the
   # rounds' advisor uses.
   [ -n "$ADVISOR" ] && export QWEN_ADVISOR_CLAUDE="${QWEN_ADVISOR_CLAUDE:-$CLAUDE_BIN}"
@@ -2094,6 +2188,8 @@ cleanup() {
   # every other round is still using it. (ADVISOR_DIR_OWN guards the second, unconditional
   # `trap cleanup EXIT` further down, which fires even when the mktemp branch never ran.)
   [ "${ADVISOR_DIR_OWN:-0}" = 1 ] && [ -n "${ADVISOR_DIR:-}" ] && rm -rf "$ADVISOR_DIR"
+  # likewise the plan dir: with --plan-state the supervisor owns it
+  [ "${PLAN_DIR_OWN:-0}" = 1 ] && [ -n "${PLAN_DIR:-}" ] && rm -rf "$PLAN_DIR"
   [ -n "${TMPD:-}" ] && rm -rf "$TMPD"
   [ -n "${TEST_WT:-}" ] && skill_py testrun.py --cleanup "$(native_path "$TEST_REPO")" "$(native_path "$TEST_WT")" >/dev/null 2>&1
   if [ -n "${PROBE_RUN:-}" ] && [ "$KEEP_SANDBOX" -eq 0 ]; then
@@ -2743,7 +2839,7 @@ fi
 # One more MCP server, qla_advisor, whose `ask` tool runs a clean `claude -p` on the
 # person's own claude login (lib/advisor_mcp.py). Its state dir is private and shared by
 # every session of this run (first answer, review round, subagents), so the budget is too.
-if [ -n "$ADVISOR" ] && [ "$INTERACTIVE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+if [ -n "$ADVISOR" ] && [ "$ADVISOR_ASK_EFF" -ne 0 ] && [ "$INTERACTIVE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   if [ -n "$ADVISOR_STATE" ]; then
     # A round of an --until-done run: the supervisor owns this directory and its budget
     # (count, lock, calls.jsonl), so this session writes only its own MCP config in here
@@ -2781,7 +2877,7 @@ PY
   then
     die "--advisor: your --mcp-config already defines a server named qla_advisor; rename it"; exit $QA_USAGE
   fi
-  _adv_max="${QWEN_ADVISOR_MAX_CALLS:-4}"; _adv_to="${QWEN_ADVISOR_TIMEOUT:-600}"
+  _adv_max="$ADVISOR_ASK_EFF"; _adv_to="${QWEN_ADVISOR_TIMEOUT:-600}"
   case "$_adv_max$_adv_to" in *[!0-9]*) die "QWEN_ADVISOR_MAX_CALLS and QWEN_ADVISOR_TIMEOUT must be whole numbers"; exit $QA_USAGE ;; esac
   if ! MSYS2_ARG_CONV_EXCL='*' "$QA_PY" - "$(native_path "$ADVISOR_MCP")" "$(native_path "$QA_PY")" \
        "$(native_path "$SKILL_DIR/lib/advisor_mcp.py")" "$ADVISOR" "$(native_path "$ADVISOR_DIR")" \
@@ -2799,13 +2895,121 @@ PY
     die "--advisor: could not write the MCP config: $ADVISOR_MCP"; exit $QA_HARNESS
   fi
   TOOLS="${TOOLS:+$TOOLS,}mcp__qla_advisor__ask"
-  _adv_note="You can ask a stronger model for advice with the \`ask\` tool (at most $_adv_max calls $_adv_scope). Use it: a question costs little, and a wrong approach can cost the whole round. Ask when you are unsure which approach to take; when a check or test fails and you do not know why; when your approach is not converging (the same failure after two attempts, or results far from the target); when the harness reports a failure you do not understand; and before you finish work that handles network requests, untrusted input (parsing, URLs, file paths), threads, timeouts or retries, deleting files, or permissions. It is best at finding what breaks a plan or a change, so ask in that form: send what you did or plan to do and ask what input or situation breaks it. It sees only what you send and cannot search the codebase: send one self-contained question, the evidence, and the 1-3 files that matter. Take its answer seriously: act on each concrete finding and run the check or test it names; if you disagree, say why with evidence or ask it a follow-up, rather than setting the advice aside. Under --until-done the harness may also put advice into your prompt after a failing round, under \"Advice from a stronger model\"; address each point the same way. Do mechanical work yourself (aligning docs, renaming, formatting or syncing wording); do not ask about it. Your answer has an ADVISOR section listing each question, the advice, and what you did with it."
+  _adv_note="ADVISOR RULES. You can ask a stronger model with the \`ask\` tool: it answers one question. You may call it at most $_adv_max calls $_adv_scope.
+WHEN TO ASK. Ask in exactly these cases and no others:
+1. Before your first edit, IF you are unsure which approach to take, or the task touches 3 or more files, or you cannot state in one sentence how you will check the result.
+2. IF your approach is not converging: the SAME check or test fails twice in a row, or 2 fixes did not change the failure. Ask on the second failure, not the fifth.
+3. IF the harness reports a failure you do not understand (a failure you do not understand is one whose cause you cannot name).
+4. Before you finish, IF the change handles network requests, untrusted input (parsing, URLs, file paths), threads, timeouts, retries, deleting files or permissions.
+5. IF you are about to switch to a different approach.
+WHEN NOT TO ASK. Do not ask: for mechanical work (aligning docs, renaming, formatting, syncing wording); for something one Read, Grep or qwen-test run answers; for a first failure you have not yet tried to fix.
+HOW TO ASK. Send one self-contained call:
+1. question: what you did or plan to do, then \"what input or situation breaks it?\" or \"why does this fail?\".
+2. context: the exact failing output (first lines), what you tried, what you changed.
+3. paths: the 1-3 files that matter. It cannot search the codebase and sees only what you send.
+HOW TO USE THE ANSWER.
+1. Number each concrete point in the answer.
+2. For each point, do what it says and run the check it names, OR reject it with evidence from this repo (a file line or a test output). Your memory of how a library or the task usually works is not evidence.
+3. IF the answer contradicts something you observed, make ONE follow-up ask: \"I observed X; you say Y; which is right?\" Do not silently switch and do not silently ignore.
+4. Put this block in your reply, one line per point, nothing else on those lines:
+ADVICE RESPONSE:
+1. DONE <path:line or test output that shows it>
+2. REJECTED <path:line or test output that contradicts it>
+The same block is required for advice that appears in your prompt under \"Advice from a stronger model\" after a failing round.
+EVERY TURN. End each turn with visible text: what you changed, the check result, what is next. A turn with only thinking is a failed turn. Delete any scratch or probe file you created before you finish.
+Your final reply has an ADVISOR section listing each question, the advice, and what you did with it."
   if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
 
 $_adv_note"; else SYSTEM="$_adv_note"; fi
   # die, not note: -q must not hide that code leaves this machine.
   die "advisor: $ADVISOR via your claude login. Questions and up to 120 KB of attached files per call leave this machine; at most $_adv_max calls $_adv_scope (log: $(native_path "$ADVISOR_LOG"))"
   unset _adv_note _adv_to _adv_bin _adv_res _adv_logdir _adv_scope
+fi
+
+# ------------------------------------------------------------------ --plan setup
+# One PreToolUse hook, lib/advisor_hook.py, that holds the session's FIRST file write once
+# and denies it with a stronger model's advice as the reason. Claude Code reads the hook from
+# a settings file passed with --settings. The plan dir is private: the call counter, the
+# settings file, plan.jsonl (the hook's record) and the logs live there. Under --until-done
+# the supervisor owns it and each round adds only its own settings file.
+if [ -n "$PLAN" ]; then
+  # Checked in --dry-run too. Edit/Write/MultiEdit/NotebookEdit must be among the tools: a
+  # read-only run has nothing to hold.
+  _pl_write=0
+  [ "$ALL_TOOLS" -eq 1 ] && [ "$TOOLSET_EXPLICIT" -eq 0 ] && _pl_write=1
+  case ",$TOOLSET," in *,Edit,*|*,Write,*|*,MultiEdit,*|*,NotebookEdit,*) _pl_write=1 ;; esac
+  [ "$_pl_write" -eq 1 ] || { die "--plan: nothing to plan: this run cannot write; add --write or use -r coder"; exit $QA_USAGE; }
+  unset _pl_write
+fi
+if [ -n "$PLAN" ] && [ "$INTERACTIVE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+  if [ -n "$PLAN_STATE" ]; then
+    PLAN_DIR="$PLAN_STATE"
+    PLAN_SETTINGS="$PLAN_DIR/settings-$$.json"
+    PLAN_LOG="$PLAN_DIR/plan.md"
+    _pl_digest="$PLAN_DIR/plan-digest.md"
+  else
+    PLAN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qwen-plan.XXXXXXXX")" || { die "--plan: mktemp failed"; exit $QA_HARNESS; }
+    PLAN_DIR_OWN=1
+    trap cleanup EXIT
+    PLAN_SETTINGS="$PLAN_DIR/settings.json"
+    # The logs never land in the tree under audit: QWEN_OUTDIR when the caller set it, else the cache.
+    if [ "$QWEN_OUTDIR_SET" -eq 1 ]; then _pl_logdir="$QWEN_OUTDIR"
+    else _pl_logdir="${XDG_CACHE_HOME:-$HOME/.cache}/qwen-agent/advisor"; fi
+    mkdir -p "$_pl_logdir" 2>/dev/null || { die "--plan: cannot create the log folder $_pl_logdir"; exit $QA_HARNESS; }
+    _pl_stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    PLAN_LOG="$_pl_logdir/plan-$_pl_stamp.md"
+    _pl_digest="$_pl_logdir/plan-$_pl_stamp-digest.md"
+  fi
+  # The task text the plan call is shown: the supervisor wrote the run's task file here; a
+  # single-shot run's task is its prompt.
+  _pl_task="$PLAN_DIR/task.md"
+  [ -f "$_pl_task" ] || printf '%s\n' "$PROMPT" > "$_pl_task" || { die "--plan: cannot write $_pl_task"; exit $QA_HARNESS; }
+  _pl_bin="${QWEN_ADVISOR_CLAUDE:-$CLAUDE_BIN}"
+  _pl_res="$(command -v -- "$_pl_bin" 2>/dev/null)" && [ -n "$_pl_res" ] && _pl_bin="$_pl_res"
+  case "$_pl_bin" in /*|[A-Za-z]:*) _pl_bin="$(native_path "$_pl_bin")" ;; esac
+  _pl_to="${QWEN_ADVISOR_TIMEOUT:-600}"
+  case "$_pl_to" in ''|*[!0-9]*) die "QWEN_ADVISOR_TIMEOUT must be a whole number"; exit $QA_USAGE ;; esac
+  [ "$_pl_to" -gt 0 ] || _pl_to=600
+  # The hook's own timeout is the advisor's plus a minute, so the advisor's fires first and the
+  # skip is recorded; a hook that is killed anyway lets the write through (fail-open).
+  if ! MSYS2_ARG_CONV_EXCL='*' "$QA_PY" - "$(native_path "$PLAN_SETTINGS")" "$(native_path "$QA_PY")" \
+       "$(native_path "$SKILL_DIR/lib/advisor_hook.py")" "$(native_path "$PLAN_DIR")" "$PLAN" \
+       "$(native_path "$_pl_task")" "$(native_path "$PLAN_DIR/plan.jsonl")" "$(native_path "$PLAN_LOG")" \
+       "$(native_path "$_pl_digest")" "$_pl_bin" "$_pl_to" <<'PY'
+import json, shlex, sys
+out, py, hook, state, model, task, record, log, digest, claude, to = sys.argv[1:12]
+cmd = " ".join(shlex.quote(x) for x in (
+    py, hook, "--state", state, "--model", model, "--task", task, "--record", record,
+    "--log", log, "--digest", digest, "--claude", claude, "--timeout", to))
+with open(out, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump({"hooks": {"PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit",
+               "hooks": [{"type": "command", "timeout": int(to) + 60, "command": cmd}]}]}}, fh, indent=2)
+    fh.write("\n")
+PY
+  then
+    die "--plan: could not write the hook settings: $PLAN_SETTINGS"; exit $QA_HARNESS
+  fi
+  _pl_note='PLAN RULE. Your first Edit or Write is held once and a stronger model reviews your plan.
+1. Explore first: read the files the task names, run the failing test if one exists.
+2. IMMEDIATELY before your first edit, write this briefing in visible text. The reviewer
+   never sees your thinking: this briefing is the only account of your reasoning it gets,
+   so consolidate what you found and decided into it.
+   PLAN:
+   1. GOAL <the task in one sentence>
+   2. FOUND <what you read or ran and what it showed, with path:line or output>
+   3. FILES <files you will change>
+   4. CHANGE <the change in one sentence per file>
+   5. CHECK <the command or test that proves it>
+   6. UNSURE <what you are not sure of, or none>
+3. Then issue the edit. IF it is held, the reason is advice, not an error. Reply with the
+   ADVICE RESPONSE block, then re-issue the edit.
+4. Later edits are not held. Do not skip step 2.'
+  if [ -n "$SYSTEM" ]; then SYSTEM="$SYSTEM
+
+$_pl_note"; else SYSTEM="$_pl_note"; fi
+  # die, not note: -q must not hide that a digest of the session leaves this machine.
+  die "plan: $PLAN via your claude login will advise once, when this run first edits a file; the digest of this session's messages and tool trail (no thinking, no file contents) leaves this machine (log: $(native_path "$PLAN_LOG"))"
+  unset _pl_note _pl_to _pl_bin _pl_res _pl_task _pl_digest _pl_logdir _pl_stamp
 fi
 
 # --------------------------------------------------- build the claude argv
@@ -2855,6 +3059,7 @@ else
     fi
   fi
   [ -n "$ADVISOR_MCP" ] && CLAUDE_ARGV+=(--mcp-config "$(native_path "$ADVISOR_MCP")")
+  [ -n "$PLAN_SETTINGS" ] && CLAUDE_ARGV+=(--settings "$(native_path "$PLAN_SETTINGS")")
   [ "$STRICT_MCP" -eq 1 ] && CLAUDE_ARGV+=(--strict-mcp-config)
   [ -n "$SYSTEM" ]    && CLAUDE_ARGV+=(--append-system-prompt "$SYSTEM")
   [ -n "$PERM_MODE" ] && CLAUDE_ARGV+=(--permission-mode "$PERM_MODE")
@@ -3158,6 +3363,24 @@ if mode == "json":
                 "cost_usd": round(sum(r.get("cost_usd") or 0 for r in recs), 4) or None,
                 "unavailable": [r["unavailable"] for r in recs if r.get("unavailable")],
                 "log": e.get("QA_META_ADVISOR_LOG") or None}
+        if e.get("QA_META_PLAN") and e.get("QA_META_PLAN_DIR"):
+            rec = {}
+            try:
+                with open(os.path.join(e["QA_META_PLAN_DIR"], "plan.jsonl"), encoding="utf-8") as fh:
+                    rec = json.loads(next(l for l in fh if l.strip()))
+            except (OSError, ValueError, StopIteration):
+                pass
+            meta["plan"] = {
+                "model": e["QA_META_PLAN"],
+                "called": bool(rec.get("called")),
+                "round": rec.get("round"),
+                "tool": rec.get("tool"),
+                "path": rec.get("path"),
+                "digest_chars": rec.get("digest_chars"),
+                "cut": rec.get("cut"),
+                "cost_usd": rec.get("cost_usd"),
+                "skipped_reason": (rec.get("skipped_reason") if rec else "no write"),
+                "log": e.get("QA_META_PLAN_LOG") or None}
         if e.get("QA_META_REVIEW") == "1":
             meta["review_round"] = {"status": e.get("QA_META_REVIEW_STATUS") or None,
                                     "first_session": e.get("QA_META_REVIEW_FIRST") or None,
@@ -3270,7 +3493,7 @@ export_meta() {
   [ -n "$ROLE_VARIANT" ] || [ "$NUDGE" -eq 1 ] || [ "$PUSH" -eq 1 ] \
     || [ "$REVIEW_ROUND" -eq 1 ] || [ "$PROBING" -eq 1 ] \
     || [ "$BROWSER" -eq 1 ] || [ "$DEPTH_MODE" != shallow ] || [ "$SHORT_ANSWER_WARNING" -eq 1 ] \
-    || [ -n "$SCENARIOS" ] || [ -n "$ADVISOR_MCP" ] || return 0
+    || [ -n "$SCENARIOS" ] || [ -n "$ADVISOR_MCP" ] || [ -n "$PLAN_SETTINGS" ] || return 0
   local kept="" browser_dir_meta=""
   [ "$KEEP_SANDBOX" -eq 1 ] && kept="$PROBE_CWD"
   browser_dir_meta="$(native_path "$BROWSER_DIR")"
@@ -3285,7 +3508,8 @@ export_meta() {
          QA_META_SCEN_PASS="$SCEN_PASS" QA_META_SCEN_FAIL="$SCEN_FAIL" \
          QA_META_SCEN_BLOCKED="$SCEN_BLOCKED" \
          QA_META_ADVISOR="$ADVISOR" QA_META_ADVISOR_DIR="$ADVISOR_DIR" \
-         QA_META_ADVISOR_LOG="$ADVISOR_LOG" QA_META_ADVISOR_MAX="${_adv_max:-}"
+         QA_META_ADVISOR_LOG="$ADVISOR_LOG" QA_META_ADVISOR_MAX="${_adv_max:-}" \
+         QA_META_PLAN="$PLAN" QA_META_PLAN_DIR="$PLAN_DIR" QA_META_PLAN_LOG="$PLAN_LOG"
 }
 
 # --probe --write: the session's edits as a patch -- FILE.patch next to -o FILE (always

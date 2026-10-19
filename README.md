@@ -101,8 +101,9 @@ glance, and the measured failure modes: [reference/limits.md](skill/local-audito
 
 **Optional cloud advisor (experimental).** `qwen-agent --advisor opus` lets a session ask a
 Claude model for advice on a hard decision through your own `claude` login, at most 4 calls
-per run; questions and the files the session attaches leave your machine, and nothing else
-changes. The idea comes from Claude's own [advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
+per run (`QWEN_ADVISOR_MAX_CALLS` sets the number; with `--until-done`, `0` turns the agent's own
+asks off and leaves the harness's call after a failing round on, and without it `0` exits 2);
+questions and the files the session attaches leave your machine, and nothing else changes. The idea comes from Claude's own [advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
 where a cheaper executor consults a stronger model at decision points. Under `--until-done`
 the harness also asks after every failing round, with the failing output, and puts the advice into the next
 round's prompt. On our benchmarks that call was the part that helped: it lifted Qwen from 17 to

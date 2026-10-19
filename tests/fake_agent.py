@@ -15,6 +15,16 @@ to $FAKE_AGENT_RECORD.locks: "found" is whether that state directory held the
 advisor's lock when the call started, and true also leaves one behind (what a round
 killed mid-ask does), so a test sees the lock clear between rounds rather than never
 having been there.
+With "plan_record" (a dict), that dict is appended to the call's --plan-state directory's
+plan.jsonl as one JSON line -- what lib/advisor_hook.py writes when the hook fires -- so a
+loop test covers the supervisor's side without running claude. With "plan_count" (an int),
+that number is written to the directory's `count` file (what advisor_mcp.ask writes before it
+launches claude: a hook killed mid-call leaves a count and no record). A call that has either
+key but no --plan-state is a loud ValueError. With "plan_files" ({name: text}), those files
+are written into the directory too (the hook's plan.md and plan-digest.md logs).
+Every call that has --plan-state also appends {"round", "state", "task"} to
+$FAKE_AGENT_RECORD.plan: the QWEN_PLAN_ROUND it was given, the directory, and whether the
+supervisor had put task.md in it by then.
 Every call's argv is appended to $FAKE_AGENT_RECORD as one JSON line.
 """
 import json
@@ -56,6 +66,22 @@ if "advisor_lock" in step:
         os.mkdir(lk)
     with open(os.environ["FAKE_AGENT_RECORD"] + ".locks", "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"found": found, "left": os.path.isdir(lk)}) + "\n")
+if "--plan-state" in argv:
+    pdir = argv[argv.index("--plan-state") + 1]
+    with open(os.environ["FAKE_AGENT_RECORD"] + ".plan", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"round": os.environ.get("QWEN_PLAN_ROUND"), "state": pdir,
+                             "task": os.path.isfile(os.path.join(pdir, "task.md"))}) + "\n")
+if step.get("plan_record") is not None or step.get("plan_count") or step.get("plan_files"):
+    pdir = argv[argv.index("--plan-state") + 1]
+    if step.get("plan_record") is not None:
+        with open(os.path.join(pdir, "plan.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(step["plan_record"]) + "\n")
+    if step.get("plan_count"):
+        with open(os.path.join(pdir, "count"), "w", encoding="utf-8") as fh:
+            fh.write(str(step["plan_count"]))
+    for name, text in (step.get("plan_files") or {}).items():
+        with open(os.path.join(pdir, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
 tdir = os.environ.get("QWEN_TRANSCRIPT_DIR")
 if tdir and step.get("tools"):
     os.makedirs(tdir, exist_ok=True)

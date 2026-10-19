@@ -1676,3 +1676,13 @@ def test_exit_127_after_output_is_not_retried(tmp_path, server, fake):
             extra=_flaky_env(tmp_path, fake, 1, 127, FAKE_FLAKY_OUT="partial output"))
     assert "retrying" not in r.stderr
     assert _flaky_calls(tmp_path) == 1
+
+
+def test_coder_role_has_scratch_and_visible_reply_rules(tmp_path, server):
+    p = _sys_prompt(tmp_path, server, ["-r", "coder", "hi"])
+    flat = " ".join(p.split())
+    assert ("- Create no scratch, probe or test files you do not intend to keep (no tests/test_zz_*, "
+            "no hidden scratch directories). Delete any you made before you stop.") in flat
+    assert "the ADVICE RESPONSE block IF advice arrived this turn;" in flat
+    assert "Never end a turn with thinking only." in flat
+    assert "Finish with a terse list of the files you changed." not in flat

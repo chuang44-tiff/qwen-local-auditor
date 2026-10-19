@@ -70,6 +70,7 @@ combined with `--test`.
 | `--web` (`QWEN_WEB=1`) | adds `WebFetch` to the toolset and the grants, for every role and for the fixed `--test` grant list. Never `WebSearch`: a server-side tool that local servers reject with a 400 (`body.tools.0.input_schema Field required`); search needs an MCP server. With `--test` it warns that tests can be gamed by fetching upstream answers |
 | `--subagents` (`QWEN_SUBAGENTS=1`) | adds the `Task` tool so the model can hand broad reading to a subagent. Same model, same tool limits, one more concurrent request: leave it off on a small GPU. Subagents run in the foreground (every run but `--interactive` sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`): one that reported after the answer would start another turn, and the reply to it would replace the answer as the result |
 | `--advisor MODEL` | ask a Claude model for advice through your claude login (see Advisor); off by default |
+| `--plan MODEL` | hold the run's first file edit once and get advice on it from a Claude model (see Planning); off by default |
 | `--permission-mode M` | passed through to claude (e.g. `acceptEdits`, `plan`) |
 | `-C, --cd DIR` | chdir before running; tool access is rooted at cwd. Scope it tightly: a bounded directory is the single biggest lever on output quality |
 | `-D, --add-dir DIR` | an extra readable directory; repeatable |
@@ -501,10 +502,10 @@ the advisor never edits or runs anything.
 
 `--advisor-triggers LIST` — with `--until-done --advisor`: when the loop asks the advisor
 itself. `fail` (the default): after every failing round that another round follows, its advice
-goes into the next round's prompt; these calls do not count toward the agent's own
-`QWEN_ADVISOR_MAX_CALLS` — at most `--max-rounds` − 1 such calls per run; each is logged in
+goes into the next round's prompt; these calls do not count toward the agent's own ask budget
+(`QWEN_ADVISOR_MAX_CALLS`) — at most `--max-rounds` − 1 such calls per run; each is logged in
 `advisor-harness.md` and listed in report.md's Advisor section with the next round's reply.
-`none`: only the agent asks.
+`none`: only the agent asks. `plan` is not a trigger (exit 2): use `--plan MODEL`.
 
 - Off unless you type `--advisor MODEL`. No environment variable or config line turns it on, so sweeps and swarms never send code out through it.
 - One named exception elsewhere: the `ui-test` swarm workflow's confirm pass is on by default
@@ -516,8 +517,15 @@ goes into the next round's prompt; these calls do not count toward the agent's o
 - `--until-done` turns the advisor on for its coder rounds only when you type `--advisor MODEL` on the `--until-done` command itself: every round of the loop then gets the advisor
   through ONE budget shared by the whole run (the loop makes one state directory and hands it to each round with the internal `--advisor-state DIR`), and its deviation audit
   never gets it.
-- `QWEN_ADVISOR_MAX_CALLS` (default 4) is shared by the first answer, the review round and
+- `QWEN_ADVISOR_MAX_CALLS` (default 4 when unset or empty) is the agent's own ask budget. `0` turns the
+  agent's ask off: no advisor tool and no ask note, while the loop's failure call
+  (`--advisor-triggers fail`) stays on; `0` with `--advisor-triggers none`, or on a single-shot
+  run without `--until-done` or `--advisor-state`, exits 2 (nothing for the advisor to do), and a
+  negative or non-numeric value exits 2. Under `--until-done` the run states the budget at the start and in
+  report.md (`asks: 0 (off)` or `asks: at most N across the run`); a single-shot run states it at
+  the start as `at most N calls this run`. The budget is shared by the first answer, the review round and
   subagents — and, under `--until-done`, by every round and review round of the loop.
+  It is a whole number of at most six digits.
   `QWEN_ADVISOR_TIMEOUT` (default 600 s) applies per call.
 - A missing login, no network, a usage limit, a timeout or a spent budget come back as
   `ADVISOR UNAVAILABLE: ...` and the session carries on; the exit code is unchanged.
@@ -544,6 +552,43 @@ goes into the next round's prompt; these calls do not count toward the agent's o
   even with `-q`. Only the `claude` login is used: no `ANTHROPIC_*` variable reaches the
   advisor, so Bedrock, Vertex and API-key-only setups get "unavailable".
 - Not with `--interactive` (a person is there to ask).
+
+## Planning (`--plan MODEL`, experimental)
+
+`--plan MODEL` holds the session's first file edit once. A Claude Code `PreToolUse` hook
+(`lib/advisor_hook.py`) sends MODEL a digest of the session so far and the task, with no
+tools, and denies that one edit with the advice as the reason. The session reads the advice in
+the tool result and re-issues the edit. It uses your own `claude` login, once per run.
+
+- Off unless typed. Needs a run that can write (`-r coder`, `--write`, `--test` on a coder).
+  Refused with `--interactive` and with `--resume`. Combines with `--advisor`; the two keep
+  separate budgets and logs.
+- The digest is the session's visible messages in order, one line per tool call (what it
+  opened, searched or ran, with the outcome) and the edit it is about to make. The model's
+  thinking and file contents are never included; a path that looks like a secret is
+  withheld. It is capped at 40000 characters, cutting earlier messages first.
+  **The digest leaves this machine**; the startup line says so even with `-q`.
+- The session's system note tells it to write a `PLAN:` briefing (goal, what it found,
+  files, change, check, what it is unsure of) just before its first edit, since that
+  briefing is all the reviewer learns of its reasoning, and to answer the advice with an
+  `ADVICE RESPONSE` block.
+- After the advice, the re-issued edit is held once more, with no model call, if the
+  session has neither written the `ADVICE RESPONSE` block nor run a single non-edit tool
+  (a read, a search, a test). The reason names what is missing; the edit after that is
+  never held. It is recorded as `trigger: plan-gate` in `advisor-harness.jsonl`.
+- Fail-open: a missing login, a timeout (`QWEN_ADVISOR_TIMEOUT`, 600 s), a refusal or a
+  crashed hook lets the edit through. A call refused by Claude's safeguards is recorded
+  as `refused by Claude's safeguards`. The one call is spent even when it fails; a second
+  write, a retry round and a subagent's write are never held.
+- With `--until-done`, type `--plan MODEL` on the loop: the first write of the whole run is
+  the one held, in whichever round makes it, and the deviation audit never gets the option. While
+  the call is unspent a round's timeout grows by `QWEN_ADVISOR_TIMEOUT`. `report.md` gets
+  `plan: ...` header lines and a `## Plan` section; the record is also in
+  `advisor-harness.jsonl` (`trigger: plan`), with `plan.md` (the full brief and answer) and
+  `plan-digest.md` beside it.
+- A single run logs to `plan-<stamp>-<pid>.md` next to the advisor log, and `--json` adds
+  `qwen_agent.plan` = `{model, called, round, tool, path, digest_chars, cut, cost_usd,
+  skipped_reason, log}`.
 
 ## Desktop applications (`--desktop APP`)
 
