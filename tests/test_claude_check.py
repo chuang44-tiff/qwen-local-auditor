@@ -1127,6 +1127,7 @@ def test_claude_check_preset_alone_cannot_permit(tmp_path, fake_cc):
     assert out[0]["state"] == "unavailable" and list(fake_cc.iterdir()) == []
 
 
+@posix_only
 def test_claude_check_allowed_with_config(tmp_path, fake_cc):
     wf = workflow(tmp_path, claude_confirm="opus")
     out = wf.claude_check("c", [{"id": "A"}], ask_a, lambda t, it: t, model="opus", max_calls=5)
@@ -1134,6 +1135,7 @@ def test_claude_check_allowed_with_config(tmp_path, fake_cc):
     assert any(f.name.startswith("call.") for f in fake_cc.iterdir())
 
 
+@posix_only
 def test_claude_check_allowed_with_typed_confirm(tmp_path, fake_cc):
     wf = workflow(tmp_path, claude_confirm="", confirm="claude", claude_typed_confirm=True)
     out = wf.claude_check("c", [{"id": "A"}], ask_a, lambda t, it: t, model="opus", max_calls=5)

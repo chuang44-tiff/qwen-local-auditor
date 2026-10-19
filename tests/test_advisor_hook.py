@@ -339,6 +339,7 @@ def test_hook_records_a_safeguard_refusal_as_its_own_reason(hk):
     assert rec["called"] is False and rec["skipped_reason"] == "refused by Claude's safeguards"
 
 
+@posix_only
 def test_hook_tools_flag_lets_the_plan_call_read_the_code(hk):
     env = dict(os.environ, FAKE_PLAN_DIR=str(hk["calls"]), FAKE_PLAN_MODE="ok",
                QWEN_PLAN_LAG_WAIT="0.3", QWEN_PLAN_ROUND="1")
@@ -352,6 +353,7 @@ def test_hook_tools_flag_lets_the_plan_call_read_the_code(hk):
     assert "YOU CAN READ THE CODE" in (hk["calls"] / "stdin.1").read_text()
 
 
+@posix_only
 def test_hook_without_tools_flag_ignores_an_inherited_tools_env(hk):
     run_hook(hk, extra={"QA_ADVISOR_TOOLS": "1"})
     assert "YOU CAN READ THE CODE" not in (hk["calls"] / "stdin.1").read_text()
