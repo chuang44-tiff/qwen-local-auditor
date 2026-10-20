@@ -79,6 +79,43 @@ transcripts' token usage at list price ($0.10 in, $0.50 out, $0.01 cache read, $
 write, per million tokens). Prompts over 100k tokens bill at 5x. About a quarter of Haiku's
 Terminal-Bench requests crossed that line, which is most of why that run cost $7.07.
 
+## Claude settings on 30 hard exercises
+
+The tables above are one run per row. To measure the Claude settings with repeats, we took the
+30 Aider polyglot exercises the local model failed most often in eight earlier runs and ran
+each setup 5 to 10 full passes (1,500 exercise runs, October 2026), up to six rounds each,
+in the same loop, with Claude again told not to recite the exercises' tests or solutions from
+memory. The answers were not all read this time. The score is the round where every check first passes;
+an unsolved exercise counts as round 7. Claude was Opus 5.5 with read tools on.
+
+| setup | passes | mean round | passed in round 1 | Claude cost per exercise |
+|---|---|---|---|---|
+| Qwen alone | 5 | 2.87 | 4% | $0 |
+| advisor only | 5 | 2.61 | 10% | $0.10 |
+| plan | 10 | 2.41 | 24% | $0.09 |
+| **plan + advisor** | 10 | **2.13** | **34%** | $0.16 |
+| plan + rescue | 5 | 2.17 | 23% | $0.18 |
+| plan + advisor + rescue | 5 | 2.12 | 31% | $0.24 |
+
+- **Claude makes the coder faster, not more often right.** Every setup solved 96-99% of the
+  exercises within six rounds; Qwen alone solved 144 of 150.
+- **Plan is most of the gain**: 2.87 to 2.41 rounds for one call per exercise.
+- **Advisor on top of plan** saves a further 0.28 rounds (Tukey p=0.007 against plan alone;
+  task-clustered 95% interval -0.49 to -0.13). Most of that comes from two or three exercises.
+  Advisor without plan was worse than plan alone. An advisor without read tools scored the
+  same (2.14, $0.15).
+- **Rescue is mixed.** On top of plan it measured 2.41 to 2.17, within noise at five passes
+  (p=0.67). On top of plan + advisor it added nothing (2.13 to 2.12) and was the most expensive
+  setup. It fires after every failing round, about 34 calls per 30 exercises. Where it helps:
+  a round with at least 80% of tests passing passed the next round 86-88% of the time with or
+  without rescue, while on rounds further off rescue raised that from 51% to 62%. The coder
+  already asks when it is stuck (failing runs asked 2.2-3.4 times per run, passing runs
+  0.65-1.0), which is where the overlap with the advisor comes from.
+
+So the recommended Claude settings are plan + advisor (`QWEN_PLAN=opus`, `QWEN_ADVISOR=opus`
+in the config file), about $4.80 per 30 hard exercises. Rescue stays off unless you want to
+try it. These are one local model (Qwen3.8-Flash-Next), one task set and today's prices.
+
 ## The advisor
 
 The Claude calls (experimental, off unless your config file or a typed flag turns one on)
@@ -91,10 +128,11 @@ let the local coder get advice from Claude Opus through your own `claude` login
   what went wrong, with the failing output and the round's diff, and puts the answer into
   the next round's prompt.
 
-**The recommended use is rescue**: `--until-done --rescue opus`. The harness, not the model,
-decides when to ask. The best Qwen row on both sets includes it (advisor + rescue). On Aider
-rescue alone reached 18/20 for $0.70, while the coder's own asks alone stayed at 17/20 for
-$1.87.
+In these two-round tables the best Qwen row on both sets includes rescue (advisor + rescue),
+and on Aider rescue alone reached 18/20 for $0.70, while the coder's own asks alone stayed at
+17/20 for $1.87. With repeats, more rounds and plan in the mix, that did not hold up: plan +
+advisor is the recommended pair and rescue is mixed
+([above](#claude-settings-on-30-hard-exercises)).
 
 This agrees with Anthropic's own advisor findings: "In two runs each, Claude Haiku 5.5 and
 Claude Sonnet 5.5 called the Opus 5.5 advisor on none of the 198 questions, so both pairings
@@ -102,9 +140,9 @@ scored within run-to-run noise of the executor alone." Their fix is to ask for c
 points
 ([Optimizing for cost and intelligence](https://platform.claude.com/docs/en/about-claude/models/optimizing-for-cost-and-intelligence#advisor-strategy-escalate-hard-decisions),
 [Advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool)).
-Rescue is that idea applied to the loop.
+Plan and rescue are that idea applied to the loop; plan is the one that paid off.
 
-**Caveat, once:** each row is one run on 20 or 15 tasks. The results are suggestive, not
+**Caveat, once:** each row in the two-round tables is one run on 20 or 15 tasks. They are suggestive, not
 proven. The advisor-only rows ran on an earlier release with no rescue, and the
 rescue-only row ran on a benchmark build.
 
@@ -121,7 +159,7 @@ the answer part of the prompt.
   written. The advice said so ("write `image.c` now, even if crude") and round 2 passed.
 
 A rescue call cost about $0.09 on Aider and $0.13 on the hard set, at most one per failing
-round. Most of the default's cost is the coder's own asks.
+round; on the 30-exercise set it averaged $0.08 and fired after nearly every failing round.
 
 ### The coder's own asks
 

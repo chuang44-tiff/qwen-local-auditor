@@ -28,9 +28,11 @@ QWEN_BASE_URL="${QWEN_BASE_URL:-http://127.0.0.1:8000}"
 # QWEN_PLAN / QWEN_ADVISOR / QWEN_RESCUE / QWEN_CONFIRM is ignored. Each value is a model
 # name (opus, sonnet, an id) or off. A typed --plan / --advisor / --rescue overrides it for
 # one run. What leaves the machine: SECURITY.md. `qwen-agent --show-claude` prints the result.
+# Measured (reference/benchmark.md): plan + advisor is the pair worth turning on; rescue
+# added nothing on top of them and cost the most.
 # QWEN_PLAN="${QWEN_PLAN:-opus}"        # review the plan before the first file edit
 # QWEN_ADVISOR="${QWEN_ADVISOR:-opus}"  # the agent's ask tool (QWEN_ADVISOR_MAX_CALLS, default 4)
-# QWEN_RESCUE="${QWEN_RESCUE:-opus}"    # after a failing --until-done round
+# QWEN_RESCUE="${QWEN_RESCUE:-opus}"    # after a failing --until-done round (mixed results)
 # QWEN_CONFIRM="${QWEN_CONFIRM:-opus}"  # ui-test double-check: a model, local (default) or none
 # Plan, advisor and rescue calls may read files in your repository (Read, Grep, Glob);
 # 0 turns that off. Per-call timeout (seconds) and the claude binary they run:

@@ -128,10 +128,11 @@ for confirm, the tester's evidence, screenshots and a browser on the app's URL. 
 advisor and rescue, any repository file Claude chooses to read with its read tools leaves too.
 Each call is logged on your machine: `--until-done` runs write `claude-calls.jsonl` in the run folder, single runs (and swarm units) write `advisor-<stamp>-<pid>.md` / `plan-<stamp>-<pid>.md` in `QWEN_OUTDIR` or `~/.cache/qwen-agent/advisor/`, and ui-test's confirm pass writes `RUN/claude/calls.jsonl`. The idea comes from Claude's own
 [advisor tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
-where a cheaper executor consults a stronger model at decision points. On our benchmarks the
-call after a failing round (rescue) was the part that helped most, and the coder's own asks
-mostly came at the wrong time, as Anthropic also reports for its Haiku and Sonnet executors
-([benchmark](skill/local-auditor/reference/benchmark.md#the-advisor),
+where a cheaper executor consults a stronger model at decision points. If you turn Claude
+on, turn on plan and advisor: on 30 hard exercises they cut the rounds needed to pass from
+2.87 to 2.13 for about $0.16 of Claude per exercise. Rescue was mixed, added nothing on top of
+them and cost the most, so we leave it off
+([benchmark](skill/local-auditor/reference/benchmark.md#claude-settings-on-30-hard-exercises),
 [details](skill/local-auditor/reference/qwen-agent.md#advisor---advisor-model-experimental)).
 
 ## Benchmark
@@ -146,8 +147,14 @@ after a failing round) reached 19/20 and 14/15 for $2.30 and $3.67; the rows sho
 coder's own calls, and Claude had no read tools. Claude Haiku 5.5 as the coder scored 20/20 for $1.30 and 15/15 for $7.07, a
 strong result that moved the price bar: it is about as good as the local model on a first try,
 better at fixing its own mistakes, and cheaper on easy tasks. The local setup's case is
-offline, private and free per token, and it is still cheaper on the hard set. Method and
-numbers: [reference/benchmark.md](skill/local-auditor/reference/benchmark.md).
+offline, private and free per token, and it is still cheaper on the hard set.
+
+A larger benchmark measured the Claude settings themselves: the 30 Aider exercises the local
+model failed most often, up to six rounds, 5 to 10 full passes per setup, read tools on. Every
+setup solved 96-99% of exercises; Claude changed how fast. Mean rounds to pass: Qwen alone
+2.87, plan 2.41 ($0.09 per exercise), plan + advisor 2.13 ($0.16), plan + rescue 2.17
+($0.18), all three 2.12 ($0.24). Method and numbers:
+[reference/benchmark.md](skill/local-auditor/reference/benchmark.md).
 
 ## Reference pages
 
