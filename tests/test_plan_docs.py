@@ -52,8 +52,7 @@ def test_security_lists_four_calls():
 
 def test_readme_benchmark_labels():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
-    sentences = [s for s in text.replace("\n", " ").split(". ") if "19/20" in s]
-    assert sentences
-    for s in sentences:
-        assert "advisor" in s and "rescue" in s, s
-    assert "18/20" in text
+    bench = (ROOT / "skill/local-auditor/reference/benchmark.md").read_text(encoding="utf-8")
+    for doc in (text, bench):
+        assert "plan + advisor" in doc and "2.13" in doc
+        assert "19/20" not in doc

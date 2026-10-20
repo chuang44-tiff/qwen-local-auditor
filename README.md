@@ -132,29 +132,22 @@ where a cheaper executor consults a stronger model at decision points. If you tu
 on, turn on plan and advisor: on 30 hard exercises they cut the rounds needed to pass from
 2.87 to 2.13 for about $0.16 of Claude per exercise. Rescue was mixed, added nothing on top of
 them and cost the most, so we leave it off
-([benchmark](skill/local-auditor/reference/benchmark.md#claude-settings-on-30-hard-exercises),
+([benchmark](skill/local-auditor/reference/benchmark.md#results),
 [details](skill/local-auditor/reference/qwen-agent.md#advisor---advisor-model-experimental)).
 
 ## Benchmark
 
-Quality and price on 20 Aider polyglot exercises and 15 hard Terminal-Bench 2.0 tasks, two
-rounds each, one run per setup (suggestive, not proven). The loop is the main gain: the same
-local model in Claude Code alone solved 12-14/20 Aider exercises with a retry, and 17-18/20
-under `--until-done`. The local model (Qwen3.8-Flash-Next,
-$0 in API dollars) scored 17/20 and 13/15. Opus as rescue alone (the call after a failing
-round) reached 18/20 on Aider; advisor and rescue together (the coder's asks plus the call
-after a failing round) reached 19/20 and 14/15 for $2.30 and $3.67; the rows show 19 and 16 of the
-coder's own calls, and Claude had no read tools. Claude Haiku 5.5 as the coder scored 20/20 for $1.30 and 15/15 for $7.07, a
-strong result that moved the price bar: it is about as good as the local model on a first try,
-better at fixing its own mistakes, and cheaper on easy tasks. The local setup's case is
-offline, private and free per token, and it is still cheaper on the hard set.
-
-A larger benchmark measured the Claude settings themselves: the 30 Aider exercises the local
-model failed most often, up to six rounds, 5 to 10 full passes per setup, read tools on. Every
-setup solved 96-99% of exercises; Claude changed how fast. Mean rounds to pass: Qwen alone
-2.87, plan 2.41 ($0.09 per exercise), plan + advisor 2.13 ($0.16), plan + rescue 2.17
-($0.18), all three 2.12 ($0.24). Method and numbers:
+Which Claude calls are worth turning on: the 30 Aider polyglot exercises the local model
+(Qwen3.8-Flash-Next) failed most often, up to six rounds under `--until-done`, 5 to 10 full
+passes per setup, Claude Opus with read tools on. Every Qwen setup solved 96-99% of the
+exercises; Claude changed how fast. Mean rounds to pass: Qwen alone 2.87, plan 2.41 ($0.09
+of Claude per exercise), plan + advisor 2.13 ($0.16), plan + rescue 2.17 ($0.18), all three
+2.12 ($0.24). Plan + advisor is the recommended pair. For comparison, Claude Haiku 5.5 as
+the coder took 2.82 rounds for $0.10 per exercise: about Qwen alone's speed, at more than
+plan's cost. Method and numbers:
 [reference/benchmark.md](skill/local-auditor/reference/benchmark.md).
+
+![Rounds to pass and Claude cost per pass for Qwen alone, Haiku 5.5 alone, Qwen + plan and Qwen + plan + advisor](skill/local-auditor/reference/benchmark-boxplot.png)
 
 ## Reference pages
 
