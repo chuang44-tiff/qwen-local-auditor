@@ -225,6 +225,22 @@ def test_register_keeps_start_on_resume(tmp_path, monkeypatch):
     assert p2["title"] == "second" and p2["end"] is None and p2["exit"] is None
 
 
+def test_run_ids_never_collide_within_one_clock_tick(tmp_path, monkeypatch):
+    """A coarse Windows clock hands two register() calls in one process the SAME
+    time.time(): the no-path id mixes in os.urandom as well, so 50 calls under a
+    frozen clock are still 50 distinct ids (one shared id meant the second pointer
+    overwrote the first -- dismiss(gone) deleted mine's activity file, same id). The
+    PATH form mixes in nothing and must not change: a resume recomputes it."""
+    monkeypatch.setattr(watch.time, "time", lambda: 1700000000.0)
+    ids = [watch.run_id_for() for _ in range(50)]
+    assert len(set(ids)) == 50
+    for rid in ids:
+        assert len(rid) == 12 and all(c in "0123456789abcdef" for c in rid)
+    run = str(tmp_path / "run")
+    assert watch.run_id_for(run) == watch.run_id_for(run)      # the same path, the same id
+    assert watch.run_id_for(run) != watch.run_id_for(str(tmp_path / "run2"))
+
+
 def test_finish_sets_exit(tmp_path, monkeypatch):
     monkeypatch.delenv("QWEN_WATCH", raising=False)
     rid = watch.register("agent", "a session", start_server=False)

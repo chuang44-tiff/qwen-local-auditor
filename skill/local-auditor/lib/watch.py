@@ -178,12 +178,15 @@ def watch_port():
 
 
 def run_id_for(path=None):
-    """The run's 12-hex-char id: stable over one run_path (a resume reuses the run),
-    random-ish without one (a bare agent session has no folder to hash)."""
+    """The run's 12-hex-char id: stable over one run_path (a resume reuses the run --
+    the path form mixes in nothing but the realpath, so it stays recomputable), random
+    without one (a bare agent session has no folder to hash): the pid, the clock AND
+    os.urandom(8), because a coarse Windows clock hands two register() calls in one
+    process the SAME time.time() and the second pointer would overwrite the first."""
     if path:
         seed = os.path.realpath(str(path))
     else:
-        seed = "%d-%f" % (os.getpid(), time.time())
+        seed = "%d-%f-%s" % (os.getpid(), time.time(), os.urandom(8).hex())
     return hashlib.sha1(seed.encode("utf-8", "surrogateescape")).hexdigest()[:12]
 
 
