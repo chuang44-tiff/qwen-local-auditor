@@ -23,8 +23,9 @@ import time
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import advisor_mcp, checks, decisions, probe, taskfile, testrun  # noqa: E402
+from lib import advisor_mcp, checks, decisions, probe, taskfile, testrun, watch  # noqa: E402
 from lib.builders import history  # noqa: E402
+from lib.swarm_engine import events  # noqa: E402
 
 EXIT_OK, EXIT_USAGE, EXIT_APIERR, EXIT_HARNESS = 0, 2, 4, 8
 EXIT_PARTIAL, EXIT_NOPROGRESS, EXIT_DIRTY, EXIT_LOCKED, EXIT_INTERRUPTED = 11, 12, 13, 14, 130
@@ -135,7 +136,7 @@ def _backoff():
 
 def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", test=True,
                probe_here=False, test_cmd=True, advisor=None, plan=None, plan_round=None,
-               timeout_extra=0):
+               timeout_extra=0, activity=None):
     # --shallow goes on the command line, not only into the environment below:
     # qwen-agent reads its config file AFTER the environment, so a QWEN_DEPTH=deep
     # sitting in the config would otherwise re-imply depth (a review round, a
@@ -170,7 +171,16 @@ def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", tes
         base = _round_timeout(passthrough)
         if base:
             argv += ["--timeout", str(base + timeout_extra)]
-    extra_env = {"QWEN_PLAN_ROUND": str(plan_round)} if plan_round else None
+    # The round's own environment: WHICH round this is (the plan hook reads it for its
+    # record) and -- for a round of a loop the page shows -- the file the session's
+    # activity hook appends its lines to (lib/watch_hook.py). Neither named: no dict at
+    # all, and _run_agent spawns with the plain inherited environment it always did.
+    extra = {}
+    if plan_round:
+        extra["QWEN_PLAN_ROUND"] = str(plan_round)
+    if activity:
+        extra["QWEN_WATCH_ACTIVITY"] = str(activity)
+    extra_env = extra or None
     for delay in [0] + _backoff():
         time.sleep(delay)
         rc, out, err = _run_agent(argv, extra_env)
@@ -868,6 +878,66 @@ def _switches(o):
     return out
 
 
+def _watch_start(title, run_dir, max_rounds):
+    """Put this until-done loop on the watch page (lib/watch.py) and print its link, so
+    the session that started the loop knows where to look at it. The rounds' own
+    qwen-agent calls are this process's children: register() put QWEN_WATCH_CHILD=1 into
+    the environment, so no round registers a run of its own.
+
+    BEST EFFORT, like every watch call a launcher makes: a page that cannot be reached
+    costs one `watch: ...` warning line on stderr and never changes the run's exit code.
+    The id comes back for _watch_end (None: the page is off, this is a registered run's
+    child, or registering failed -- finish() is then a no-op)."""
+    run_id = None
+    try:
+        run_id = watch.register("until-done", title, run_path=run_dir, pid=os.getpid(),
+                                max_rounds=max_rounds)
+        if run_id:
+            # the same bare `watch: <url>` the runner and the single-shot script print; its
+            # own guard, because a junk QWEN_WATCH_PORT makes url() raise once the pointer
+            # is written -- the loop is on the page then, and must not be reported as absent
+            try:
+                print("watch: %s" % watch.url(run_id), file=sys.stderr)
+            except Exception as e:
+                watch._warn("the page link failed (%s); the loop is registered, id %s"
+                            % (e, run_id))
+    except Exception as e:
+        watch._warn("the run could not be registered (%s); the loop goes on without the "
+                    "page" % e)
+    return run_id                     # the id survives a link that could not be printed,
+                                      # so _watch_end still closes the pointer
+
+
+def _watch_end(run_id, code):
+    """Record the loop's end and exit in its pointer, on every way out of the run.
+    Likewise best effort: one warning line, the exit unchanged."""
+    try:
+        watch.finish(run_id, code)
+    except Exception as e:
+        watch._warn("the run could not be finished (%s)" % e)
+
+
+def _emit_loop(run_dir, kind, **fields):
+    """One of the loop's own progress lines into RUN/events.jsonl -- the same file the
+    swarm engine writes, through the same writer: `round_start` (which round, of how many,
+    on what seconds budget, and `review` for the --review-round round), `checks_start`
+    (the checklist is being run now, `total` items in it), `checks` (what every checklist
+    item said after the round), `round_end` (how the round's call came back), `audit_start`
+    (the deviation audit is being asked) and `audit_end` (how it came back: `result` is
+    "clean", "deviations", "unusable" or "error"). Between-round lines carry counts and
+    fixed words only -- never check output. The page reads the loop's state from these
+    lines and from nothing else: never a round-*.json, which holds the agent's reply.
+    BEST EFFORT like every watch call: a line that cannot be written costs one warning,
+    and the loop's own outcome lives in its report, not here."""
+    if not run_dir:
+        return
+    try:
+        events.emit(run_dir, kind, **fields)
+    except Exception as e:                       # a page never outranks the loop it watches
+        watch._warn("the loop's %s event could not be written (%s); the loop goes on"
+                    % (kind, e))
+
+
 def run(o):
     """The until-done loop with the environment hygiene around it.
 
@@ -958,6 +1028,8 @@ def _run(o):
     # holder's lock on its way out.
     mine = False
     run_dir = session = None
+    watch_id = None                   # this loop's watch pointer, once registered
+    watch_code = None                 # the exit its finish() records (None: not reached)
     advisor_dir = None                # --advisor: this run's ONE advisor state dir (finally removes it)
     rescue_dir = None                 # --rescue: this run's ONE rescue state dir (finally removes it)
     pending = None                    # the rescue record waiting for the next round's reply
@@ -1116,6 +1188,10 @@ def _run(o):
             k += 1
             run_dir = "%s-%d" % (base, k)
         os.makedirs(run_dir)
+        # The page shows the loop as soon as it has a folder to show: the task file's
+        # name is its title, the folder its progress (the round files under it), and
+        # --max-rounds the denominator of that progress.
+        watch_id = _watch_start(os.path.basename(o.task), run_dir, o.max_rounds)
         if o.advisor:
             # ONE state dir for the whole loop, handed to every coder round: the budget
             # and the call log are shared, so QWEN_ADVISOR_MAX_CALLS caps the run rather
@@ -1172,6 +1248,7 @@ def _run(o):
                                depth=getattr(o, "depth", None), advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
                 report_path = path
                 print("report: %s" % path)
+                watch_code = EXIT_HARNESS
                 return EXIT_HARNESS
             repo = str(sb)
             start = _git(repo, "rev-parse", "HEAD").strip()
@@ -1179,6 +1256,7 @@ def _run(o):
         log_path = os.path.join(run_dir, "decisions.jsonl")
         t0, prev, garbage, feedback = time.time(), None, 0, None
         reviewed = False                # --review-round: the one review round has been asked for
+        review_pending = False          # the next round_start to emit IS that review round
         timeout_run = 0                 # consecutive unusable rounds that were timeouts
         reason, code = "round limit reached", EXIT_PARTIAL
         for rounds in range(1, o.max_rounds + 1):
@@ -1188,6 +1266,19 @@ def _run(o):
             ppath = os.path.join(run_dir, "round-%d.prompt.md" % rounds)
             _write(ppath, prompt)
             sig_before = _tree_sig(repo)
+            # The seconds this round's call is spawned with: the loop's own --timeout,
+            # grown by the advisor's while the one plan call is still unspent -- the round
+            # may sit in the plan hook, and that wait must not eat the round's own.
+            round_extra = (_advisor_timeout() if plan_dir is not None
+                           and not _plan_spent(plan_dir) else 0)
+            round_base = _round_timeout(o.passthrough)
+            # The round is being asked NOW: the page counts this round's bar down from this
+            # line, over the very budget the call is given. `review` says whether this is
+            # the --review-round round, so the page can call it what it is.
+            _emit_loop(run_dir, "round_start", round=rounds, max_rounds=o.max_rounds,
+                       timeout=(round_base + round_extra) if round_base else None,
+                       review=review_pending)
+            review_pending = False
             r = call_agent(o.agent, repo, ppath, session, o.passthrough, probe_here=o.probe,
                            test_cmd=has_cmd,
                            # every coder round -- and the review round, which is a round --
@@ -1197,8 +1288,13 @@ def _run(o):
                            # is called without it); while the one plan call is unspent the
                            # round's timeout grows by the advisor's
                            plan=plan_info(), plan_round=rounds,
-                           timeout_extra=(_advisor_timeout() if plan_dir is not None
-                                          and not _plan_spent(plan_dir) else 0))
+                           timeout_extra=round_extra,
+                           # the round's tool calls append to the RUN's activity file, so the
+                           # page can show the tool this coder is on right now -- and only for
+                           # a loop that IS on the page: unregistered, the rounds carry no
+                           # activity file and their launcher wires no hook at all
+                           activity=(os.path.join(run_dir, watch.ACTIVITY_FILE)
+                                     if watch_id else None))
             take_plan(r["result"], rounds, r["rc"])
             if pending is not None:
                 # This round is the answer the pending rescue was waiting for:
@@ -1242,12 +1338,14 @@ def _run(o):
             _write(os.path.join(run_dir, "round-%d.json" % rounds), json.dumps(r, indent=1))
             denied += r["denied"]
             if r["rc"] in (AGENT_PREFLIGHT, AGENT_APIERR):
+                _emit_loop(run_dir, "round_end", round=rounds, rc=r["rc"])
                 reason, code = "server error after retries", EXIT_APIERR
                 break
             tokens += r["tokens"]
             session = r["session"] or session
             if r["rc"] == AGENT_USAGE:
                 # The agent refused to run at all; no retry or round can help.
+                _emit_loop(run_dir, "round_end", round=rounds, rc=r["rc"])
                 reason, code, agent_err = "agent usage error", EXIT_USAGE, r["stderr"]
                 break
             # An empty reply is not a failed round: the model may have edited files and
@@ -1261,17 +1359,48 @@ def _run(o):
             decisions.append(log_path, decisions.parse(r["result"]), session=session,
                              commit=_git(repo, "rev-parse", "HEAD").strip())
             log = decisions.load(log_path)
+            # The checks are running NOW: the page shows "Testing" from this line until the
+            # `checks` line. It carries the checklist's size -- a count and nothing else,
+            # never what a check printed. (A runner that dies leaves this line and no
+            # `checks`: the round ended, its checks did not report.)
+            _emit_loop(run_dir, "checks_start", round=rounds, total=len(task.items))
             try:
                 results = checks.run_checks(task.items, repo, test_cmd=test_cmd, timeout=timeout)
             except RuntimeError as exc:
+                # no `checks` line for a round whose runner died: there is nothing to say
+                _emit_loop(run_dir, "round_end", round=rounds, rc=r["rc"])
                 reason, code = "check runner failed: %s" % exc, EXIT_HARNESS
                 break
+            # What the harness saw after this round, one line per checklist item: the page's
+            # checklist and its "N of M checks pass". The item's TEXT is the checklist's own
+            # words, trimmed to 100 characters; what a check PRINTED stays in the report.
+            _emit_loop(run_dir, "checks", round=rounds,
+                       passed=sum(1 for c in results if c.status == "PASS"),
+                       failed=sum(1 for c in results if c.status == "FAIL"),
+                       unverified=sum(1 for c in results if c.status == "UNVERIFIED"),
+                       total=len(results),
+                       items=[{"text": c.text[:100], "status": c.status} for c in results])
+            # The round is over -- its call came back and its checks ran: the page closes
+            # the round's line here (a round the harness lost before its checks says so at
+            # the break that ends it instead).
+            _emit_loop(run_dir, "round_end", round=rounds, rc=r["rc"])
             failing = [c for c in results if c.status == "FAIL"]
             unlogged = []
             if not failing and not o.no_deviation_audit:
+                # The diff is being read against the task NOW: the page shows "Reviewing"
+                # from this line until `audit_end`, which every way out of the audit
+                # writes -- including the ones that break the run.
+                _emit_loop(run_dir, "audit_start", round=rounds)
                 unlogged, t, audit_replies, audit_rc, audit_err = deviation_audit(
                     o.agent, repo, run_dir, task_text, log, start, o.passthrough)
                 tokens += t
+                # One fixed word for how the audit came back -- never its text: a dead or
+                # refused call is "error", an unreadable reply twice over is "unusable",
+                # found contradictions are "deviations", none at all is "clean".
+                _emit_loop(run_dir, "audit_end", round=rounds,
+                           result=("error" if audit_rc in (AGENT_USAGE, AGENT_PREFLIGHT, AGENT_APIERR)
+                                   else "unusable" if unlogged is None
+                                   else "deviations" if unlogged else "clean"))
                 if audit_rc in (AGENT_PREFLIGHT, AGENT_APIERR):
                     # The audit call failed like a coder round would: the server
                     # error ends the run with its own code, not a hand to a human.
@@ -1299,6 +1428,8 @@ def _run(o):
                         if rounds < o.max_rounds and not spent:
                             # One more round in the same session; the checks (and the audit)
                             # run again after it, and it counts toward --max-rounds.
+                            # The next round_start carries this as its review flag.
+                            review_pending = True
                             notes.append("review round: round %d" % (rounds + 1))
                             prev, feedback = None, REVIEW_ROUND.format(
                                 check_it=CHECK_TEST if has_cmd else CHECK_NONE)
@@ -1393,8 +1524,10 @@ def _run(o):
         if sb is not None and o.keep_sandbox:
             print("sandbox kept: %s" % sb)     # as --keep-sandbox's help promises
         print("report: %s" % path)
+        watch_code = code
         return code
     except KeyboardInterrupt:
+        watch_code = EXIT_INTERRUPTED
         patch = None
         if run_dir:
             with contextlib.suppress(Exception):
@@ -1444,7 +1577,9 @@ def _run(o):
         if __name__ == "__main__":
             # os._exit skips the finally below, so the sweep and its leftover
             # report happen here. The note goes in before the print: a dead
-            # terminal takes the print, not the report.
+            # terminal takes the print, not the report. The watch pointer is
+            # finished here for the same reason: nothing else would.
+            _watch_end(watch_id, EXIT_INTERRUPTED)
             with contextlib.suppress(OSError, RuntimeError, subprocess.SubprocessError):
                 leftover = drop_sandbox()
                 if leftover is not None:
@@ -1460,6 +1595,7 @@ def _run(o):
             os._exit(EXIT_INTERRUPTED)
         return EXIT_INTERRUPTED
     except Exception as exc:
+        watch_code = EXIT_HARNESS               # a crash is exit 8, reported or re-raised
         # Without --probe the work sits in the user's tree and survives a crash; under
         # --probe the sandbox is its only copy, so an error must not throw it away: try
         # the patch first, and when it cannot be written (a refused diff, a dead agent
@@ -1516,6 +1652,11 @@ def _run(o):
         if plan_dir is not None:
             _keep_gate_records(plan_dir, run_dir)
             shutil.rmtree(plan_dir, ignore_errors=True)
+        # Every way out of the run closes its watch pointer (the interrupted os._exit
+        # above finishes before it leaves, since it skips this finally): limit, done,
+        # interrupt, crash and the exits that never registered -- finish() takes a None
+        # id quietly. Best effort: the exit code this returns is already decided.
+        _watch_end(watch_id, watch_code)
 
 
 def _stop_on_signal(signum, frame):

@@ -214,6 +214,26 @@ See [`sweep.md`](sweep.md).
 The `QWEN_SEARCH_*` variables above are what a workflow with a `search` or `web` fence
 searches through.
 
+### Watch page (every command)
+
+Each run prints `watch: <url>` on stderr, which links to a live, read-only page of that run.
+The page shows:
+- each agent's role, state and time used;
+- the tool the agent is on, with a trimmed input;
+- its context use;
+- for `--until-done`, the round and the checklist.
+
+The page never shows tool output, prompts, transcripts or model reasoning. One viewer process
+serves every run and keeps running between runs. `python lib/watch.py stop` ends it, and
+`python lib/watch.py dismiss <id>` clears a finished run's card.
+
+| variable | default | meaning |
+|---|---|---|
+| `QWEN_WATCH` | `1` | `0` switches the page off: no registration, no activity hook, no viewer |
+| `QWEN_WATCH_HOST` | `127.0.0.1` | the address the viewer binds. It can be a comma-separated list, all served on one port, and the link names the first. Set a routable address only if the page should be reachable from another machine, e.g. a VPN address |
+| `QWEN_WATCH_PORT` | `8790` | the viewer's port |
+| `QWEN_WATCH_NOSERVE` | | `1` registers runs but never starts a viewer (tests, or a viewer you run yourself) |
+
 ## Troubleshooting
 
 | message | fix |

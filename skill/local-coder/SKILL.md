@@ -59,6 +59,16 @@ wrong and the advice goes into the next round. Claude gets read tools on the rep
 (`QWEN_CLAUDE_TOOLS=0` removes them). The code, questions, failing output and any file it
 reads leave this machine. `qwen-agent --show-claude` prints the effective settings.
 
+The run also prints `watch: <url>` on stderr: its live page — rounds, agents, states and
+timings. The page shows names, roles, states and timings, the goal or title, the coder
+report's one-line stop reason and the events' why/attention text, and for the coder the tool
+it is on right now with a trimmed INPUT (a path, a pattern, or the start of its command) —
+never prompts, transcripts, model reasoning or what a tool returned. Pass that link to the
+user when the loop starts. The viewer keeps running between runs; run `python lib/watch.py
+stop` only when the user asks.
+`QWEN_WATCH_HOST` (e.g. your Tailscale address) and `QWEN_WATCH_PORT` move the page off
+its local-only default so another machine can view it; `QWEN_WATCH=0` switches it off.
+
 ## 3. Read the result
 
 The last stdout line is `report: <path>`. `report.md` has the final checklist with

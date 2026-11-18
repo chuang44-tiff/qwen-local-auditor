@@ -164,6 +164,10 @@ PLAN_DIR=""         # the run's private plan dir (call counter, plan.jsonl, sett
 PLAN_DIR_OWN=0      # 1 only when this run mktemp'd PLAN_DIR itself; only then may cleanup remove it
 PLAN_SETTINGS=""    # the --settings file that names the PreToolUse hook (lib/advisor_hook.py)
 PLAN_LOG=""         # the plan call's full brief and answer
+WATCH_ID=""         # this session's watch pointer id (lib/watch.py); "" = not on the page
+WATCH_TMPD=""       # the folder holding the id the registration handed back and the settings file
+WATCH_SETTINGS=""   # the --settings file naming the activity hook (lib/watch_hook.py), which
+                    # also holds the plan hook's entries when both are on (claude takes one)
 DESKTOP=""          # --desktop APP: drive one desktop application through qla-desktop (lib/desktop.py)
 DESKTOP_ROOT=""     # where desktop run folders go (QWEN_DESKTOP_DIR), absolute before the -C chdir
 DESKTOP_DIR=""      # this run's folder: screenshots, the saved window size, bin/qla-desktop
@@ -2265,6 +2269,23 @@ fi
 
 # shellcheck disable=SC2329  # invoked via trap
 cleanup() {
+  # The exit code this run is leaving by: the EXIT trap runs cleanup with $? set to
+  # exactly that, and on_signal names WATCH_EXIT first (there $? is its own last kill).
+  # The watch pointer records it, and `return 0` at the bottom keeps it untouched.
+  local rc="${WATCH_EXIT:-$?}"
+  # The watch page (lib/watch.py): this single-shot session's pointer is finished here,
+  # before any of the sweeps below (a big worktree would keep the page saying "running").
+  # BEST EFFORT: one `watch: ...` line at most, and the run's exit code is never changed.
+  if [ -n "${WATCH_ID:-}" ]; then
+    PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" - "$WATCH_ID" "$rc" <<'PY'
+import sys
+try:
+    from lib import watch
+    watch.finish(sys.argv[1], int(sys.argv[2]))
+except Exception as e:
+    sys.stderr.write("watch: the run could not be finished (%s)\n" % e)
+PY
+  fi
   # only a directory this run created: with --advisor-state the supervisor owns it and
   # every other round is still using it. (ADVISOR_DIR_OWN guards the second, unconditional
   # `trap cleanup EXIT` further down, which fires even when the mktemp branch never ran.)
@@ -2272,6 +2293,9 @@ cleanup() {
   # likewise the plan dir: with --plan-state the supervisor owns it
   [ "${PLAN_DIR_OWN:-0}" = 1 ] && [ -n "${PLAN_DIR:-}" ] && rm -rf "$PLAN_DIR"
   [ -n "${TMPD:-}" ] && rm -rf "$TMPD"
+  # the watch folder too: the id the registration handed back and the settings file that
+  # names the activity hook, neither of which outlives this run
+  [ -n "${WATCH_TMPD:-}" ] && rm -rf "$WATCH_TMPD"
   [ -n "${TEST_WT:-}" ] && skill_py testrun.py --cleanup "$(native_path "$TEST_REPO")" "$(native_path "$TEST_WT")" >/dev/null 2>&1
   if [ -n "${PROBE_RUN:-}" ] && [ "$KEEP_SANDBOX" -eq 0 ]; then
     cd / 2>/dev/null                # Windows cannot remove the directory a process stands in
@@ -3116,6 +3140,155 @@ $_pl_note"; else SYSTEM="$_pl_note"; fi
   unset _pl_note _pl_to _pl_bin _pl_res _pl_task _pl_digest _pl_logdir _pl_stamp
 fi
 
+# ------------------------------------------------------------------ watch page
+# This single-shot session puts itself on the watch page (lib/watch.py) and prints the one
+# link to follow; cleanup above finishes the run when it ends. --until-done never gets
+# here (it execs the supervisor, which registers the loop itself), nor --dry-run,
+# --interactive or --preflight-only, every one of which leaves the script higher up: the
+# first two leave it BELOW this block, so those two are guarded here (and the block sits
+# here, before the argv is built, because the hook settings it writes belong IN that argv).
+# It is skipped outright when the page is switched off (QWEN_WATCH=0) or when this process
+# is already a registered run's child (QWEN_WATCH_CHILD=1: a swarm unit's or a supervisor
+# round's launcher never registers a run of its own -- it keeps the activity file the
+# launcher that registered gave it, below), nor for -w: that branch far below hands TMPD to
+# a detached subshell, drops the EXIT trap and exits 0, so a pointer written here would be
+# owned by a pid that dies at once while the job goes on running -- the page would read a
+# live run as killed, and nothing would ever finish it. The title is the role and what was
+# asked for -- the first 60 characters of the prompt, or the prompt file's NAME, since the
+# page may never read a prompt body.
+# BEST EFFORT: one `watch: ...` line on stderr at most, and never a change to the run's
+# exit code -- an empty WATCH_ID makes every later watch call, cleanup's included, a no-op.
+if [ "${QWEN_WATCH:-1}" != 0 ] && [ "${QWEN_WATCH_CHILD:-0}" != 1 ] && [ "$BG" -eq 0 ] \
+   && [ "$DRY_RUN" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ]; then
+  WATCH_TITLE="$ROLE: ${PROMPT:0:60}"
+  [ -n "$PROMPT_FILE" ] && WATCH_TITLE="$ROLE: ${PROMPT_FILE##*/}"
+  # This run's own watch files (the id the registration hands back, the merged settings
+  # below) live in a folder of their own: TMPD does not exist this early, and a run that
+  # registered nothing must leave nothing behind (cleanup takes the folder away).
+  WATCH_TMPD="$(mktemp -d "${TMPDIR:-/tmp}/qwen-watch.XXXXXXXX")" || WATCH_TMPD=""
+  if [ -n "$WATCH_TMPD" ]; then
+    # The id comes back in a file, not a command substitution: a here-document inside
+    # $( ... ) is the one construction the old shells (macOS's bash 3.2, Git Bash) have
+    # historically disagreed about. Only stdout is redirected: the `watch:` link line the
+    # script prints must reach the terminal's stderr, not the file. An empty file (no page,
+    # or a python that could not run) leaves WATCH_ID empty, and every later watch call --
+    # cleanup's finish included -- is then a no-op; finish() ignores an id that is not 12
+    # hex digits, so nothing but a real registration can close a pointer. The SECOND line
+    # is where this session's activity lines land (beside its pointer, lib/watch.py's
+    # activity_path), so the shell never has to guess the registry's location.
+    PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" - "$WATCH_TITLE" "$$" "${TIMEOUT:-}" \
+      >"$WATCH_TMPD/watch.id" <<'PY'
+import sys
+try:
+    from lib import watch
+    t = sys.argv[3].strip()
+    rid = watch.register("agent", sys.argv[1], pid=int(sys.argv[2]),
+                         timeout=int(t) if t.isdigit() else None)
+except Exception as e:
+    sys.stderr.write("watch: the run could not be registered (%s); it goes on without "
+                     "the page\n" % e)
+    rid = None
+if rid:
+    try:
+        sys.stderr.write("watch: %s\n" % watch.url(rid))
+    except Exception as e:
+        sys.stderr.write("watch: the page link failed (%s); the run is registered, id %s\n"
+                         % (e, rid))
+    print(rid)                                  # the id cleanup above finishes with
+    try:
+        print(watch.activity_path(rid))          # the file the hook below appends to
+    except Exception:
+        pass
+PY
+    WATCH_ID="$(sed -n '1p' "$WATCH_TMPD/watch.id" 2>/dev/null || true)"
+    WATCH_ACTIVITY="$(sed -n '2p' "$WATCH_TMPD/watch.id" 2>/dev/null || true)"
+    # After a successful registration this shell IS the registered process, and the
+    # agent it spawns next is its child: python's register() set QWEN_WATCH_CHILD=1 in
+    # the child python's own environment, which died with it, so the shell sets the
+    # switches for its children here -- exported, so a wrapper or hook the agent runs
+    # inherits them too and none of them registers a pointer of its own. QWEN_WATCH_PARENT
+    # says WHICH process the registration belongs to (this shell, $$): register() trusts
+    # the child switch only in a process that is not the named owner, so a child can
+    # never mistake itself for the registered run, while a second register() inside the
+    # owning process itself stays the legitimate re-registration it is. With WATCH_ID
+    # empty (the page off, or a python that could not run) there is no registered run
+    # to be a child of, and nothing is set.
+    [ -n "$WATCH_ID" ] && export QWEN_WATCH_CHILD=1 QWEN_WATCH_PARENT=$$
+    # The activity hook's target, exported the same way: the agent inherits it, and every
+    # hook Claude Code runs for it inherits it too -- which is how the hook knows WHICH
+    # file to append to without one path being written into the settings file. A session
+    # that registered nothing has no file to fill, so none is named.
+    [ -n "$WATCH_ID" ] && [ -n "$WATCH_ACTIVITY" ] \
+      && export QWEN_WATCH_ACTIVITY="$WATCH_ACTIVITY"
+  fi
+fi
+
+# The activity hook (lib/watch_hook.py) is named to Claude Code in a settings file, exactly
+# as --plan's hook is -- and, like it, ONLY for a headless non-dry run. What it records is
+# the tool's name and a trimmed INPUT (a path, a pattern, the start of a command) and the
+# context the session reports: never a tool's output, never a prompt or transcript text.
+# One file holds both hooks when --plan is on too: claude takes one --settings, so the
+# plan hook's entry is read in and the four watch entries are appended to it (its matcher
+# and command unchanged). With no activity file to fill -- the page off, or a run that
+# registered nothing -- nothing is written and no --settings is passed at all, and a
+# --dry-run or --interactive run writes nothing either: like --plan's hook, this one is for
+# a headless run that actually starts (both leave the script below, before any trap could
+# have taken the folder away).
+if [ -n "${QWEN_WATCH_ACTIVITY:-}" ] && [ "$DRY_RUN" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ]; then
+  [ -n "$WATCH_TMPD" ] || WATCH_TMPD="$(mktemp -d "${TMPDIR:-/tmp}/qwen-watch.XXXXXXXX")" \
+    || WATCH_TMPD=""
+  if [ -n "$WATCH_TMPD" ] && ! MSYS2_ARG_CONV_EXCL='*' "$QA_PY" - \
+       "$(native_path "$WATCH_TMPD/settings.json")" "$(native_path "$QA_PY")" \
+       "$(native_path "$SKILL_DIR/lib/watch_hook.py")" "$(native_path "${PLAN_SETTINGS:-}")" <<'PY'
+import json, shlex, sys
+out, py, hook, plan = sys.argv[1:5]
+cfg = {}
+if plan:                                   # --plan is on: its file is the base to append to
+    try:
+        with open(plan, encoding="utf-8") as fh:
+            loaded = json.load(fh)
+    except (OSError, ValueError):           # the plan file cannot be read or does not
+        sys.exit(1)                         # parse: refuse to write a merged file that
+    if not isinstance(loaded, dict):        # would silently drop the plan hook, and the
+        sys.exit(1)                         # caller falls back to the plan's own file
+    cfg = loaded
+hooks = cfg.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+cmd = " ".join(shlex.quote(x) for x in (py, hook))
+for kind, matcher in (("PreToolUse", "*"), ("PostToolUse", "*"),
+                      ("PostToolUseFailure", "*"), ("Stop", None)):
+    entries = hooks.get(kind)
+    if not isinstance(entries, list):
+        entries = hooks[kind] = []
+    entry = {"hooks": [{"type": "command", "command": cmd}]}
+    if matcher is not None:                # Stop takes no matcher; the tool ones take "*"
+        entry = dict(matcher=matcher, **entry)
+    entries.append(entry)                  # the plan hook's own entry sits there untouched
+cfg["hooks"] = hooks
+with open(out, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump(cfg, fh, indent=2)
+    fh.write("\n")
+PY
+  then
+    # the merged file was not built or not written (a plan file that cannot be read,
+    # is not JSON, or is JSON that is not an object, or an unwritable folder):
+    # WATCH_SETTINGS stays empty, so claude gets the PLAN's OWN --settings file and
+    # the plan hook still runs. Only the activity lines are lost -- the run goes on
+    # without the page's per-call feed, which is the best-effort outcome.
+    rm -rf "$WATCH_TMPD"; WATCH_TMPD=""
+  else
+    # no folder (the fallback mktemp could not make one) means no merged file: the
+    # settings stay away too, and claude takes the plan's own file or none at all
+    [ -n "$WATCH_TMPD" ] && WATCH_SETTINGS="$WATCH_TMPD/settings.json"
+  fi
+  # The window the model was sized into (QWEN_CTX, else what the server reported for it):
+  # the page's context meter divides the session's own reading of its usage by this. Not
+  # known -- no preflight, a server that does not report one -- and nothing is exported:
+  # the hook then writes no `win`, and the page shows no meter.
+  [ -n "$CTX" ] && export QWEN_WATCH_CTX_WINDOW="$CTX"
+fi
+
 # --------------------------------------------------- build the claude argv
 if [ "$INTERACTIVE" -eq 1 ]; then
   # No -p/--print, and none of the flags a headless run needs a fence for: no
@@ -3163,7 +3336,10 @@ else
     fi
   fi
   [ -n "$ADVISOR_MCP" ] && CLAUDE_ARGV+=(--mcp-config "$(native_path "$ADVISOR_MCP")")
-  [ -n "$PLAN_SETTINGS" ] && CLAUDE_ARGV+=(--settings "$(native_path "$PLAN_SETTINGS")")
+  # ONE settings file, ever: the watch hook's, which carries the plan hook's entries as
+  # well when both are on; the plan's own file only when the page has nothing to record.
+  [ -n "${WATCH_SETTINGS:-$PLAN_SETTINGS}" ] \
+    && CLAUDE_ARGV+=(--settings "$(native_path "${WATCH_SETTINGS:-$PLAN_SETTINGS}")")
   [ "$STRICT_MCP" -eq 1 ] && CLAUDE_ARGV+=(--strict-mcp-config)
   [ -n "$SYSTEM" ]    && CLAUDE_ARGV+=(--append-system-prompt "$SYSTEM")
   [ -n "$PERM_MODE" ] && CLAUDE_ARGV+=(--permission-mode "$PERM_MODE")
@@ -3286,6 +3462,8 @@ on_signal() {
     done
     kill -KILL "$CPID" 2>/dev/null
   fi
+  # cleanup records this in the run's watch pointer: $? there would be the kill above.
+  WATCH_EXIT=$((128 + num))
   cleanup
   die "interrupted by SIG$name"
   trap - EXIT
@@ -3294,6 +3472,10 @@ on_signal() {
 trap cleanup EXIT
 trap 'on_signal INT 2' INT
 trap 'on_signal TERM 15' TERM
+
+# The watch page's registration and its activity hook are ABOVE, with the --plan setup:
+# both belong to the argv built there (the settings file that names the hook must exist
+# before the argv is assembled), and cleanup finishes the pointer this run registered.
 
 RAW="$TMPD/raw.json"
 ERRF="$TMPD/stderr.txt"
@@ -4038,8 +4220,10 @@ if [ "$BG" -eq 1 ]; then
       echo "out=$OUT"
       echo "model=$MODEL"
     } >"$OUT.status"
-    # The parent released TMPD to us; subshells do not inherit its EXIT trap.
+    # The parent released TMPD to us; subshells do not inherit its EXIT trap. The watch
+    # settings folder was released the same way (it holds the file claude read at start).
     rm -rf "$TMPD"
+    [ -n "${WATCH_TMPD:-}" ] && rm -rf "$WATCH_TMPD"
   ) </dev/null >/dev/null 2>&1 &
   # ^ the job must not hold the caller's stdout/stderr open, or `r=$(qwen-agent -w ...)`
   #   and pipelines would block until the job finished, defeating -w.

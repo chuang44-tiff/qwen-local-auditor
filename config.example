@@ -50,3 +50,19 @@ QWEN_BASE_URL="${QWEN_BASE_URL:-http://127.0.0.1:8000}"
 # split like a POSIX shell line, which drops backslashes.
 # QWEN_TEST_CMD="${QWEN_TEST_CMD:-python -m pytest -q}"
 # QWEN_TEST_TIMEOUT="${QWEN_TEST_TIMEOUT:-600}"
+
+# The watch page (on; 0 switches it off). Every run prints `watch: <url>` on stderr, a
+# live page for that run -- names, roles, states and timings, the goal or title, the
+# coder report's one-line stop reason and the events' why/attention text. Each agent's card
+# also shows the tool it is on right now and a trimmed INPUT: a path, a pattern, or the
+# start of a command; never a tool's output, and never prompts, transcripts or model
+# reasoning. The viewer is one shared process that keeps running
+# between runs; `python lib/watch.py stop` ends it, and `python lib/watch.py dismiss <id>`
+# clears a finished run's card. It binds 127.0.0.1:8790 unless you name another host and
+# port (QWEN_WATCH_HOST may be a comma-separated list -- every address serves on the
+# same port, and the link names the first one); only set a routable host if you mean the
+# page to be viewable from another machine (e.g. the address your VPN gives you, such as
+# a Tailscale one).
+# QWEN_WATCH="${QWEN_WATCH:-1}"
+# QWEN_WATCH_HOST="${QWEN_WATCH_HOST:-127.0.0.1}"
+# QWEN_WATCH_PORT="${QWEN_WATCH_PORT:-8790}"

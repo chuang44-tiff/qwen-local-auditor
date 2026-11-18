@@ -118,6 +118,19 @@ def tally(verdicts, voters):
     return "unclear"
 
 
+def _deep_cut(timeout, deep):
+    """The per-call budget a deep unit gets: --review-round is TWO qwen-agent calls and
+    qwen-agent gives each the full --timeout it is handed, so a review-round unit halves
+    its budget (rounded down) to still fit the time MAX_UNIT_SECONDS promises -- never
+    below DEEP_CALL_FLOOR, the least a unit is otherwise given, nor above the unit's own
+    budget. _argv cuts the spawned argv with this; run_unit announces the very same
+    number in the unit's unit_start event, so the page's per-agent bar divides by the
+    clock the watchdog really runs."""
+    if "review_round" in deep:
+        return max(timeout // 2, min(timeout, DEEP_CALL_FLOOR), 1)
+    return timeout
+
+
 def _term_group(p):
     """Ask one live process to stop (SIGTERM to its group; POSIX only, like stop_all)."""
     if p.poll() is None and os.name == "posix":
@@ -239,21 +252,28 @@ class Swarm:
         self.deadline = deadline
         self.agents_dir = self.run_dir / "agents"
         self.agents_dir.mkdir(parents=True, exist_ok=True)
+        # where each unit's activity lines go (lib/watch_hook.py, one file per unit name)
+        # for the watch page. Only the folder, never the file: it is made by run_unit, and
+        # only for a run the page actually knows about -- a swarm that nobody is watching
+        # leaves nothing but the files it always wrote.
+        self.activity_dir = self.run_dir / "activity"
         self.dropped = self.agents_run = self.tokens = 0
         self._lock = threading.Lock()
         self._live = set()
         self._stopping = threading.Event()
+        self._phase_no = 0            # names a phase the workflow never labelled ("phase N")
 
     # ------------------------------------------------------------ one process
     def _argv(self, u, prompt_path, timeout, resume=None):
         # the caller owns the budget: a unit carries its own timeout, and a retry doubles it
-        if u.deep and not resume and "review_round" in u.deep:
+        if u.deep and not resume:
             # --review-round is TWO qwen-agent calls and qwen-agent gives each the full
             # --timeout it is handed: halve the unit's budget (rounded down) so a deep
             # unit still fits the time MAX_UNIT_SECONDS promises -- but never below
             # DEEP_CALL_FLOOR, the least a unit is otherwise given, nor above the
-            # unit's own budget.
-            timeout = max(timeout // 2, min(timeout, DEEP_CALL_FLOOR), 1)
+            # unit's own budget. (_deep_cut is the one rule; run_unit's unit_start
+            # event announces the same number the page divides its bar by.)
+            timeout = _deep_cut(timeout, u.deep)
         # --shallow on every unit: depth is the unit's own decision below, never one
         # qwen-agent implies for itself. An implied --probe would sandbox the unit's -C
         # folder (its own empty agents/<name>/ directory, not a project), and a sandbox
@@ -451,15 +471,33 @@ class Swarm:
             # (it knows the items); the phase's file stays unwritten so a resume can run it.
             res.update(why="deadline reached before this unit started", deadline=True)
             return res
+        # The unit is about to spawn: a cache hit returned above and a unit the deadline
+        # stops never reach this line, so the page turns a spinner only on real work.
+        # The event carries the seconds budget this unit's first qwen-agent call is
+        # spawned with -- the Swarm's, the unit's own, capped at max_unit_seconds, and
+        # for a review-round unit the halved number _argv hands the call -- so the page's
+        # per-agent bar counts down the same clock the watchdog does.
+        timeout = min(self.timeout if u.timeout is None else u.timeout, self.max_unit_seconds)
+        self._event("unit_start", u, timeout=_deep_cut(timeout, u.deep) if u.deep else timeout)
         start = time.time()
         rc, tokens, status = -1, 0, "ok"
         # the last attempt's start and token boundary: the unit's final log line reports
         # that attempt alone, so the token column of run.log sums to self.tokens
         t_start, tokens_before = start, 0
         # None unless the unit names extra variables: inheriting os.environ is the
-        # documented behaviour, and a rebuilt dict keeps it for every attempt.
-        env = None if not u.env else dict(os.environ, **u.env)
-        timeout = min(self.timeout if u.timeout is None else u.timeout, self.max_unit_seconds)
+        # documented behaviour, and a rebuilt dict keeps it for every attempt. A run the
+        # page knows about names one more -- the file its session's hook appends one line
+        # per tool call to -- so the unit's card can show the tool it is on right now. The
+        # folder is made here, best effort: a run whose page is off (QWEN_WATCH=0 registers
+        # nothing, so no QWEN_WATCH_CHILD either) adds nothing at all and keeps the plain
+        # env=None spawn it always had. A retry appends to the SAME file: the card shows
+        # the unit's whole history, however many attempts it took.
+        extra = dict(u.env or {})
+        if os.environ.get("QWEN_WATCH_CHILD") == "1":
+            with contextlib.suppress(OSError):
+                self.activity_dir.mkdir(parents=True, exist_ok=True)
+            extra["QWEN_WATCH_ACTIVITY"] = str(self.activity_dir / ("%s.jsonl" % u.name))
+        env = None if not extra else dict(os.environ, **extra)
         set_up = False
         try:
             (self.agents_dir / u.name).mkdir(parents=True, exist_ok=True)
@@ -595,9 +633,16 @@ class Swarm:
         return res
 
     # ------------------------------------------------------------ one phase
-    def run_phase(self, units, seats=None):
+    def run_phase(self, units, seats=None, label=None):
         """Run every unit; at most `seats` at once. None = the Swarm's seats; a value
-        above them is capped to the Swarm's seats."""
+        above them is capped to the Swarm's seats.
+
+        `label` is what this phase does, in the workflow's own words ("round 2:
+        hypothesize"); None numbers it "phase N" over this Swarm. The phase_start event
+        goes out BEFORE the first unit spawns, so a watcher sees the whole phase -- its
+        size, its seats, its units -- while its units are still queued, and can tell
+        progress and time remaining from them. A roster too wide for one event line goes
+        out without the roster (events.emit_phase_start explains why)."""
         if self._stopping.is_set():
             raise KeyboardInterrupt
         seats = self.seats if seats is None else min(seats, self.seats)
@@ -605,6 +650,16 @@ class Swarm:
         if len(set(names)) != len(names):
             raise ValueError("two units in one phase share a name: they would overwrite "
                              "each other's files")
+        with self._lock:
+            self._phase_no += 1
+            number = self._phase_no
+        if label is None:
+            label = "phase %d" % number       # an unnamed phase is still a phase to show
+        # A unit names itself two ways: "unit" is the event's own field, and the watch
+        # fold reads a phase's items by "name" (lib/watch.py fold_events).
+        events.emit_phase_start(self.run_dir, label, len(units), seats,
+                                [{"unit": u.name, "name": u.name,
+                                  "role": pathlib.Path(u.role_file).stem} for u in units])
         results = [None] * len(units)
         q = queue.Queue()
         for i, u in enumerate(units):

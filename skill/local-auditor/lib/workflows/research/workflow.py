@@ -329,7 +329,7 @@ def _first_round(wf):
     if not angles:
         n = wf.knob("angles")
         data = wf.agent("scope", "scoper", SCOPE_P.format(q=q, n=n), parse_angles(n),
-                        item="question")
+                        item="question", label="research: scope")
         if wf.last_unit["ok"]:
             angles = data
             wf.save("angles", angles)
@@ -344,7 +344,8 @@ def _first_round(wf):
     if not urls:
         res = wf.fan_out("search", "searcher", angles,
                          lambda batch: SEARCH_P.format(q=q, items=_angle_items(batch), per=PER_ANGLE),
-                         lambda text, batch: parse_search({a["id"] for a in batch})(text))
+                         lambda text, batch: parse_search({a["id"] for a in batch})(text),
+                         label="research: search")
         urls = wf.steps.merge_urls(res.rows, wf.knob("sources"))
         if not urls and not wf.not_run:
             wf.fail("search found no sources")
@@ -359,7 +360,8 @@ def _first_round(wf):
         by_id = {s["id"]: s for s in urls}
         res = wf.fan_out("fetch", "reader", urls,
                          lambda batch: FETCH_P.format(q=q, items=_source_items(batch)),
-                         lambda text, batch: parse_fetch({s["id"] for s in batch})(text))
+                         lambda text, batch: parse_fetch({s["id"] for s in batch})(text),
+                         label="research: fetch")
         # the url is added after parsing, as the released command did: a cached answer
         # stays exactly the row it cached
         rows = [dict(d, url=by_id[d["source"]]["url"]) for d in res.rows]
@@ -387,7 +389,8 @@ def _first_round(wf):
     if not votes:
         v = wf.vote("verify", "verifier", claims, wf.knob("voters"),
                     lambda batch: VERIFY_P.format(q=q, items=_claim_items(batch)),
-                    lambda text, batch: parse_votes({c["id"] for c, _ in batch})(text))
+                    lambda text, batch: parse_votes({c["id"] for c, _ in batch})(text),
+                    label="research: verify")
         votes = {cid: {"votes": vs, "status": v[cid]} for cid, vs in v.cast.items()}
         if not v.result.not_run_items:
             _save_phase(wf, "votes", v.result, votes, ["angles", "urls", "claims"])
@@ -574,7 +577,7 @@ def _later_round(wf, st):
         plan = None
     if not isinstance(plan, dict):
         data = wf.agent("plan", "planner", prompt, parse_plan(st, wf.knob("angles")),
-                        item="plan")
+                        item="plan", label="research: plan (round %d)" % wf.round)
         if not wf.last_unit["ok"]:
             if not wf.last_unit.get("deadline"):
                 wf.converged("the planner produced no plan")
@@ -600,7 +603,8 @@ def _later_round(wf, st):
     if not isinstance(urls, list):
         res = wf.fan_out("search", "searcher", plan["angles"],
                          lambda batch: SEARCH_P.format(q=q, items=_angle_items(batch), per=PER_ANGLE),
-                         lambda text, batch: parse_search({a["id"] for a in batch})(text))
+                         lambda text, batch: parse_search({a["id"] for a in batch})(text),
+                         label="research: search (round %d)" % wf.round)
         rows = [r for r in res.rows if _norm(r["url"]) not in st.seen]    # earlier rounds' URLs
         merged = wf.steps.merge_urls(rows, wf.knob("sources"))
         urls = [dict(s, id="S%d" % (len(st.urls) + i)) for i, s in enumerate(merged, 1)]
@@ -613,7 +617,8 @@ def _later_round(wf, st):
         by_id = {s["id"]: s for s in urls}
         res = wf.fan_out("fetch", "reader", urls,
                          lambda batch: FETCH_P.format(q=q, items=_source_items(batch)),
-                         lambda text, batch: parse_fetch({s["id"] for s in batch})(text))
+                         lambda text, batch: parse_fetch({s["id"] for s in batch})(text),
+                         label="research: fetch (round %d)" % wf.round)
         rows = [dict(d, url=by_id[d["source"]]["url"]) for d in res.rows]
         fetched = sum(1 for d in rows if not d["error"] and d["claims"])
         rows.sort(key=lambda d: int(d["source"][1:]))
@@ -633,7 +638,8 @@ def _later_round(wf, st):
         voters = wf.knob("voters")
         v = wf.vote("verify", "verifier", claims + recheck, voters,
                     lambda batch: VERIFY_P.format(q=q, items=_claim_items(batch)),
-                    lambda text, batch: parse_votes({c["id"] for c, _ in batch})(text))
+                    lambda text, batch: parse_votes({c["id"] for c, _ in batch})(text),
+                    label="research: verify (round %d)" % wf.round)
         cast = {cid: {"votes": vs, "requested": voters} for cid, vs in v.cast.items()}
         if not v.result.not_run_items:
             _save_phase(wf, "votes", v.result, cast, ["plan", "urls", "claims"])
@@ -692,7 +698,8 @@ def _synthesize(wf, urls, claims, votes, fetched, attempted):
         # synthesis always runs, past the deadline or not; one-round runs re-synthesize
         # on every resume as the released command did, multi-round runs cache it so a
         # resume replays the same report the next planner read
-        cache=wf.multi_round, always=True, repair=SYNTH_REPAIR)
+        cache=wf.multi_round, always=True, repair=SYNTH_REPAIR,
+        label="research: synthesize")
     if not wf.last_unit["ok"]:
         body = "# Findings (synthesis failed)\n\n" + _bullets(supported, line)
 

@@ -155,11 +155,11 @@ its patch. `--target` itself is never an agent's working directory unless the fe
 | `wf.goal` | the goal text |
 | `wf.knob(name)` | a knob (preset, then `--set`); also `budget`, `retries`, `rounds`, `hours` |
 | `wf.target` | the target directory (a `pathlib.Path`) or `None` |
-| `wf.agent(name, role, prompt, parse)` | one agent, unit `name-1`; returns `parse(text)`, or `None` when it failed (then `wf.last_unit` has `ok`, `why`, `deadline`). Options: `cache=False`, `always=True` (runs past the deadline), `item="goal"` (the deadline log label), `stage=DIR` (below) |
-| `wf.fan_out(name, role, items, prompt, parse)` | deals `items` in groups of <= `--max-agents` units holding <= `--max-items` items each and runs every unit of the call in ONE phase (`--seats` alone limits concurrency; the group number only names units); `prompt(batch)` -> str, `parse(text, batch)` -> list of rows. Returns `Result`: `.rows`, `.dropped_items`, `.not_run_items`, `.units`, `.ok`. Options: `item_id=`, `max_items=` (e.g. 1 = one item per agent), `stage=DIR` (a fresh copy of DIR in each unit's folder as `fixtures/`, made once per unit and kept for its retries and repair round; DIR's content hash joins the unit's cache key), `repair=TEXT` (this call's repair-round prompt; `{why}` is filled in), `unit_ids=True` (units named `name-<item id>` instead of by position, so skipping an item does not move another unit's cache key; needs `item_id=` and `max_items=1`) |
+| `wf.agent(name, role, prompt, parse)` | one agent, unit `name-1`; returns `parse(text)`, or `None` when it failed (then `wf.last_unit` has `ok`, `why`, `deadline`). Options: `cache=False`, `always=True` (runs past the deadline), `item="goal"` (the deadline log label), `stage=DIR` (below), `label=NAME` (this phase's name on the watch page; `phase N` when left out) |
+| `wf.fan_out(name, role, items, prompt, parse)` | deals `items` in groups of <= `--max-agents` units holding <= `--max-items` items each and runs every unit of the call in ONE phase (`--seats` alone limits concurrency; the group number only names units); `prompt(batch)` -> str, `parse(text, batch)` -> list of rows. Returns `Result`: `.rows`, `.dropped_items`, `.not_run_items`, `.units`, `.ok`. Options: `item_id=`, `max_items=` (e.g. 1 = one item per agent), `stage=DIR` (a fresh copy of DIR in each unit's folder as `fixtures/`, made once per unit and kept for its retries and repair round; DIR's content hash joins the unit's cache key), `repair=TEXT` (this call's repair-round prompt; `{why}` is filled in), `unit_ids=True` (units named `name-<item id>` instead of by position, so skipping an item does not move another unit's cache key; needs `item_id=` and `max_items=1`), `label=NAME` (this phase's name on the watch page; `phase N` when left out) |
 | `wf.claude_check(name, items, prompt, parse, model=M, max_calls=N)` | one `claude -p` per item through the user's claude login (below); returns one `{item, state, data, why}` per item, in order. Options: `budget_usd=2.0`, `browser=False`, `stage=DIR`, `read_dirs=()`, `item_id=`, `timeout=600`, `max_turns=40`. Refused (every item `unavailable`, no process) unless the config's `QWEN_CONFIRM` names a model or `--set confirm=claude` is typed |
 | `wf.event(kind, **fields)` | one line in `RUN/events.jsonl` (below); an engine kind is a `ValueError` |
-| `wf.vote(name, role, claims, voters, prompt, parse)` | claim-major vote slots — `(claim, k)` with `k` = 0..`voters`-1, dealt so no agent holds two slots of one claim (`voters` above `--max-agents` is an error). `prompt(batch)` and `parse(text, batch)` get the batch as that list of `(claim, k)` tuples; `parse` returns rows with `claim` (a claim id) and `verdict` (`supported`, `refuted`, `unclear`) — a row naming a claim this vote never asked about, or whose `verdict` is not a string, is ignored. `claim_id=fn` says how a claim is identified (default `c["id"]`); it also labels `run.log`'s deadline lines. Returns `{claim_id: verdict}` (majority of the votes requested) with `.cast`, `.requested`, `.result` |
+| `wf.vote(name, role, claims, voters, prompt, parse)` | claim-major vote slots — `(claim, k)` with `k` = 0..`voters`-1, dealt so no agent holds two slots of one claim (`voters` above `--max-agents` is an error). `prompt(batch)` and `parse(text, batch)` get the batch as that list of `(claim, k)` tuples; `parse` returns rows with `claim` (a claim id) and `verdict` (`supported`, `refuted`, `unclear`) — a row naming a claim this vote never asked about, or whose `verdict` is not a string, is ignored. `claim_id=fn` says how a claim is identified (default `c["id"]`); it also labels `run.log`'s deadline lines. Returns `{claim_id: verdict}` (majority of the votes requested) with `.cast`, `.requested`, `.result`. Options: `label=NAME` (this phase's name on the watch page; `phase N` when left out) |
 | `wf.rounds()` | `for r in wf.rounds():` yields 1, 2, ... until the `rounds` knob, the deadline, or `wf.converged` |
 | `wf.converged(reason)` | end the rounds loop after this round |
 | `wf.round` | the current round (1 outside the loop) |
@@ -387,7 +387,17 @@ The folder holds `config.json` (the resolved settings and the manifest summary),
 root a `browser` unit was given) as soon as such a unit runs, and the workflow's own
 `<key>.json` artifacts, `events.jsonl` (below), `.lock` while a runner holds the run,
 `verdicts/<ID>.json` once a session verdict is recorded, `claude/calls.jsonl` once a
-`wf.claude_check` call is made, and `agents/<unit>/fixtures/` for a unit given `stage=`.
+`wf.claude_check` call is made, `agents/<unit>/fixtures/` for a unit given `stage=`, and
+`activity/<unit>.jsonl` -- one line per tool call of that unit's session (the tool's name and
+its trimmed input, never what it returned), which the watch page folds into the unit's live
+card. A failed call fires `PostToolUseFailure` instead of `PostToolUse`, and its line is
+written as that call's post with `ok: false` -- a call that crashed is still closed. And a
+`pre` whose post never came is closed as abandoned (the call reads "no reply" on the page)
+once the agent has answered some call and started a new one, so a lost post -- a denied tool,
+a dropped hook -- never pins the card on "waiting"; a subagent call (Task/Agent) is exempt
+only from that abandon rule -- the calls running inside it are its own doing -- and it closes
+on its own post, or on a `stop` when the round ends first. `activity/<unit>.jsonl` is written
+only for a run the page shows: with `QWEN_WATCH=0` the `activity/` folder is never made.
 `rounds.json` (the rounds started, so a resume finishes the
 interrupted one), the `round-<r>/` directories (round 2 onwards; round 1 writes at the top
 level) and `report-round-<r>.md` are a multi-round run's: they appear only when `rounds` is
@@ -412,6 +422,8 @@ written.
 | kind | fields | when |
 |---|---|---|
 | `run_start` | `workflow`, `goal`, `run` (absolute path), `resumed`, `depth`, `knobs` | the run folder exists |
+| `phase_start` | `label`, `n`, `seats`, `units` (each `unit`, `name`, `role`) | when the phase begins, before any of its units spawns. It is written even when no unit spawns (all cached). A phase no workflow named is labelled `phase N`. A roster too wide for one 4 KB line is announced without it -- `label`, `seats`, `truncated` -- because a unit name cut short stops matching that unit's own lines, and a part-roster would leave the progress bar stuck below 100% |
+| `unit_start` | `unit`, `role`, `timeout` (the seconds budget that call is spawned with -- the halved one for a review-round unit; the per-agent bar divides by it) | every unit that really spawns: not a cache hit, not one the deadline stopped |
 | `unit_done` | `unit`, `role`, `ok`, `cached`, `seconds`, `why` (on failure only) | every unit, cached ones included |
 | `unit_dropped` | `unit`, `role`, `why` | a unit is dropped |
 | `claude_call` | `name`, `item`, `state`, `seconds`, `cost_usd` | every `wf.claude_check` item |
@@ -426,8 +438,14 @@ afterwards, so gate on the process exit code (or the last `--record-verdict`'s),
 `run_end.exit`. Right after the folder is made, stderr says
 `qwen-swarm: run folder: <absolute path>` (`qwen-deep-research: run folder: ...` under that
 command), the first line after the preflight lines, so a background launch knows where to
-look; `skill/local-swarm/SKILL.md` step 3 is the watch
-recipe.
+look. The watch page's link is the line after it, and it is the same line from every
+launcher -- `watch: http://HOST:PORT/#<ID>`, no command prefix, so one `grep '^watch: '`
+finds it in a swarm run, a research run, an until-done loop or a single-shot session alike
+(a watch failure costs one more such line, its warning text, saying which call failed and
+handing over the run id to build the link with). A detached `qwen-agent -w` prints none: its
+page would belong to a pid that dies the moment the parent exits. To follow the events
+themselves rather than the page, `skill/local-swarm/SKILL.md`'s "watch the run's events"
+steps are the recipe.
 
 `wf.event(kind, **fields)` adds a workflow's own kinds; an engine kind is refused with a
 `ValueError`. By convention `attention` means "the main session should look at this", with
@@ -436,7 +454,24 @@ row after the testers, `verdict` (`id`, `verdict`, `by`, `evidence`: the first e
 whenever a confirmer's verdict is applied, and `attention` for a row the confirmer found
 CONFIRMED (reason `confirmed failure`) or NEEDS_HUMAN (`needs human`) and for a FALSE_ALARM
 on a tester FAIL (`false alarm on a tester FAIL`). `qwen-swarm --check` writes
-the same `unit_done` events into its dry-run folder, which is deleted afterwards.
+the same `unit_done` events into its dry-run folder, which is deleted afterwards, and
+announces every phase with `phase_start` just as the engine does (the workflow's `label`, or
+`phase N`, with `n`, `seats` and `units`; `seats` is 1 there, because a dry run answers one
+unit at a time). It writes no `unit_start`: nothing spawns in a dry run, and that event means
+an agent really started.
+
+The until-done loop is a separate writer of the same file, with six kinds of its own:
+`round_start` (`round`, `max_rounds`, `timeout`, and `review` -- `true` for the
+`--review-round` round, `false` for every other), `checks_start` (`round`, `total` -- the
+checklist's size; written immediately before the harness runs the checks), `checks`
+(`round`, `passed`, `failed`, `unverified`, `total` and one `items` entry per checklist
+item: its `text`, trimmed to 100 characters, with its `status`), `round_end` (`round`,
+`rc`), `audit_start` (`round`; written immediately before the deviation audit) and
+`audit_end` (`round`, `result`: `clean` with nothing unlogged, `deviations` with one or
+more, `unusable` when the reply parsed as nothing twice, `error` when the call itself
+died or was refused; written on every way out of the audit, the ones that end the run
+included). The between-rounds lines carry counts and fixed words only -- never what a
+check printed -- and the watch page reads the coder loop's state from these lines alone.
 
 ## The run lock
 

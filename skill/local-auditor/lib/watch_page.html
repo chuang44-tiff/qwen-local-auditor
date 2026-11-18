@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>qwen watch</title>
+<link rel="icon" href="data:,">
+<style>
+:root{
+  --paper:#EDF0F3;--panel:#FFFFFF;--sunk:#E3E8EE;--ink:#18202B;--muted:#5B6676;--line:#D5DBE2;
+  --run:#2F6FED;--ok:#17905F;--bad:#D9484F;--warn:#B87708;--warn-bg:#FBF1DD;--floor:#C9D1DB;
+  --r-lg:14px;--r-sm:8px;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --paper:#0F141A;--panel:#171D25;--sunk:#1E2630;--ink:#E4E9F0;--muted:#93A0B1;--line:#263040;
+  --run:#6A9BFF;--ok:#3CC58A;--bad:#F06A70;--warn:#F0B04A;--warn-bg:#2A2214;--floor:#2C3644;}}
+:root[data-theme="dark"]{
+  --paper:#0F141A;--panel:#171D25;--sunk:#1E2630;--ink:#E4E9F0;--muted:#93A0B1;--line:#263040;
+  --run:#6A9BFF;--ok:#3CC58A;--bad:#F06A70;--warn:#F0B04A;--warn-bg:#2A2214;--floor:#2C3644;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif;
+  font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+main{max-width:880px;margin:0 auto;padding:16px 16px 48px}
+a{color:inherit}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--run);outline-offset:2px;border-radius:6px}
+
+/* top bar */
+.top{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:10px}
+.brand{font-weight:700;font-size:20px;letter-spacing:-.01em}
+.pulse{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.dot.live{background:var(--run);box-shadow:0 0 0 0 var(--run);animation:ping 2s infinite}
+.dot.stale{background:var(--bad)}
+@keyframes ping{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--run) 55%,transparent)}
+  70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+
+/* the crew floor: the one bold element */
+.floor{position:relative;background:var(--panel);border-radius:var(--r-lg);padding:14px 14px 0;
+  margin-bottom:22px;overflow:hidden}
+.floor h1{font-size:22px;line-height:1.25;margin:0 0 2px;font-weight:650;letter-spacing:-.01em}
+.floor p{margin:0;color:var(--muted);font-size:14px}
+.crew{display:flex;gap:4px;align-items:flex-end;overflow-x:auto;padding:14px 2px 0;
+  min-height:104px;scrollbar-width:none;border-bottom:3px solid var(--floor)}
+.crew::-webkit-scrollbar{display:none}
+.mate{flex:0 0 auto;width:64px;text-align:center;font-size:11px;color:var(--muted);
+  text-decoration:none;padding-bottom:4px}
+.mate svg{width:58px;height:58px;display:block;margin:0 auto}
+.mate span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crew .empty{color:var(--muted);font-size:14px;padding:0 0 18px}
+
+/* sections */
+h2{font-size:15px;font-weight:650;margin:26px 0 10px;display:flex;gap:8px;align-items:baseline}
+h2 small{font-weight:400;color:var(--muted);font-size:13px}
+
+/* running run cards */
+.run{display:grid;grid-template-columns:52px 1fr;gap:4px 12px;background:var(--panel);
+  border-radius:var(--r-lg);padding:14px;margin-bottom:10px;text-decoration:none;
+  border:1px solid transparent;transition:border-color .15s}
+.run:hover{border-color:var(--line)}
+.run svg{width:52px;height:52px;grid-row:span 3}
+.run .title{font-weight:600;line-height:1.3;overflow-wrap:break-word}
+.run .sub{font-size:13px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 12px}
+.run .meter{grid-column:2}
+.kind{font-size:12px;font-weight:600;color:var(--muted)}
+.flag{color:var(--warn);font-weight:600}
+
+.bar{height:6px;border-radius:3px;background:var(--sunk);overflow:hidden;margin:8px 0 6px}
+.bar i{display:block;height:100%;border-radius:3px;background:var(--run);transition:width .6s ease}
+.bar.ok i{background:var(--ok)} .bar.bad i{background:var(--bad)}
+.bar.hot i{background:var(--warn)}
+.meta{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);gap:8px}
+
+/* finished list: rows, not cards */
+.done-list{background:var(--panel);border-radius:var(--r-lg);overflow:hidden}
+.row{display:grid;grid-template-columns:20px 1fr;gap:2px 10px;align-items:center;padding:11px 14px;
+  text-decoration:none;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.row .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .r{grid-column:2;font-size:13px;color:var(--muted)}
+.row{position:relative;padding-right:44px}
+.x-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);width:30px;height:30px;border:0;border-radius:8px;
+  background:transparent;color:var(--muted);font-size:18px;line-height:1;cursor:pointer}
+.x-btn:hover{background:var(--sunk);color:var(--ink)}
+.clear{margin-left:auto;border:0;background:transparent;color:var(--muted);font-size:13px;cursor:pointer;padding:4px 6px;border-radius:6px}
+.clear:hover{background:var(--panel);color:var(--ink)}
+.mark{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:11px;font-weight:700}
+.mark.ok{background:var(--ok)} .mark.bad{background:var(--bad)} .mark.gone{background:var(--muted)}
+
+/* run view */
+.back{display:inline-block;font-size:14px;color:var(--muted);text-decoration:none;margin:2px 0 12px}
+.hero{background:var(--panel);border-radius:var(--r-lg);padding:16px;display:grid;
+  grid-template-columns:64px 1fr;gap:4px 14px}
+.hero svg{width:64px;height:64px;grid-row:span 2}
+.hero h1{font-size:20px;line-height:1.3;margin:0;font-weight:650;overflow-wrap:break-word}
+.hero .stat{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:14px;color:var(--muted)}
+.hero .stat b{color:var(--ink);font-weight:600}
+.hero .meter{grid-column:1/-1}
+.pill{font-size:12px;font-weight:650;padding:2px 9px;border-radius:99px;background:var(--sunk);color:var(--muted)}
+.pill.running{color:var(--run)} .pill.ended{color:var(--ok)} .pill.failed,.pill.killed{color:var(--bad)}
+
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px}
+.tile{background:var(--panel);border-radius:var(--r-sm);padding:22px 12px 8px;display:grid;
+  grid-template-columns:62px 1fr;gap:0 12px;align-items:center;min-width:0}
+.tile svg{width:60px;height:60px;grid-row:span 2;margin-top:4px}
+.tile b{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tile .role{font-size:12px;color:var(--muted)}
+.tile .bar,.tile .meta{grid-column:1/-1}
+.tile .bar{margin:8px 0 4px;height:4px}
+.tile .why{grid-column:1/-1;font-size:12px;color:var(--bad);margin-top:2px}
+.tile.quiet{opacity:.6}
+
+table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:var(--r-sm);overflow:hidden;font-size:14px}
+th,td{padding:8px 10px;text-align:right;border-top:1px solid var(--line);white-space:nowrap}
+th{font-weight:600;color:var(--muted);font-size:13px;border-top:0}
+th:first-child,td:first-child{text-align:left}
+.tablewrap{overflow-x:auto;border-radius:var(--r-sm)}
+
+.feed{list-style:none;margin:0;padding:0;background:var(--panel);border-radius:var(--r-sm)}
+.feed li{display:grid;grid-template-columns:62px 1fr;gap:10px;padding:8px 12px;border-top:1px solid var(--line);font-size:14px}
+.feed li:first-child{border-top:0}
+.feed time{color:var(--muted);font-size:13px}
+.feed li.attn{background:var(--warn-bg);box-shadow:inset 3px 0 var(--warn)}
+.feed .x{color:var(--muted)}
+
+.fin{margin-top:10px;background:var(--panel);border-radius:var(--r-sm)}
+.fin summary{cursor:pointer;padding:11px 14px;font-weight:600;font-size:14px;list-style:none;display:flex;gap:8px;align-items:baseline}
+.fin summary::-webkit-details-marker{display:none}
+.fin summary::before{content:"";width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s;align-self:center}
+.fin[open] summary::before{transform:rotate(45deg)}
+.fin summary small{font-weight:400;color:var(--muted);font-size:13px}
+.fin ul{list-style:none;margin:0;padding:0 0 4px}
+.fin li{display:grid;grid-template-columns:20px 1fr auto;gap:2px 10px;align-items:center;padding:8px 14px;border-top:1px solid var(--line);font-size:14px}
+.fin li small{color:var(--muted)} .fin .tm{color:var(--muted);font-size:13px;white-space:nowrap}
+.fin .why{grid-column:2/-1;color:var(--bad);font-size:12px}
+.wave{margin-bottom:8px;background:var(--panel);border-radius:var(--r-sm)}
+.wave summary{cursor:pointer;padding:11px 14px;list-style:none;display:grid;grid-template-columns:18px 1fr;gap:1px 10px;align-items:center}
+.wave summary::-webkit-details-marker{display:none}
+.wave .wl{font-weight:600;font-size:14px}
+.wave summary small{grid-column:2;color:var(--muted);font-size:13px}
+.wave[open] summary{border-bottom:1px solid var(--line)}
+.wbody{padding:10px}
+.wbody .tiles .tile{background:var(--paper)}
+.frows{list-style:none;margin:8px 0 0;padding:0}
+.frows:first-child{margin-top:0}
+.frows li{display:grid;grid-template-columns:20px 1fr auto;gap:2px 10px;align-items:center;padding:7px 4px;border-top:1px solid var(--line);font-size:14px}
+.frows li:first-child{border-top:0}
+.frows small{color:var(--muted)} .frows .tm{color:var(--muted);font-size:13px;white-space:nowrap}
+.frows .why{grid-column:2/-1;color:var(--bad);font-size:12px}
+.tail{margin:8px 4px 0;font-size:13px;color:var(--muted)}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--sunk);border-top-color:var(--run);animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+svg.robot{overflow:visible}
+.robot .think{transform-box:fill-box;transform-origin:20% 100%;animation:pop 2.4s ease-in-out infinite}
+.robot .think .d1,.robot .think .d2,.robot .think .d3{animation:dots 1.1s ease-in-out infinite}
+.robot .think .d2{animation-delay:.18s}.robot .think .d3{animation-delay:.36s}
+@keyframes dots{0%,60%,100%{opacity:.2;transform:translateY(0)}30%{opacity:1;transform:translateY(-2px)}}
+@keyframes pop{0%,100%{transform:scale(.94)}50%{transform:scale(1.06)}}
+svg.robot.thinking .body{animation:bob 2.6s ease-in-out infinite}
+svg.robot.thinking .ant{animation:glow .9s ease-in-out infinite}
+/* asleep on a slow program: slumped, breathing, big floating Zs */
+svg.robot.waiting .body{animation:breathe 3s ease-in-out infinite}
+svg.robot.waiting .prop{opacity:.55}
+@keyframes breathe{0%,100%{transform:rotate(-6deg) translateY(2px) scaleY(.97)}50%{transform:rotate(-6deg) translateY(1px) scaleY(1)}}
+.robot .zzz text{transform-box:fill-box;transform-origin:center;animation:zz 2.7s ease-in-out infinite;opacity:0}
+.robot .zzz .z2{animation-delay:.9s}.robot .zzz .z3{animation-delay:1.8s}
+@keyframes zz{0%{opacity:0;transform:translate(-4px,8px) scale(.6)}20%{opacity:1}70%{opacity:1}100%{opacity:0;transform:translate(6px,-8px) scale(1.15)}}
+.act{grid-column:1/-1;font-size:13px;margin-top:6px;display:flex;gap:6px;align-items:center;min-width:0}
+.act .k{flex:0 0 auto;font-size:11px;font-weight:650;padding:1px 7px;border-radius:99px;background:var(--sunk);color:var(--muted)}
+.act .k.think{color:var(--run)} .act .k.wait{color:var(--warn)} .act .k.tool{color:var(--ok)}
+/* the harness's own work (checks, the deviation audit): the tester family's colour */
+.act .k.test{color:#D65A9A}
+.act .v{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.act code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.calls{grid-column:1/-1;margin-top:6px;font-size:12px}
+.calls summary{cursor:pointer;color:var(--muted);list-style:none}
+.calls summary::-webkit-details-marker{display:none}
+.calls summary::before{content:"▸ ";} .calls[open] summary::before{content:"▾ ";}
+.calls ol{margin:6px 0 0;padding:0;list-style:none}
+.calls li{display:grid;grid-template-columns:1fr auto;gap:8px;padding:3px 0;border-top:1px solid var(--line)}
+.calls li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.calls li.bad span:first-child{color:var(--bad)}
+.calls .tm{color:var(--muted)}
+.ctx{grid-column:1/-1;display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;font-size:12px;color:var(--muted);margin-top:6px}
+.cbar{height:4px;border-radius:2px;background:var(--sunk);overflow:hidden}
+.cbar i{display:block;height:100%;background:#8b7fd6}
+.ctx.hot .cbar i{background:var(--warn)} .ctx.hot span:last-child{color:var(--warn);font-weight:600}
+.tile.solo{margin-bottom:4px}
+.checks{list-style:none;margin:0;padding:0;background:var(--panel);border-radius:var(--r-sm)}
+.checks li{display:grid;grid-template-columns:20px 1fr auto;gap:10px;align-items:center;padding:9px 12px;border-top:1px solid var(--line);font-size:14px}
+.checks li:first-child{border-top:0} .checks .tm{color:var(--muted);font-size:13px}
+.note{color:var(--muted);font-size:14px;background:var(--panel);border-radius:var(--r-sm);padding:14px}
+
+/* robots */
+svg.robot .body{transform-box:fill-box;transform-origin:50% 100%}
+svg.robot .prop,svg.robot .eyes,svg.robot .ant{transform-box:fill-box}
+svg.robot.running .body{animation:bob 1.6s ease-in-out infinite}
+/* every worker: visor scans and blinks, antenna light pulses */
+svg.robot.running .eyes{transform-origin:50% 50%;animation:scan 3.2s ease-in-out infinite}
+svg.robot.running .ant{animation:glow 1.4s ease-in-out infinite}
+/* each family does its own job */
+svg.robot.running.p-clip .prop{transform-origin:50% 100%;animation:jot 1.1s ease-in-out infinite}
+svg.robot.running.p-glass .prop{transform-origin:30% 30%;animation:search 2.4s ease-in-out infinite}
+svg.robot.running.p-bulb .prop{transform-origin:50% 80%;animation:idea 2.2s ease-in-out infinite}
+svg.robot.running.p-wrench .prop{transform-origin:10% 95%;animation:turn .55s ease-in-out infinite alternate}
+svg.robot.running.p-brush .prop{transform-origin:5% 95%;animation:stroke 1.2s ease-in-out infinite}
+svg.robot.running.p-brush .dab{animation:dab 1.2s ease-in-out infinite}
+svg.robot.running.p-check .prop{transform-origin:50% 50%;animation:stamp 1.6s ease-in-out infinite}
+svg.robot.running.p-net .prop{transform-origin:5% 95%;animation:swoop 1.4s cubic-bezier(.5,0,.3,1) infinite}
+svg.robot.running.p-merge .prop path{stroke-dasharray:4 4;animation:flow .8s linear infinite}
+@keyframes scan{0%,100%{transform:translateX(-2.5px)}45%{transform:translateX(2.5px)}48%{transform:translateX(2.5px) scaleY(.15)}51%{transform:translateX(2.5px)}}
+@keyframes glow{50%{opacity:.35}}
+@keyframes jot{0%,100%{transform:rotate(-4deg)}50%{transform:rotate(5deg) translateY(-1px)}}
+@keyframes search{0%,100%{transform:translate(0,0)}25%{transform:translate(-4px,-3px)}50%{transform:translate(1px,-5px)}75%{transform:translate(3px,1px)}}
+@keyframes idea{0%,60%,100%{opacity:1;transform:scale(1)}65%{opacity:.3}70%{opacity:1;transform:scale(1.18)}80%{transform:scale(1)}}
+@keyframes turn{from{transform:rotate(-22deg)}to{transform:rotate(12deg)}}
+@keyframes stroke{0%,100%{transform:rotate(-14deg)}50%{transform:rotate(10deg) translate(2px,1px)}}
+@keyframes dab{0%,40%{opacity:0;transform:scale(.4)}60%,100%{opacity:1;transform:scale(1)}}
+@keyframes stamp{0%,70%,100%{transform:scale(1)}78%{transform:scale(.82) translateY(2px)}86%{transform:scale(1.12)}}
+@keyframes swoop{0%,100%{transform:rotate(-28deg)}50%{transform:rotate(14deg)}}
+@keyframes flow{to{stroke-dashoffset:-8}}
+svg.robot.queued{opacity:.5}
+svg.robot.dropped,svg.robot.killed,svg.robot.notrun{filter:grayscale(1);opacity:.55}
+@keyframes bob{50%{transform:translateY(-3px)}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.robot .zzz text{opacity:1}svg.robot.waiting .body{transform:rotate(-6deg) translateY(2px)}}
+</style>
+</head>
+<body>
+<main id="app" aria-live="polite"></main>
+<script>
+"use strict";
+var FAM={
+  planner:{c:"#E9A23B",roles:["planner","scoper","triager"],prop:"clip"},
+  searcher:{c:"#3FA7D6",roles:["searcher","reader"],prop:"glass"},
+  thinker:{c:"#A26BD8",roles:["hypothesizer","prober","profiler"],prop:"bulb"},
+  builder:{c:"#E0663F",roles:["implementer","coder","mechanic"],prop:"wrench"},
+  painter:{c:"#F2C14E",roles:["writer"],prop:"brush"},
+  checker:{c:"#4CAE6E",roles:["reviewer","verifier","checker","confirmer","auditor"],prop:"check"},
+  tester:{c:"#D65A9A",roles:["tester"],prop:"net"},
+  weaver:{c:"#2BB3A3",roles:["synthesizer"],prop:"merge"},
+  plain:{c:"#9A9A9A",roles:[],prop:""}
+};
+var KIND_FAM={swarm:"planner",research:"searcher","until-done":"builder",agent:"checker"};
+var KIND_NAME={swarm:"Swarm",research:"Deep research","until-done":"Coder loop",agent:"Single agent"};
+var P={
+ clip:'<rect x="62" y="44" width="18" height="24" rx="2" fill="#fff" stroke="#333" stroke-width="2"/><rect x="66" y="41" width="10" height="5" rx="1" fill="#555"/><path d="M65 52h12M65 57h12M65 62h8" stroke="#555" stroke-width="2"/>',
+ glass:'<circle cx="70" cy="50" r="9" fill="#dff3ff" stroke="#333" stroke-width="3"/><path d="M76 57l8 9" stroke="#333" stroke-width="4" stroke-linecap="round"/>',
+ bulb:'<circle cx="72" cy="30" r="9" fill="#ffe66b" stroke="#333" stroke-width="2"/><rect x="68" y="38" width="8" height="6" fill="#888"/><path d="M72 18v-5M60 24l-4-3M84 24l4-3" stroke="#e8b400" stroke-width="2"/>',
+ wrench:'<path d="M64 66l14-18" stroke="#666" stroke-width="5" stroke-linecap="round"/><circle cx="80" cy="45" r="7" fill="none" stroke="#666" stroke-width="5"/>',
+ brush:'<path d="M63 70l15-22" stroke="#8a5a2b" stroke-width="4" stroke-linecap="round"/><path d="M76 50l6-9 5 3-5 9z" fill="#ccc" stroke="#333" stroke-width="1.5"/><path d="M82 41q5-6 9-3q-2 6-7 6z" fill="#e0663f" stroke="#333" stroke-width="1.5"/><circle class="dab" cx="88" cy="58" r="3" fill="#3fa7d6"/>',
+ check:'<circle cx="72" cy="52" r="11" fill="#fff" stroke="#333" stroke-width="2"/><path d="M66 52l4 4 8-9" stroke="#2e9a54" stroke-width="3.5" fill="none" stroke-linecap="round"/>',
+ net:'<path d="M62 70l14-22" stroke="#7a5230" stroke-width="3"/><ellipse cx="80" cy="42" rx="9" ry="7" fill="none" stroke="#333" stroke-width="2"/><path d="M73 40l14 4M75 46l10-8" stroke="#333" stroke-width="1"/>',
+ merge:'<path d="M62 40c8 0 8 10 14 10M62 60c8 0 8-10 14-10M76 50h10" stroke="#333" stroke-width="3" fill="none" stroke-linecap="round"/>'
+};
+function famOf(role){for(var k in FAM){if(FAM[k].roles.indexOf(role)>=0)return FAM[k];}return FAM.plain;}
+function robot(f,state){
+  var eye=state==="dropped"||state==="killed"||state==="notrun"?"#666":state==="queued"?"#3a4150":"#7ff";
+  if(state==="waiting")eye="#3a4150";
+  var badge=state==="thinking"?'<g class="think"><ellipse cx="82" cy="8" rx="20" ry="14" fill="#fff" stroke="#2b2b2b" stroke-width="2"/><circle cx="66" cy="26" r="4" fill="#fff" stroke="#2b2b2b" stroke-width="1.8"/><circle cx="60" cy="33" r="2.4" fill="#fff" stroke="#2b2b2b" stroke-width="1.5"/><circle class="d1" cx="73" cy="8" r="3.4" fill="#2F6FED"/><circle class="d2" cx="82" cy="8" r="3.4" fill="#2F6FED"/><circle class="d3" cx="91" cy="8" r="3.4" fill="#2F6FED"/></g>':
+    state==="waiting"?'<g class="zzz" font-family="system-ui,sans-serif" font-weight="800" fill="#2F6FED" stroke="#fff" stroke-width="1.2" paint-order="stroke"><text class="z1" x="66" y="22" font-size="16">z</text><text class="z2" x="78" y="8" font-size="22">z</text><text class="z3" x="92" y="-10" font-size="30">Z</text></g>':
+    state==="done"||state==="cached"?'<circle cx="78" cy="20" r="9" fill="#17905F"/><path d="M73.5 20l3 3 5.5-6.5" stroke="#fff" stroke-width="2.5" fill="none"/>':
+    state==="queued"?'<text x="66" y="18" font-size="12" font-family="system-ui" fill="#8894a5">z z</text>':"";
+  return '<svg class="robot '+state+' p-'+(f.prop||'none')+'" viewBox="0 0 96 96" aria-hidden="true"><g class="body">'+
+   '<ellipse cx="48" cy="90" rx="22" ry="4" fill="#0002"/><path d="M48 14v8" stroke="#2b2b2b" stroke-width="2.5"/>'+
+   '<circle class="ant" cx="48" cy="12" r="4" fill="'+f.c+'" stroke="#2b2b2b" stroke-width="2"/>'+
+   '<rect x="24" y="22" width="48" height="34" rx="8" fill="#d9dde3" stroke="#2b2b2b" stroke-width="2.5"/>'+
+   '<rect x="31" y="31" width="34" height="14" rx="5" fill="#223"/>'+
+   (state==="waiting"?'<g class="eyes"><path d="M36 38h8M52 38h8" stroke="#7ff" stroke-width="2.5" stroke-linecap="round" opacity=".6"/></g>':'<g class="eyes"><circle cx="40" cy="38" r="3.5" fill="'+eye+'"/><circle cx="56" cy="38" r="3.5" fill="'+eye+'"/></g>')+
+   '<rect x="28" y="58" width="40" height="26" rx="5" fill="'+f.c+'" stroke="#2b2b2b" stroke-width="2.5"/>'+
+   '<rect x="38" y="64" width="20" height="6" rx="2" fill="#fff8"/></g>'+
+   '<g class="prop">'+(P[f.prop]||"")+'</g>'+badge+'</svg>';
+}
+function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
+function dur(s){if(s==null||!isFinite(s))return "";s=Math.max(0,Math.round(s));
+  if(s<60)return s+"s";var m=Math.floor(s/60);if(m<60)return (m+"m "+(s%60?(s%60)+"s":"")).trim();var h=Math.floor(m/60);return h+"h "+(m%60)+"m";}
+function ago(t){return dur(Date.now()/1000-t)+" ago";}
+function clock(t){if(typeof t!=="number"||!isFinite(t)||Math.abs(t)>8.64e12)return "";
+  var d=new Date(t*1000);return d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"});}
+function pct(p){return Math.round(Math.max(0,Math.min(1,p||0))*100);}
+function cnt(n,w){return esc(n)+" "+(n===1?w:w+"s");}  /* "1 agent", "2 agents" */
+function outcome(r){ if(r.state==="killed")return "killed"; if(r.state!=="ended")return "running";
+  return (r.exit===0||r.exit==null)?"ended":"failed";}
+function bar(p,cls){return '<div class="bar '+(cls||"")+'" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="'+pct(p)+'"><i style="width:'+pct(p)+'%"></i></div>';}
+
+function cardMeter(r){
+  var o=outcome(r);
+  if(o!=="running") return bar(1,o==="ended"?"ok":"bad");
+  return bar(r.progress, r.kind==="agent"&&r.progress>0.85?"hot":"");
+}
+function progressText(r){
+  if(r.kind==="until-done"){var rn=r.round&&r.round.n!=null?r.round.n:r.rounds;
+    var t=rn!=null&&r.max_rounds?("Round "+rn+" of "+r.max_rounds):(r.max_rounds?("Up to "+r.max_rounds+" rounds"):"");
+    var c=r.checks;if(c&&c.total)t+=", "+c.passed+" of "+cnt(c.total,"check")+" pass";return t;}
+  if(r.kind==="agent") return r.timeout?(dur(r.elapsed)+" of a "+dur(r.timeout)+" limit"):dur(r.elapsed);
+  var ph=r.phase; if(!ph) return "Starting";
+  var done=0,us=r.units||{}; (ph.units||[]).forEach(function(n){var u=us[n];if(u&&["done","cached","dropped"].indexOf(u.state)>=0)done++;});
+  return (ph.label||"Phase")+": "+done+" of "+cnt(ph.n||0,"agent")+" done";
+}
+function etaText(r){return r.eta!=null&&outcome(r)==="running"?("About "+dur(r.eta)+" left"):"";}
+
+function overview(runs){
+  var live=runs.filter(function(r){return outcome(r)==="running";});
+  var hid=hidden();var fin=runs.filter(function(r){return outcome(r)!=="running"&&!hid[r.id];});
+  var mates=[];
+  live.forEach(function(r){
+    var us=r.units||{},names=Object.keys(us).filter(function(n){return us[n].state==="running";});
+    if(names.length) names.forEach(function(n){mates.push({f:famOf(us[n].role),label:n,id:r.id});});
+    else mates.push({f:FAM[KIND_FAM[r.kind]]||FAM.plain,label:{agent:"agent","until-done":"coder",swarm:"swarm",research:"research"}[r.kind]||r.kind,id:r.id});
+  });
+  var head=live.length?(mates.length+(mates.length===1?" agent":" agents")+" at work"):"All quiet";
+  var sub=live.length?(live.length===1?"One run in progress":live.length+" runs in progress"):"Start a local agent and it appears here.";
+  var h='<section class="floor"><h1>'+head+'</h1><p>'+sub+'</p><div class="crew">';
+  h+=mates.length?mates.map(function(m){return '<a class="mate" href="#'+esc(m.id)+'" title="'+esc(m.label)+'">'+robot(m.f,"running")+'<span>'+esc(m.label)+'</span></a>';}).join(""):['planner','builder','checker'].map(function(k){return '<span class="mate" aria-hidden="true">'+robot(FAM[k],'queued')+'</span>';}).join('');
+  h+='</div></section>';
+  if(live.length){
+    h+='<h2>Running <small>'+live.length+'</small></h2>';
+    h+=live.map(function(r){
+      var f=FAM[KIND_FAM[r.kind]]||FAM.plain,att=r.attention_count||0;
+      // A single-shot session or a coder loop has no tiles of its own, so the card itself
+      // carries what that one agent is doing: the same status line the run view shows,
+      // read off the run's own activity (the fold's, not a second source).
+      var a=(r.kind==="agent"||r.kind==="until-done")&&r.activity?r.activity:null;
+      var pose=a?actPose({state:"running",activity:a}):"running";
+      var extra=a?actLine({state:"running",activity:a})+ctxHtml(a):"";
+      // a coder loop's own step outranks its activity between the rounds: while the
+      // harness runs the checks it is the tester at work, while the deviation audit
+      // reads the diff the checker, and in between the builder thinks.
+      var st=r.kind==="until-done"?r.step:null;
+      if(st&&st.name!=="coding"){
+        f=st.name==="testing"?FAM.tester:st.name==="reviewing"?FAM.checker:FAM.builder;
+        pose=st.name==="between"?"thinking":"running";
+        extra='<div class="act"><span class="k test">'+
+          (st.name==="testing"?"Testing":st.name==="reviewing"?"Reviewing":"Between rounds")+
+          '</span></div>'+(a?ctxHtml(a):"");
+      }
+      return '<a class="run" href="#'+esc(r.id)+'">'+robot(f,pose)+
+        '<div><div class="kind">'+esc(KIND_NAME[r.kind]||r.kind)+'</div><div class="title">'+esc(r.title)+'</div></div>'+
+        '<div class="sub"><span>'+esc(progressText(r))+'</span>'+(att?'<span class="flag">'+att+(att===1?" item needs":" items need")+' you</span>':"")+'</div>'+
+        '<div class="meter">'+cardMeter(r)+'<div class="meta"><span>'+dur(r.elapsed)+' elapsed</span><span>'+esc(etaText(r))+'</span></div></div>'+
+        extra+'</a>';
+    }).join("");
+  }
+  if(fin.length){
+    h+='<h2>Finished <small>'+fin.length+'</small><button class="clear" data-hide="'+esc(fin.map(function(r){return r.id;}).join(','))+'">Clear finished</button></h2><div class="done-list">';
+    h+=fin.map(function(r){var o=outcome(r);
+      var m=o==="ended"?'<span class="mark ok" aria-label="succeeded">✓</span>':o==="failed"?'<span class="mark bad" aria-label="failed">!</span>':'<span class="mark gone" aria-label="killed">×</span>';
+      var right=(o==="failed"?"exit "+esc(String(r.exit))+", ":o==="killed"?"stopped, ":"")+"took "+dur(r.elapsed)+(r.end?", "+ago(r.end):"");
+      return '<a class="row" href="#'+esc(r.id)+'">'+m+'<span class="t">'+esc(r.title)+'</span><span class="r">'+esc(right)+'</span><button class="x-btn" data-hide="'+esc(r.id)+'" aria-label="Hide this run" title="Hide">×</button></a>';}).join("");
+    h+='</div>';
+  }
+  return h;
+}
+
+var STATE_WORD={running:"working",queued:"waiting",done:"done",cached:"reused",dropped:"dropped","not run":"not run"};
+function detail(r){
+  var o=outcome(r),f=FAM[KIND_FAM[r.kind]]||FAM.plain;
+  var pillWord={running:"Running",ended:"Finished",failed:"Failed (exit "+esc(String(r.exit))+")",killed:"Stopped"}[o];
+  var h='<a class="back" href="#">← All runs</a>';
+  h+='<section class="hero">'+robot(f,o==="running"?"running":o==="ended"?"done":"killed")+
+     '<div><h1>'+esc(r.goal||r.title)+'</h1></div>'+
+     '<div class="stat"><span class="pill '+o+'">'+pillWord+'</span><span>'+esc(KIND_NAME[r.kind]||r.kind)+'</span><span><b>'+dur(r.elapsed)+'</b> elapsed</span>'+
+       (etaText(r)?'<span>'+esc(etaText(r))+'</span>':"")+'</div>'+
+     '<div class="meter">'+(o==="running"?bar(r.progress):bar(1,o==="ended"?"ok":"bad"))+
+       '<div class="meta"><span>'+esc(progressText(r))+'</span>'+(r.report_stop?'<span>'+esc(r.report_stop)+'</span>':"")+'</div></div></section>';
+
+  if(r.kind==="until-done"||r.kind==="agent") h+=soloHtml(r,o);
+  var us=r.units||{},names=Object.keys(us);
+  if(names.length){
+    var phases=(r.phases||[]).slice(),seen={};
+    var waves=phases.map(function(p,i){var list=(p.units||[]).filter(function(n){return us[n];});
+      list.forEach(function(n){seen[n]=1;});return {p:p,i:i,list:list};});
+    var loose=names.filter(function(n){return !seen[n];});
+    if(loose.length) waves.push({p:{label:"Other agents",n:loose.length,end:null},i:waves.length,list:loose,loose:true});
+    var working=names.filter(function(n){return us[n].state==="running";}).length;
+    var waiting=names.filter(function(n){return us[n].state==="queued";}).length;
+    h+='<h2>Agents <small>'+working+' working, '+waiting+' waiting, '+waves.length+(waves.length===1?" wave":" waves")+'</small></h2>';
+    h+=waves.map(function(w){return wave(w,r,us,o);}).join("");
+  }
+  // latest first; same stamp keeps file order, so a phase_start never lands below the
+  // units it started (or a checks_start below its round, or an audit_end below its audit)
+  var ev=(r.recent||[]).map(function(e,i){return {e:e,i:i};})
+    .sort(function(x,y){return y.e.t-x.e.t||x.i-y.i;});
+  if(ev.length){
+    h+='<h2>Activity <small>latest first</small></h2><ul class="feed">';
+    h+=ev.map(function(x){var e=x.e;var txt=evText(e);return '<li class="'+(e.kind==="attention"?"attn":"")+'"><time>'+clock(e.t)+'</time><span>'+txt+'</span></li>';}).join("");
+    h+='</ul>';
+  } else if(!names.length && r.kind!=="agent"){h+='<p class="note">No activity recorded yet.</p>';}
+  return h;
+}
+
+var CLS_WORD={shell:"Running",python:"Running Python",read:"Reading",edit:"Editing",web:"On the web",mcp:"Using",delegate:"Delegating",other:"Using"};
+function actPose(u){var a=u.activity;if(u.state!=="running"||!a)return u.state;return a.state==="thinking"?"thinking":a.state==="waiting"?"waiting":"running";}
+function actLine(u){var a=u.activity;if(u.state!=="running"||!a||a.state==="done")return "";
+  var since=a.since?dur(Date.now()/1000-a.since):"";
+  if(a.state==="thinking")return '<div class="act"><span class="k think">Thinking</span><span class="v">Asking the model'+(since?", "+since:"")+'</span></div>';
+  var tgt=a.target?'<code>'+esc(a.target)+'</code>':esc(a.tool||"");
+  var verb=a.cls==="python"&&/pytest/.test(a.target||"")?"Running tests":(a.cls==="mcp"||a.cls==="other"?"Using "+esc(a.tool||""):CLS_WORD[a.cls]||esc(a.tool||""));
+  if(a.state==="waiting")return '<div class="act"><span class="k wait">Waiting '+since+'</span><span class="v">'+tgt+'</span></div>';
+  return '<div class="act"><span class="k tool">'+verb+'</span><span class="v">'+tgt+'</span></div>';}
+function callsHtml(key,u){var a=u.activity;if(!a||!a.calls||!a.calls.length)return "";
+  var split=(a.thinking_s!=null?"thinking "+dur(a.thinking_s):"")+(a.tools_s!=null?", tools "+dur(a.tools_s):"");
+  return '<details class="calls" data-key="'+esc(key)+'"'+(openFin[key]?" open":"")+'><summary>Last '+a.calls.length+' tool calls'+(split?" ("+esc(split)+")":"")+'</summary><ol>'+
+    a.calls.slice().reverse().map(function(c){return '<li class="'+(c.ok===false?"bad":"")+'"><span>'+esc(c.tool)+(c.target?": "+esc(c.target):"")+'</span><span class="tm">'+(c.abandoned?"no reply":dur(c.seconds))+'</span></li>';}).join("")+'</ol></details>';}
+function kTok(x){return x>=1024?Math.round(x/1024)+"k":String(x);}  /* binary k: 524288 tokens is the 512k window */
+function ctxHtml(a){if(!a||!a.ctx||!a.win)return "";var p=a.ctx/a.win,hot=p>=0.8;
+  return '<div class="ctx'+(hot?" hot":"")+'"><span>Context</span><div class="cbar"><i style="width:'+pct(p)+'%"></i></div><span>'+kTok(a.ctx)+' / '+kTok(a.win)+'</span></div>';}
+function tileHtml(n,u,rid){var secs=u.state==="running"&&u.started?(Date.now()/1000-u.started):u.seconds;
+  var t=u.state==="queued"?"waiting for a seat":(dur(secs)+(u.timeout?" / "+dur(u.timeout):""));
+  return '<div class="tile'+(u.state==="queued"?" quiet":"")+'">'+robot(famOf(u.role),actPose(u))+
+    '<b title="'+esc(n)+'">'+esc(n)+'</b><span class="role">'+esc(u.role)+'</span>'+
+    bar(u.progress||0,u.progress>0.85?"hot":"")+'<div class="meta"><span>'+esc(u.state==="queued"?"":STATE_WORD[u.state])+'</span><span>'+esc(t)+'</span></div>'+
+    actLine(u)+(u.state==='running'?ctxHtml(u.activity):'')+callsHtml((rid||"")+":c:"+n,u)+'</div>';}
+function rowHtml(n,u){var mk=u.state==="dropped"||u.state==="not run"?'<span class="mark bad">!</span>':'<span class="mark ok">✓</span>';
+  return '<li>'+mk+'<span class="nm">'+esc(n)+' <small>'+esc(u.role)+'</small></span><span class="tm">'+esc((STATE_WORD[u.state]||u.state)+(u.seconds!=null?", "+dur(u.seconds):""))+'</span>'+
+    (u.why?'<span class="why">'+esc(u.why)+'</span>':"")+'</li>';}
+function wave(w,r,us,o){
+  var p=w.p,list=w.list,act=list.filter(function(n){return us[n].state==="running"||us[n].state==="queued";});
+  var fin=list.filter(function(n){return act.indexOf(n)<0;});
+  var drop=fin.filter(function(n){return us[n].state==="dropped"||us[n].state==="not run";}).length;
+  var finished=p.end!=null&&!act.length;
+  var key=r.id+":"+w.i, open=(key in openFin)?openFin[key]:!finished;
+  var info=[];
+  if(finished){info.push(list.length+(list.length===1?" agent":" agents"));
+    if(p.wall!=null)info.push("took "+dur(p.wall));
+    if(p.usage!=null)info.push(pct(p.usage)+"% of seats busy");
+    if(drop)info.push(drop+" dropped");}
+  else if(!w.loose){info.push(fin.length+" of "+(p.n||list.length)+" done");if(act.length)info.push(act.length+" active");}
+  var st=finished?(drop?'<span class="mark bad">!</span>':'<span class="mark ok">✓</span>'):(w.loose?'<span class="mark gone">·</span>':'<span class="spin" aria-label="running"></span>');
+  var h='<details class="wave" data-key="'+esc(key)+'"'+(open?" open":"")+'><summary>'+st+'<span class="wl">'+esc(p.label||("Phase "+(w.i+1)))+'</span><small>'+esc(info.join(", "))+'</small></summary><div class="wbody">';
+  if(act.length) h+='<div class="tiles">'+act.map(function(n){return tileHtml(n,us[n],r.id);}).join("")+'</div>';
+  if(fin.length) h+='<ul class="frows">'+fin.map(function(n){return rowHtml(n,us[n]);}).join("")+'</ul>';
+  if(finished&&p.tail!=null&&p.usage!=null&&p.usage<1) h+='<p class="tail">Slowest agent ran '+dur(p.tail)+' after the last one started.</p>';
+  return h+'</div></details>';
+}
+function soloHtml(r,o){var h="",a=r.activity;
+  if(o==="running"&&r.kind==="until-done"){
+    // The loop's step says what the coder tile shows -- and the tile always renders,
+    // even with no activity line or a stale "done" one: the coder is never a blank
+    // square while the harness runs the checks or the audit reads the diff.
+    var step=r.step||{name:"between"};
+    var live=a&&a.state!=="done";
+    var rt=r.round?"Round "+esc(r.round.n):esc(r.title);
+    if(step.name==="testing"||step.name==="reviewing"){
+      var testing=step.name==="testing";
+      var since=step.since?dur(Date.now()/1000-step.since):"";
+      var val=testing?(step.total!=null?"Running "+cnt(step.total,"check"):"Running checks")
+                     :"Checking the diff against the task";
+      h+='<h2>Coder <small>right now</small></h2><div class="tile solo">'+
+        robot(testing?FAM.tester:FAM.checker,"running")+
+        '<b>'+rt+'</b><span class="role">coder</span>'+
+        '<div class="act"><span class="k test">'+(testing?"Testing":"Reviewing")+'</span>'+
+        '<span class="v">'+val+(since?", "+since:"")+'</span></div></div>';
+    } else if(step.name==="coding"&&live){
+      var pose=a.state==="thinking"?"thinking":a.state==="waiting"?"waiting":"running";
+      var fake={state:"running",activity:a};
+      h+='<h2>Coder <small>right now</small></h2><div class="tile solo">'+robot(FAM.builder,pose)+
+        '<b>'+rt+(r.round&&r.round.review?" (review)":"")+'</b><span class="role">coder</span>';
+      if(r.round&&r.round.timeout&&r.round.started){var rs=Date.now()/1000-r.round.started;
+        h+=bar(rs/r.round.timeout,rs/r.round.timeout>0.85?"hot":"")+'<div class="meta"><span>this round</span><span>'+dur(rs)+' / '+dur(r.round.timeout)+'</span></div>';}
+      h+=actLine(fake)+ctxHtml(a)+callsHtml(r.id+":solo",fake)+'</div>';
+    } else {
+      // between rounds: the last line closed the round and the next has not opened
+      h+='<h2>Coder <small>right now</small></h2><div class="tile solo">'+robot(FAM.builder,"thinking")+
+        '<b>'+rt+'</b><span class="role">coder</span>'+
+        '<div class="act"><span class="k">Between rounds</span></div></div>';
+    }
+  } else if(o==="running"&&a){
+    var pose=a.state==="thinking"?"thinking":a.state==="waiting"?"waiting":"running";
+    var fake={state:"running",activity:a};
+    h+='<h2>Agent <small>right now</small></h2><div class="tile solo">'+robot(FAM.checker,pose)+
+      '<b>'+esc(r.title)+'</b><span class="role">agent</span>'+
+      actLine(fake)+ctxHtml(a)+callsHtml(r.id+":solo",fake)+'</div>';
+  }
+  var c=r.checks;
+  if(o==="running"&&r.kind==="until-done"&&r.step&&r.step.name==="testing"){
+    // every row spins while its check runs, the last round's state muted behind it;
+    // before the first checks line there is only the checklist's size to count out
+    h+='<h2>Checklist, testing now</h2><ul class="checks">';
+    if(c&&c.items&&c.items.length){
+      h+=c.items.map(function(it){
+        var prev=it.status==="PASS"?"passed last round":it.status==="FAIL"?"failed last round":"unverified last round";
+        return '<li><span class="spin" aria-label="testing"></span><span>'+esc(it.text)+'</span>'+
+          '<span class="tm">testing <span class="x">('+prev+')</span></span></li>';}).join("");
+    } else if(r.step.total){
+      // the total is DATA (a hand-built events line can carry any JSON): bound the
+      // rows at fifty -- a bogus 1e11 must not hang the page counting -- and put the
+      // number into the HTML only through esc()
+      var n=Math.min(Math.max(0, Math.floor(+r.step.total || 0)), 50);
+      for(var i=1;i<=n;i++)
+        h+='<li><span class="spin" aria-label="testing"></span><span>Check '+i+' of '+esc(n)+'</span><span class="tm">testing</span></li>';
+    }
+    h+='</ul>';
+  } else if(c&&c.items&&c.items.length){
+    h+='<h2>Checklist <small>'+c.passed+' of '+c.total+' pass'+(c.round?", after round "+esc(c.round):"")+'</small></h2><ul class="checks">';
+    h+=c.items.map(function(it){var st=it.status==="PASS"?"ok":it.status==="FAIL"?"bad":"gone";
+      var mk=st==="ok"?"✓":st==="bad"?"✕":"–";
+      return '<li><span class="mark '+st+'">'+mk+'</span><span>'+esc(it.text)+'</span><span class="tm">'+esc(it.status==="PASS"?"passes":it.status==="FAIL"?"fails":"unverified")+'</span></li>';}).join("");
+    h+='</ul>';}
+  return h;}
+function evText(e){
+  var u=esc(e.unit||e.item||"");
+  switch(e.kind){
+    case "run_start":return "Run started";
+    case "run_end":return "Run ended <span class=x>exit "+esc(e.exit)+"</span>";
+    case "phase_start":return "Phase <b>"+esc(e.label)+"</b> started with "+cnt(e.n,"agent")+" on "+esc(e.seats)+" seats";
+    case "unit_start":return "<b>"+u+"</b> started";
+    case "unit_done":return "<b>"+u+"</b> "+(e.cached?"reused a cached answer":e.ok?"finished in "+dur(e.seconds):"failed")+(e.why?" <span class=x>"+esc(e.why)+"</span>":"");
+    case "unit_dropped":return "<b>"+u+"</b> dropped <span class=x>"+esc(e.why)+"</span>";
+    case "attention":return "<b>Needs you:</b> "+esc(e.reason)+(e.detail?" <span class=x>"+esc(e.detail)+"</span>":"");
+    case "round_start":return "Round <b>"+esc(e.round)+"</b> started"+(e.review?" (review round)":"");
+    case "checks_start":return "Testing round "+esc(e.round)+": running "+cnt(e.total,"check");
+    case "checks":return "Checks after round "+esc(e.round)+": "+esc(e.passed)+" of "+esc(e.total)+" pass";
+    case "round_end":return "Round "+esc(e.round)+" ended";
+    case "audit_start":return "Reviewing the diff against the task";
+    case "audit_end":return "Review: "+({clean:"clean",deviations:"unlogged deviations found",
+      unusable:"reply unusable",error:"failed"}[e.result]||esc(e.result));
+    case "claude_call":return "Claude check on "+u+" <span class=x>"+esc(e.state)+"</span>";
+    default:return esc(e.kind)+(u?" "+u:"");
+  }
+}
+
+var openFin={};
+document.addEventListener("toggle",function(e){var d=e.target;if(d.classList&&(d.classList.contains("wave")||d.classList.contains("calls")))openFin[d.getAttribute("data-key")]=d.open;},true);
+var HIDE_KEY="qwen-watch-hidden";
+function hidden(){try{return JSON.parse(localStorage.getItem(HIDE_KEY)||"{}")||{};}catch(e){return {};}}
+function hide(ids){var h=hidden(),now=Date.now();ids.forEach(function(i){h[i]=now;});
+  for(var k in h){if(now-h[k]>7*864e5)delete h[k];}
+  try{localStorage.setItem(HIDE_KEY,JSON.stringify(h));}catch(e){}render();}
+document.addEventListener("click",function(e){var b=e.target.closest("[data-hide]");if(!b)return;
+  e.preventDefault();e.stopPropagation();hide(b.getAttribute("data-hide").split(","));});
+var app=document.getElementById("app"),lastOk=0;
+function topbar(n){var stale=lastOk&&Date.now()-lastOk>10000;
+  return '<div class="top"><span class="brand">qwen watch</span><span class="pulse"><span class="dot '+(stale?"stale":n?"live":"")+'"></span>'+
+   (stale?"Viewer not answering":n?"Live":"Idle")+'</span></div>';}
+function render(){
+  var id=location.hash.slice(1);
+  var url=id?"/api/run/"+encodeURIComponent(id):"/api/runs";
+  fetch(url,{cache:"no-store"}).then(function(res){
+    if(res.status===404) return {missing:true};
+    return res.json();
+  }).then(function(d){
+    lastOk=Date.now();
+    if(id){ app.innerHTML=topbar(d&&!d.missing&&outcome(d)==="running")+(d.missing?'<a class="back" href="#">← All runs</a><p class="note">This run is no longer on the page. Finished runs leave after a while.</p>':detail(d)); }
+    else { var live=d.filter(function(r){return outcome(r)==="running";}).length; app.innerHTML=topbar(live)+overview(d); }
+  }).catch(function(){ if(!app.innerHTML) app.innerHTML=topbar(0)+'<p class="note">Can’t reach the viewer. It may have been stopped; the next local agent run starts it again.</p>'; else { var t=app.querySelector(".top"); if(t) t.outerHTML=topbar(0);} });
+}
+window.addEventListener("hashchange",function(){window.scrollTo(0,0);render();});
+render(); setInterval(render,2500);
+</script>
+</body>
+</html>

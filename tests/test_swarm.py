@@ -998,6 +998,15 @@ def test_units_emit_done_and_dropped_events(tmp_path, fake):
     s.run_phase([unit(tmp_path, "a"), unit(tmp_path, "b", "broken")])
     s.run_phase([unit(tmp_path, "a")])                 # a cache hit
     ev = read_events(tmp_path / "run")
+    # a phase announces itself before its first unit spawns (an unnamed phase numbers
+    # itself over the Swarm), and a unit says it started only when it really spawned -- so
+    # the cached unit of the second phase has a unit_done and no unit_start of its own
+    assert [(e["label"], e["n"], [u["name"] for u in e["units"]])
+            for e in ev if e["kind"] == "phase_start"] == [
+        ("phase 1", 2, ["a", "b"]), ("phase 2", 1, ["a"])]
+    assert [e["unit"] for e in ev if e["kind"] == "unit_start"] == ["a", "b"]
+    assert [e["kind"] for e in ev][:2] == ["phase_start", "unit_start"]
+    ev = [e for e in ev if e["kind"] in ("unit_done", "unit_dropped")]
     assert [(e["kind"], e["unit"], e["role"]) for e in ev] == [
         ("unit_done", "a", "worker"), ("unit_dropped", "b", "broken"),
         ("unit_done", "b", "broken"), ("unit_done", "a", "worker")]
@@ -1012,15 +1021,21 @@ def test_a_crashing_parse_emits_its_drop(tmp_path, fake):
     s = swarm(tmp_path, seats=1)
     s.run_phase([unit(tmp_path, "a", parse=_crash_parse)])
     ev = read_events(tmp_path / "run")
-    assert [(e["kind"], e["unit"]) for e in ev] == [("unit_done", "a"), ("unit_dropped", "a")]
-    assert ev[1]["why"].startswith("internal error: KeyError")
+    assert [e["kind"] for e in ev] == ["phase_start", "unit_start", "unit_done", "unit_dropped"]
+    assert [(e["kind"], e["unit"]) for e in ev[1:]] == [
+        ("unit_start", "a"), ("unit_done", "a"), ("unit_dropped", "a")]
+    assert ev[3]["why"].startswith("internal error: KeyError")
 
 
 def test_a_unit_the_deadline_stopped_emits_nothing(tmp_path, fake):
     s = swarm(tmp_path, deadline=1.0)                  # long past
     (res,) = s.run_phase([unit(tmp_path, "a")])
     assert res["deadline"] is True
-    assert not (tmp_path / "run" / "events.jsonl").exists()
+    # The phase still announces itself -- that is what lets the page show its units as
+    # queued rather than missing -- but a unit that never spawned says nothing of its own.
+    ev = read_events(tmp_path / "run")
+    assert [e["kind"] for e in ev] == ["phase_start"]
+    assert [u["name"] for u in ev[0]["units"]] == ["a"]
 
 
 # ---------------------------------------------------------------- per-unit repair text

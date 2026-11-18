@@ -19,6 +19,11 @@ BASH = os.environ.get("TEST_BASH") or shutil.which("bash")
 
 def run(tmp_path, args, wrap=WRAP, **env):
     e = {k: v for k, v in os.environ.items() if not k.startswith("QWEN_")}
+    # the four names a watched run passes down never ride into the launcher: dropped
+    # explicitly, not only by the QWEN_ prefix filter above
+    for name in ("QWEN_WATCH_ACTIVITY", "QWEN_WATCH_PARENT",
+                 "QWEN_WATCH_CHILD", "QWEN_WATCH_CTX_WINDOW"):
+        e.pop(name, None)
     e.update(dict(dict(QWEN_CONFIG=str(tmp_path / "noconfig"), HOME=str(tmp_path),
                        QWEN_NO_NOTICE="1"), **env))
     return subprocess.run([BASH, str(wrap), *args], capture_output=True, text=True,
@@ -174,7 +179,14 @@ def test_legacy_check_still_runs_the_model_and_search_preflight(tmp_path):
 def test_unknown_compat_value_is_a_usage_error(tmp_path):
     # (d) a value the runner does not know is a usage error, not silently plain qwen-swarm
     e = {k: v for k, v in os.environ.items() if not k.startswith("QWEN_")}
-    e.update(QWEN_CONFIG=str(tmp_path / "noconfig"), HOME=str(tmp_path), QWEN_NO_NOTICE="1")
+    for name in ("QWEN_WATCH_ACTIVITY", "QWEN_WATCH_PARENT",
+                 "QWEN_WATCH_CHILD", "QWEN_WATCH_CTX_WINDOW"):
+        e.pop(name, None)                          # never a child of an outer watched run
+    # this env bypasses the wrapped run(), so the watch switches go in by hand: the
+    # runner must never register into (or pin XDG_CACHE_HOME away from) the real dir
+    e.update(QWEN_CONFIG=str(tmp_path / "noconfig"), HOME=str(tmp_path), QWEN_NO_NOTICE="1",
+             XDG_CACHE_HOME=str(tmp_path / "cache"),
+             QWEN_WATCH="0", QWEN_WATCH_NOSERVE="1")
     r = subprocess.run([sys.executable, str(RUNNER), "--compat", "bogus", "--agent",
                         sys.executable, "--agent", str(FAKE), "what is x?"],
                        capture_output=True, text=True, encoding="utf-8", cwd=str(tmp_path),

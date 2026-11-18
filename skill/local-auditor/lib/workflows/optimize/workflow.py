@@ -215,7 +215,7 @@ def _bench_phase(wf, b, bl):
         goal=wf.goal, fence=FENCE, bench=json.dumps(b, indent=1),
         checks="\n".join("- %s %s: %s" % (r["id"], r["ok"], r["detail"]) for r in results),
         walls=walls, pm=bl["pm"]["profile"][-3500:], pg=bl["pg"]["profile"][-3500:]),
-        parse_check(texts))
+        parse_check(texts), label="optimize: bench check")
     if chk is None:
         chk = {"verdict": "ok", "findings": [], "dropped": [], "suggested": None, "failed": True}
     bad = [r for r in results if r["ok"] is False]
@@ -536,7 +536,8 @@ def _ideas(wf, b, bl, st):
     got = wf.agent("profile", "profiler", PROFILE_P.format(
         goal=wf.goal, bench=_bench_text(b), passed=_count(bl["m1"]), base=bl["base"], noise=bl["noise"],
         fence=FENCE, profile=prof[-3800:], history=_history(st["cands"]), n=wf.knob("ideas")),
-        parse_ideas(wf.knob("ideas"), seen, wf.target, b["focus"], [prof])) or \
+        parse_ideas(wf.knob("ideas"), seen, wf.target, b["focus"], [prof]),
+        label="round %d: profile" % wf.round) or \
         {"ideas": [], "dropped": [], "outside": None}
     for i in got["ideas"]:
         i["id"] = "I%d" % (len(st["ideas"]) + 1)
@@ -551,7 +552,7 @@ def _ideas(wf, b, bl, st):
 def _implement_and_measure(wf, b, bl, st, ideas, bar):
     res = wf.fan_out("implement", "implementer", ideas, lambda batch: IMPL_P.format(
         goal=wf.goal, bench=_bench_text(b), passed=_count(bl["m1"]), base=bl["base"], fence=FENCE,
-        **batch[0]), parse_impl, max_items=1)
+        **batch[0]), parse_impl, max_items=1, label="round %d: implement" % wf.round)
     by_id = {i["id"]: i for i in ideas}
     new = []
     for row in res.rows:
@@ -592,7 +593,7 @@ def _review(wf, b, st, new):
     v = wf.vote("review", "reviewer", fast, wf.knob("voters"), lambda batch: REVIEW_P.format(
         goal=wf.goal, keep=b["keep"], measure=b["measure"], fence=FENCE,
         items="\n".join(_review_item(c, st["patches"][c["id"]]) for c, _ in batch)),
-        parse_review(st["patches"]))
+        parse_review(st["patches"]), label="round %d: review" % wf.round)
     for c in fast:
         c["verdict"] = v[c["id"]]
         c["approved"] = v[c["id"]] == "supported"
@@ -715,7 +716,7 @@ def _finish(wf, b, bl, st, target, reason, last):
         for c in st["cands"]] + [
         "Slow outside focus (not implemented): %s -- %s" % (n_["location"], n_["why"]) for n_ in st["notes"]])
     body = wf.agent("write", "writer", WRITE_P.format(goal=wf.goal, facts=facts), parse_report,
-                    repair=WRITE_REPAIR)
+                    repair=WRITE_REPAIR, label="optimize: report")
     table = ["| patch | idea | seconds (runs) | passed | review | stacked | why not |",
              "|---|---|---|---|---|---|---|"]
     for c in st["cands"]:

@@ -78,4 +78,15 @@ explicitly asked you to accept that prompt: the permission decision is theirs. `
   without it — but a swarm `sandbox` agent has a shell, and that shell is the user's own,
   with their network.
 
+Every run — a `qwen-agent` session, a `qwen-swarm` or `qwen-deep-research` run, an until-done
+loop — prints `watch: <url>` on stderr: the run's live page. The page shows names, roles,
+states and timings, the goal or title, the coder report's one-line stop reason and the events'
+why/attention text, and per agent the tool it is on right now with a trimmed INPUT (a path, a
+pattern, or the start of its command) — never prompts, transcripts, model reasoning or what a
+tool returned. Pass that link to the user when the run starts. The viewer keeps running between runs; run `python lib/watch.py stop` only
+when the user asks. After you report a finished run's result to the user, you may run
+`python lib/watch.py dismiss <id>` to clear its card. `QWEN_WATCH_HOST` (e.g. your
+Tailscale address) and `QWEN_WATCH_PORT` move the page off its local-only default so another
+machine can view it; `QWEN_WATCH=0` switches the page off.
+
 If a qwen-agent or qwen-swarm run prints the "Claude settings changed" notice, relay it to the user verbatim.

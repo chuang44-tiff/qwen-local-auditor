@@ -70,6 +70,16 @@ qwen-agent -r auditor -C <dir> -f brief.md -o out.md
   four switches at once with their refusals
   (`reference/qwen-agent.md`, "Depth: the default").
 
+Every `qwen-agent` or `qwen-swarm` run prints one more line, `watch: <url>`: the run's live
+page — phases with seat usage, agents with state and timings, the last events. The page shows
+names, roles, states and timings, the goal or title, the coder report's one-line stop reason
+and the events' why/attention text, and per agent the tool it is on right now with a trimmed
+INPUT (a path, a pattern, or the start of its command) — never prompts, transcripts, model
+reasoning or what a tool returned. Pass that link to the user when the run starts. The
+viewer keeps running between runs; run `python lib/watch.py stop` only when the user asks.
+`QWEN_WATCH_HOST` (e.g. your Tailscale address) and `QWEN_WATCH_PORT` move the page off its
+local-only default so another machine can view it; `QWEN_WATCH=0` switches the page off.
+
 ## Running tests and reproduction tests
 
 ```bash

@@ -79,10 +79,29 @@ def run(wf):
     wf.fan_out("work", "worker", items, lambda b: "\\n".join("- %s:" % i["id"] for i in b),
                lambda text, b: [{"id": i["id"]} for i in b])
     ev = [json.loads(x) for x in (wf.run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-    got = sorted((e["kind"], e["unit"], e["role"], e["ok"]) for e in ev)
+    # the results a unit reports (lib/swarm_engine/check.py's FakeSwarm)
+    got = sorted((e["kind"], e["unit"], e["role"], e["ok"])
+                 for e in ev if e["kind"] in ("unit_done", "unit_dropped"))
     want = [("unit_done", "work-%d" % k, "worker", True) for k in (1, 2, 3)]
     if got != want:
         raise RuntimeError("events: %r" % (got,))
+    # the dry run announces its phase the way the engine does -- an unnamed one is
+    # "phase 1", and the line comes before the units it covers ...
+    kinds = [e["kind"] for e in ev]
+    engine = [k for k in kinds if k in ("phase_start", "unit_start", "unit_done",
+                                        "unit_dropped")]
+    if engine[0] != "phase_start" or engine.count("unit_done") != 3:
+        raise RuntimeError("engine kinds: %r" % (engine,))
+    # ... with the same fields, ...
+    p = [e for e in ev if e["kind"] == "phase_start"][0]
+    names = ["work-%d" % k for k in (1, 2, 3)]
+    if (p["label"], p["n"], p["seats"], [u["unit"] for u in p["units"]],
+            [u["name"] for u in p["units"]], [u["role"] for u in p["units"]]) != (
+            "phase 1", 3, 1, names, names, ["worker"] * 3):
+        raise RuntimeError("phase_start: %r" % (p,))
+    # ... and no unit_start at all: a dry run spawns no agent, so that one line is owed
+    if "unit_start" in kinds:
+        raise RuntimeError("a dry run started nothing, but announced a unit_start")
     wf.report("x\\n")
 '''
     assert check(make_workflow(tmp_path, script=script)) == 0, capsys.readouterr().err

@@ -728,12 +728,20 @@ def test_a_run_emits_start_units_and_end_and_names_its_folder_first(tmp_path, fa
     err = capsys.readouterr().err
     assert err.splitlines()[0] == "qwen-swarm: run folder: %s" % out
     ev = events_of(out)
-    assert [e["kind"] for e in ev] == ["run_start"] + ["unit_done"] * 3 + ["run_end"]
+    # the record of the run: one start, one result per unit, one end. The phase and its
+    # units announce themselves as well (phase_start before the first spawn, unit_start on
+    # each spawn), which is what the page shows while the units are still running.
+    assert [e["kind"] for e in ev if e["kind"] in ("run_start", "unit_done", "run_end")] == \
+        ["run_start"] + ["unit_done"] * 3 + ["run_end"]
+    assert [e["kind"] for e in ev][:2] == ["run_start", "phase_start"]
+    assert sorted(e["unit"] for e in ev if e["kind"] == "unit_start") == \
+        ["work-%d" % k for k in (1, 2, 3)]                # one per unit, none twice
     start = ev[0]
     assert {k: start[k] for k in ("workflow", "goal", "run", "resumed", "depth", "knobs")} == {
         "workflow": "echo", "goal": "say hi", "run": str(out), "resumed": False,
         "depth": "quick", "knobs": {"items": 3}}
-    assert sorted(e["unit"] for e in ev[1:4]) == ["work-1", "work-2", "work-3"]
+    assert sorted(e["unit"] for e in ev if e["kind"] == "unit_done") == \
+        ["work-1", "work-2", "work-3"]
     assert ev[-1]["exit"] == 0 and ev[-1]["report"] == str(out / "report.md")
     assert all(isinstance(e["t"], float) for e in ev)
     runner._MODULES.clear()
@@ -801,7 +809,8 @@ def test_wf_event_writes_workflow_kinds_and_refuses_engine_kinds(tmp_path, fake)
     script = '''
 def run(wf):
     wf.event("attention", item="S1", reason="confirmed", detail="the canvas did not change")
-    for kind in ("run_start", "unit_done", "unit_dropped", "claude_call", "run_end", ""):
+    for kind in ("run_start", "unit_done", "unit_dropped", "claude_call", "run_end",
+                 "phase_start", "unit_start", ""):
         try:
             wf.event(kind)
         except ValueError:

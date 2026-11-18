@@ -133,6 +133,15 @@ def _base_env(tmp_path, path=None):
             "QC_SAY_GAP")
     env = {k: v for k, v in os.environ.items()
            if k not in skip and not k.startswith(("QWEN_", "CLAUDE_", "ANTHROPIC_"))}
+    for name in ("QWEN_WATCH_ACTIVITY", "QWEN_WATCH_PARENT",
+                 "QWEN_WATCH_CHILD", "QWEN_WATCH_CTX_WINDOW"):
+        env.pop(name, None)                        # never a child of an outer watched run
+    # the strip drops the watch switches with every other QWEN_*: qwen-cc runs
+    # qwen-agent from PATH (the tmp bin first, but PATH still reaches the real one),
+    # and a launcher whose env has no QWEN_WATCH registers into the developer's real
+    # watch dir -- so the off switches go back in by hand
+    env["QWEN_WATCH"] = "0"
+    env["QWEN_WATCH_NOSERVE"] = "1"
     env["TMUX_TMPDIR"] = _sock_root(tmp_path)
     env["PATH"] = path if path is not None else str(tmp_path / "bin") + os.pathsep + os.environ["PATH"]
     env["QC_SAY_GAP"] = "0.02"

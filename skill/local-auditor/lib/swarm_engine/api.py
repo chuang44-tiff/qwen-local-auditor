@@ -360,7 +360,7 @@ class Workflow:
             u.setup = lambda: staging.copy(src, dest)
 
     def agent(self, name, role, prompt, parse, *, cache=True, always=False, item="goal",
-              stage=None, repair=None):
+              stage=None, repair=None, label=None):
         """One agent; returns parse(text) (parse(text, None, patch) for a sandbox role),
         or None when the unit failed or the deadline kept it from starting -- then
         wf.last_unit says which ("ok", "why", "deadline"). always=True runs it past the
@@ -368,7 +368,8 @@ class Workflow:
         unit's agents/<unit>/fixtures/ when it starts; `prompt` may then be a callable,
         prompt(staged) -> str, handed wf.stage_dir(unit) as a native absolute path.
         repair=TEXT replaces the swarm's REPAIR text for this unit's repair round
-        ("{why}" in it is replaced by the parse's reason), as in fan_out."""
+        ("{why}" in it is replaced by the parse's reason), as in fan_out.
+        label=NAME says what this phase does, for the watch page (see _phase)."""
         uname = self._unit_name(name, 1)
         fence = self._role(role).fence
         wrapped = parse if fence != "sandbox" else (lambda text, batch, patch: parse(text, batch, patch))
@@ -376,7 +377,7 @@ class Workflow:
             prompt = prompt(str(self.stage_dir(uname)))
         u = self._unit(uname, role, prompt, self._timeout(role, 2), wrapped, None, cache, always,
                        stage, repair=repair)
-        (r,) = self._phase([u], role)
+        (r,) = self._phase([u], role, label=label)
         self.last_unit = r
         if r["ok"]:
             return r["data"]
@@ -386,7 +387,7 @@ class Workflow:
         return None
 
     def fan_out(self, name, role, items, prompt, parse, *, item_id=None, max_items=None,
-                stage=None, repair=None, unit_ids=False):
+                stage=None, repair=None, unit_ids=False, label=None):
         """Deal `items` over groups of at most --max-agents agents x --max-items items
         (max_items= lowers the per-agent cap for this call) and run EVERY unit of the call
         in one phase: --max-agents and --max-items shape the deal, seats alone limit how
@@ -407,7 +408,8 @@ class Workflow:
         Past the run's deadline a cached unit is still served and its rows count, as the
         first group's always were; only an uncached unit is kept from starting (as the
         swarm reports it: not a drop) -- its items are not_run, each with its own
-        run.log deadline line."""
+        run.log deadline line.
+        label=NAME says what this phase does, for the watch page (see _phase)."""
         ma, mi = self.cfg["max_agents"], self.cfg["max_items"]
         if max_items is not None:
             mi = max(1, min(mi, max_items))
@@ -445,7 +447,7 @@ class Workflow:
                 batches.append(batch)
         rows, units_res, dropped, not_run = [], [], [], []
         if units:
-            units_res = self._phase(units, role)
+            units_res = self._phase(units, role, label=label)
             for r, batch in zip(units_res, batches):
                 if r["ok"]:
                     rows += r["data"]
@@ -464,16 +466,17 @@ class Workflow:
             return lambda text, _batch, patch: parse(text, batch, patch)
         return lambda text: parse(text, batch)
 
-    def vote(self, name, role, claims, voters, prompt, parse, *, claim_id=None):
+    def vote(self, name, role, claims, voters, prompt, parse, *, claim_id=None, label=None):
         """Claim-major vote slots (claim, k) fanned out; parse(text, batch) returns rows
         with "claim" (an id) and "verdict" (supported, refuted or unclear). A row naming a
         claim this vote does not know, or carrying no string "verdict", is ignored. Returns
-        Votes {claim_id: majority-of-voters verdict} with .cast, .requested, .result."""
+        Votes {claim_id: majority-of-voters verdict} with .cast, .requested, .result.
+        label=NAME says what this phase does, for the watch page (see _phase)."""
         cid = claim_id or (lambda c: c["id"])
         if voters > self.cfg["max_agents"]:
             raise ValueError("%d voters need --max-agents of at least %d" % (voters, voters))
         res = self.fan_out(name, role, steps.vote_slots(claims, voters), prompt, parse,
-                           item_id=lambda s: cid(s[0]))
+                           item_id=lambda s: cid(s[0]), label=label)
         cast = {cid(c): [] for c in claims}
         for v in res.rows:
             # a row naming a claim this vote never asked about, one with no "verdict" at
@@ -503,8 +506,15 @@ class Workflow:
                                 stage=stage, read_dirs=read_dirs, item_id=item_id,
                                 timeout=timeout, max_turns=max_turns)
 
-    def _phase(self, units, role):
-        return self.sw.run_phase(units, seats=self._seats(role))
+    def _phase(self, units, role, label=None):
+        """One phase of units through the swarm. `label` is the workflow's own words for
+        what the phase does ("round 2: hypothesize"), which the watch page shows; a phase
+        nobody labelled is numbered "phase N" by the swarm. It is handed on only when a
+        workflow gave one, so a stand-in swarm written against the plain
+        (units, seats) call still fits."""
+        if label is None:
+            return self.sw.run_phase(units, seats=self._seats(role))
+        return self.sw.run_phase(units, seats=self._seats(role), label=label)
 
     # ------------------------------------------------------------ artifacts
     def _dir(self):

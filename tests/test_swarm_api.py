@@ -719,8 +719,9 @@ def test_fan_out_of_no_items_makes_no_calls(tmp_path, fake, monkeypatch):
     phases = []
     real = swarm.Swarm.run_phase
     monkeypatch.setattr(swarm.Swarm, "run_phase",
-                        lambda self, units, seats=None: (phases.append(len(units)),
-                                                         real(self, units, seats=seats))[1])
+                        lambda self, units, seats=None, label=None: (
+                            phases.append(len(units)),
+                            real(self, units, seats=seats, label=label))[1])
     wf = workflow(tmp_path)
     res = wf.fan_out("work", "worker", [], prompt, echo_parse)
     assert phases == []                                      # nothing to run: no phase at all
@@ -746,9 +747,9 @@ def test_fan_out_runs_one_phase(tmp_path, fake, monkeypatch):
     phases = []
     real = swarm.Swarm.run_phase
 
-    def counting(self, units, seats=None):
+    def counting(self, units, seats=None, label=None):      # the real signature it stands in for
         phases.append([u.name for u in units])
-        return real(self, units, seats=seats)
+        return real(self, units, seats=seats, label=label)
 
     monkeypatch.setattr(swarm.Swarm, "run_phase", counting)
     wf = workflow(tmp_path, max_agents=4, max_items=2)
@@ -760,6 +761,40 @@ def test_fan_out_runs_one_phase(tmp_path, fake, monkeypatch):
     assert res.ok and len(res.units) == 12
     assert sorted(unit_names(fake)) == phases[0]
     assert sorted(r["id"] for r in res.rows) == sorted("I%d" % i for i in range(1, 21))
+
+
+def test_a_workflows_label_reaches_the_phase(tmp_path, fake, monkeypatch):
+    """The three public calls that make a phase -- agent, fan_out and, through fan_out,
+    vote -- hand the workflow's `label=` straight to run_phase, which puts it on the
+    phase_start the watch page shows. A call that names nothing sends no keyword at all
+    (api._phase leaves it out), which is both how a stand-in swarm written before labels
+    keeps working and how the engine comes to number the phase "phase N" itself."""
+    seen = []
+    real = swarm.Swarm.run_phase
+
+    def recording(self, units, seats=None, label="NOT GIVEN"):
+        seen.append(label)
+        return real(self, units, seats=seats, label=None if label == "NOT GIVEN" else label)
+
+    monkeypatch.setattr(swarm.Swarm, "run_phase", recording)
+    wf = workflow(tmp_path)
+    wf.agent("plan", "worker", "- P:", steps.extract_json, label="round 1: plan")
+    wf.fan_out("work", "worker", items(2), prompt, echo_parse, label="round 1: test")
+
+    def vprompt(batch):
+        return "\n".join("- %s:" % c["id"] for c, _ in batch)
+
+    wf.vote("verify", "voter", [{"id": "C1"}, {"id": "C2"}], 2, vprompt,
+            lambda text, batch: steps.extract_json(text), label="round 1: vote")
+    assert seen == ["round 1: plan", "round 1: test", "round 1: vote"]
+    wf.agent("alone", "worker", "- A:", steps.extract_json)             # nobody named it
+    assert seen[3] == "NOT GIVEN", seen                                  # no keyword was sent
+    # and the labels are what the page reads: the same words in events.jsonl, with the
+    # engine numbering the phase nobody named -- over all four phases, labels included
+    evs = [json.loads(x) for x in (tmp_path / "run" / "events.jsonl")
+           .read_text(encoding="utf-8").splitlines()]
+    assert [e["label"] for e in evs if e["kind"] == "phase_start"] == [
+        "round 1: plan", "round 1: test", "round 1: vote", "phase 4"]
 
 
 def test_slow_unit_does_not_hold_back_later_units(tmp_path, fake):

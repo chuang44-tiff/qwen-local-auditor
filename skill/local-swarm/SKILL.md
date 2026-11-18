@@ -5,10 +5,9 @@ description: Run a multi-agent job on the local model with `qwen-swarm` - a buil
 
 # Local swarm
 
-A workflow is a folder: `workflow.json` (the manifest the user approves: roles and their
-fences, knobs, depth presets), `workflow.py` (`run(wf)`: the calls to make) and one role
-file per role. The engine owns everything else: dealing, seats, retries, caching, resume,
-deadlines, sandboxes, totals and exit codes.
+A workflow is a folder: `workflow.json` (the manifest the user approves: roles and their fences, knobs, depth
+presets), `workflow.py` (`run(wf)`: the calls to make) and one role file per role. The engine owns everything
+else: dealing, seats, retries, caching, resume, deadlines, sandboxes, totals and exit codes.
 
 ## 1. Pick a built-in when one fits
 
@@ -31,9 +30,8 @@ probers work in throwaway copies, every candidate patch is checked in a fresh co
 tests), a patch that edits test files cannot win, and reviewers vote on root cause vs symptom
 suppression. Patches land in `RUN/patches/<n>.diff`; the user applies one with `git apply`.
 
-For a UI suite the scenario file is the `scenarios` knob (the same `# Suite:` markdown
-`qwen-agent --scenarios` takes; its format is in `reference/qwen-agent.md`), and the goal only
-names the run:
+For a UI suite the scenario file is the `scenarios` knob (the same `# Suite:` markdown `qwen-agent
+--scenarios` takes; its format is in `reference/qwen-agent.md`), and the goal only names the run:
 
     qwen-swarm ui-test "RUN NAME" --set scenarios=SUITE.md --out RUN_DIR [--set base=URL] \
       [--set confirm=claude|local|none]
@@ -82,9 +80,8 @@ Rules that keep a workflow resumable:
   shallow: the review round is a second call per unit. A fence `none` role has no tools,
   so it never gets the review round; `--deep` gives it only the subagent nudge.
 
-Before launching (step 3), run `qwen-swarm --check ./my-workflow` until it passes: it
-validates the manifest and dry-runs `run(wf)` twice against fake agents (a `check.py` beside
-the workflow can supply realistic fake answers).
+Before launching (step 3), run `qwen-swarm --check ./my-workflow` until it passes: it validates the manifest
+and dry-runs `run(wf)` twice against fake agents (a `check.py` beside the workflow can supply realistic fake answers).
 
 ## 3. Show the manifest, sign off Claude, then run in the background
 
@@ -97,12 +94,18 @@ as shown. No: offer per-role choices, all off included, and add
 ui-test confirm is `--set confirm=`). Swarms only: local-coder, local-auditor, local-agent and
 sweeps need no sign-off. If a qwen-agent or qwen-swarm run prints the "Claude settings changed" notice, relay it to the user verbatim.
 
-Show the roles with their fences and the knobs of the chosen depth (the run prints this
-summary to stderr first, too). Start it with run_in_background; with `--target`, `--out`
-must name a folder outside it; overnight runs need `--hours` (the `overnight` presets
-set 8) and `--rounds until` without them is a usage error:
+Show the roles with their fences and the knobs of the chosen depth (the run prints this summary to stderr
+first, too). Start it with run_in_background; with `--target`, `--out` must name a folder outside it; overnight
+runs need `--hours` (the `overnight` presets set 8) and `--rounds until` without them is a usage error:
 
     qwen-swarm WORKFLOW "GOAL" [--depth NAME] [--set KNOB=VALUE] [--target DIR] [--out DIR] [--hours H]
+
+The run also prints `watch: <url>` on stderr, the line after the run folder: its live page — seat usage per
+phase, and per agent its name, role, state and timings, the last events, the goal or title and event
+why/attention text, and the tool it is on right now with a trimmed INPUT (a path, a pattern, or the start
+of its command) — never prompts, transcripts, model reasoning or what a tool returned. Pass that link to the
+user when the run starts. The viewer keeps running between runs; run `python lib/watch.py stop` only when
+the user asks. `QWEN_WATCH_HOST` and `QWEN_WATCH_PORT` move the page off its local-only default; `QWEN_WATCH=0` switches it off.
 
 Then watch the run's events, not the process:
 
@@ -125,10 +128,9 @@ Then watch the run's events, not the process:
          sleep 5
        done
 
-   Each event arrives as `<line number>: <json>`; only whole lines are read, and the command
-   exits by itself after `run_end`. A monitor expires after at most 30 minutes: re-arm the
-   same command with N = the last line number you were shown (0 if none) until `run_end`
-   has arrived.
+   Each event arrives as `<line number>: <json>`; only whole lines are read, and the command exits
+   by itself after `run_end`. A monitor expires after at most 30 minutes: re-arm the same command
+   with N = the last line number you were shown (0 if none) until `run_end` has arrived.
 3. When the background task itself exits, the run is over even without `run_end` (a killed
    runner never writes it): stop the monitor with TaskStop and go to step 4.
 4. Handle each `attention` event as it arrives (section 4, "Report back"): its `reason` is
@@ -174,16 +176,14 @@ words from the page under test fail only that row. Settle those rows yourself as
 | 8 | internal error, including an exception in workflow.py: `RUN/error.log` has the traceback |
 | 130 | interrupted |
 
-A dropped agent keeps exit 4 whatever verdict its row gets. After an exit 8 in your own
-workflow, fix `workflow.py` and continue with `qwen-swarm --resume RUN`: finished agents are
-reused from the cache. Exit 130 or a crash: `qwen-swarm --resume RUN` too. On resume only
-`--seats`, `--web-seats`, `--timeout`, `--retries`, `--rounds`, `--hours`, `--effort`,
-`--role-effort`, `--deep`, `--shallow` and `--keep-sandboxes` may change.
+A dropped agent keeps exit 4 whatever verdict its row gets. After an exit 8 in your own workflow, fix
+`workflow.py` and continue with `qwen-swarm --resume RUN`: finished agents are reused from the cache. Exit
+130 or a crash: `qwen-swarm --resume RUN` too. On resume only `--seats`, `--web-seats`, `--timeout`,
+`--retries`, `--rounds`, `--hours`, `--effort`, `--role-effort`, `--deep`, `--shallow` and `--keep-sandboxes` may change.
 
 ## Optimize: write and check the bench before you hand over
 
-An optimize run may go all night; check its bench first, so it cannot stop at round 1
-after everyone has gone to bed.
+An optimize run may go all night; check its bench first, so it cannot stop at round 1 after everyone has gone to bed.
 
 1. Pick `measure`: the narrowest command that exercises the slow part; run it, read where the time goes.
 2. Pick `guard`: the command that must still pass (usually the whole suite).

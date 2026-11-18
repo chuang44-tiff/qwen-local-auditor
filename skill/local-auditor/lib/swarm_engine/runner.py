@@ -27,7 +27,7 @@ import time
 import traceback
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from lib import search_mcp, swarm  # noqa: E402
+from lib import search_mcp, swarm, watch  # noqa: E402
 from lib.swarm_engine import api, events, fences, manifest, runlock, steps  # noqa: E402
 
 EXIT_OK, EXIT_USAGE, EXIT_PREFLIGHT, EXIT_PARTIAL, EXIT_EMPTY = 0, 2, 3, 4, 5
@@ -951,6 +951,44 @@ def _clear_stale(run):
                     % (pathlib.Path(run) / runlock.LOCK)) from e
 
 
+def _watch_register(kind, title, run):
+    """Put this run on the watch page (lib/watch.py) and print its link -- the bare
+    `watch: <url>` every launcher prints, not a qwen-swarm line, so one grep finds the page
+    whichever command started the run. The id comes back for _watch_finish, or None when the
+    page is switched off (QWEN_WATCH=0) or this process is a registered run's child
+    (QWEN_WATCH_CHILD=1) or it failed.
+
+    BEST EFFORT, like every watch call a launcher makes: a port another service holds, a
+    junk QWEN_WATCH_PORT, anything at all costs one `watch: ...` warning line on stderr
+    and never changes the run's exit code."""
+    run_id = None
+    try:
+        run_id = watch.register(kind, title, run_path=str(run), pid=os.getpid())
+        if run_id:
+            # every launcher prints the identical bare `watch: <url>` (watch.url()). Its own
+            # guard: a junk QWEN_WATCH_PORT makes url() raise after the pointer was written,
+            # and the register warning below must not then claim the run never registered
+            try:
+                print("watch: %s" % watch.url(run_id), file=sys.stderr)
+            except Exception as e:
+                watch._warn("the page link failed (%s); the run is registered, id %s"
+                            % (e, run_id))
+    except Exception as e:
+        watch._warn("the run could not be registered (%s); the run goes on without the "
+                    "page" % e)
+    return run_id                     # the id survives a link that could not be printed,
+                                      # so _watch_finish still closes the pointer
+
+
+def _watch_finish(run_id, rc):
+    """Record the run's exit in its pointer; likewise best effort: one warning line, the
+    exit unchanged. A None id (never registered) is a silent no-op inside finish()."""
+    try:
+        watch.finish(run_id, rc)
+    except Exception as e:
+        watch._warn("the run could not be finished (%s)" % e)
+
+
 def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
     """locked=True: the caller (--resume) already holds RUN/.lock; a fresh run takes it
     here, once the folder exists. Whoever took it, it is released on every exit, and
@@ -961,6 +999,7 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
     # returns: every exit of a run that started (0, 2 when run() itself raises Usage,
     # 4, 5, 8, 130); the exits before run_start (2 and 3) never get that far
     started, rc, wf = False, EXIT_HARNESS, None
+    watch_id = None                         # this run's pointer, once registered
     try:
         # inside the try, so a raise here still reaches the finally that releases a
         # lock a --resume was already holding on entry
@@ -987,6 +1026,10 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
                     run=str(run), resumed=not new, depth=cfg["depth"],
                     knobs={k: cfg[k] for k in m.knobs})
         started = True
+        # the run's own pointer on the watch page, under the goal it was started with:
+        # research by name, every other workflow as a swarm run
+        watch_id = _watch_register("research" if m.name == "research" else "swarm",
+                                   cfg[prof["goal_key"]], run)
         if target is not None:
             from lib.swarm_engine import sandbox
             sandbox.cleanup(run, target)               # leftovers of a killed run
@@ -1036,6 +1079,9 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
         if started:
             report = wf.report_path if wf is not None and rc in (EXIT_OK, EXIT_PARTIAL) else None
             events.emit(run, "run_end", exit=rc, report=None if report is None else str(report))
+            # the pointer's end and exit, alongside the run_end event: the page calls the
+            # run ended the same way on both paths it reads
+            _watch_finish(watch_id, rc)
         if locked:
             with contextlib.suppress(OSError):
                 runlock.release(run)

@@ -643,9 +643,18 @@ def test_probe_json_record(tmp_path, server, fake):
 def test_sigterm_mid_session_still_removes_the_sandbox(tmp_path, server, fake):
     repo = dirty_repo(tmp_path)
     env = {k: v for k, v in os.environ.items() if not k.startswith(("QWEN_", "CLAUDE_", "ANTHROPIC_"))}
+    for name in ("QWEN_WATCH_ACTIVITY", "QWEN_WATCH_PARENT",
+                 "QWEN_WATCH_CHILD", "QWEN_WATCH_CTX_WINDOW"):
+        env.pop(name, None)                        # never a child of an outer watched run
+    # the env is built from scratch, so the conftest injection into test_cli.run never
+    # reaches it: the watch switches go in BY HAND here (QWEN_WATCH=0, so they keep
+    # this run OFF the real page), and the watch dir is pinned to this test's tmp_path
+    # like every other one
     env.update({"QWEN_CONFIG": posix(tmp_path / "none"), "QWEN_NO_NOTICE": "1", "QWEN_BASE_URL": test_cli.base_url(server),
                 "QWEN_CLAUDE_BIN": posix(fake), "FAKE_DIR": posix(tmp_path / "calls"),
-                "FAKE_MODES": "sleep", "QWEN_PROBE_DIR": posix(tmp_path / "probes")})
+                "FAKE_MODES": "sleep", "QWEN_PROBE_DIR": posix(tmp_path / "probes"),
+                "QWEN_WATCH": "0", "QWEN_WATCH_NOSERVE": "1",
+                "XDG_CACHE_HOME": posix(tmp_path / "cache")})
     p = subprocess.Popen([test_cli.BASH, posix(test_cli.AGENT), "--probe", "-C", posix(repo), "hi"],
                          env=env, cwd=str(tmp_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     deadline = time.time() + 30

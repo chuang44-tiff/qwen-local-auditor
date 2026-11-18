@@ -842,7 +842,7 @@ def _confirm_local(wf, suite, base, todo):
                      lambda text, batch: [dict(parse_confirmation(text, batch[0]["id"]),
                                                id=batch[0]["id"])],
                      item_id=lambda r: r["id"], max_items=1, stage=_fixtures_dir(suite),
-                     unit_ids=True)
+                     unit_ids=True, label="ui-test: confirm")
     got = {row["id"]: row for row in res.rows}
     units = {u["name"]: u for u in res.units}
     out = {}
@@ -949,7 +949,8 @@ def run(wf):
 
     res = wf.fan_out(UNIT, "tester", items, tester_prompt, result_row,
                      item_id=lambda sc: sc["id"], max_items=1,
-                     stage=fs["dir"] if fs else None, repair=REPAIR)
+                     stage=fs["dir"] if fs else None, repair=REPAIR,
+                     label="ui-test: scenarios")
     scored = _scored(items, res)
     wf.save("results", scored)      # the tester's rows, before any confirmation is added
     for r in scored:

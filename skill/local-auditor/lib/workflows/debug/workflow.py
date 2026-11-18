@@ -336,7 +336,8 @@ def run(wf):
     repro_knob, tests = wf.knob("repro"), wf.knob("tests")
     tri = wf.agent("triage", "triager", TRIAGE_P.format(
         symptom=symptom, repro=repro_knob or "(none given)",
-        ask="" if repro_knob else "Propose a reproduction command. "), parse_triage)
+        ask="" if repro_knob else "Propose a reproduction command. "), parse_triage,
+        label="debug: triage")
     triage = tri if wf.last_unit["ok"] else {"files": [], "notes": "", "repro": ""}
     repro = repro_knob or triage["repro"]
     if not repro_knob and triage["repro"]:
@@ -357,7 +358,8 @@ def run(wf):
             hyps = wf.agent("hypothesize", "hypothesizer", HYP_P.format(
                 symptom=symptom, notes=triage["notes"] or "(none)", repro=repro,
                 output=base["output_tail"][-3000:] or "(no output)", n=wf.knob("hypotheses")),
-                parse_hypotheses(wf.knob("hypotheses"), 1, []))
+                parse_hypotheses(wf.knob("hypotheses"), 1, []),
+                label="round %d: hypothesize" % r)
             if hyps is None:
                 wf.goal_unmet("the hypothesizer failed: its unit produced no hypotheses")
                 wf.converged("hypothesizer failed")
@@ -367,7 +369,8 @@ def run(wf):
                 symptom=symptom, tried=_tried(state), failed=_failed(state),
                 n=wf.knob("hypotheses")),
                 parse_hypotheses(wf.knob("hypotheses"), len(state["hypotheses"]) + 1,
-                                 [_hyp_key(h) for h in state["hypotheses"]])) or []
+                                 [_hyp_key(h) for h in state["hypotheses"]]),
+                label="round %d: plan" % r) or []
         if not hyps:
             wf.converged("no new hypothesis")
             continue
@@ -376,7 +379,7 @@ def run(wf):
         res = wf.fan_out("probe", "prober", hyps, lambda batch: PROBE_P.format(
             symptom=symptom, repro=repro, id=batch[0]["id"], location=batch[0]["location"],
             mechanism=batch[0]["mechanism"], evidence=batch[0]["evidence_needed"]),
-            parse_probe, max_items=1)
+            parse_probe, max_items=1, label="round %d: probe" % r)
         state["probes"] += res.rows
         new = []
         for row in res.rows:
@@ -396,7 +399,8 @@ def run(wf):
         if passing:
             v = wf.vote("review", "reviewer", passing, wf.knob("voters"),
                         lambda batch: REVIEW_P.format(symptom=symptom, items="\n".join(
-                            _review_item(c) for c, _ in batch)), parse_review)
+                            _review_item(c) for c, _ in batch)), parse_review,
+                        label="round %d: review" % r)
             for c in passing:
                 c["approved"] = v[c["id"]] == "supported"
                 c["verdict"] = v[c["id"]]
@@ -476,7 +480,7 @@ def _report(wf, state, winner):
             symptom=state["symptom"], repro=repro_line, evidence=evidence, patches=patches,
             winner=_clip_fence(winner["patch"]) if winner is not None
                    else "(no patch won this run)"),
-            parse_report, always=True, repair=WRITE_REPAIR)
+            parse_report, always=True, repair=WRITE_REPAIR, label="debug: report")
     if not body:
         body = "# Debug: %s\n\n%s" % (
             "root cause not found" if winner is None else "see the winning patch",

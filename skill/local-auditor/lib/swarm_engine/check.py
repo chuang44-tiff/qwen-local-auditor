@@ -24,7 +24,11 @@ class CheckFailed(Exception):
 
 
 class FakeSwarm:
-    """Stands in for swarm.Swarm: answers every unit at once, starts nothing."""
+    """Stands in for swarm.Swarm: answers every unit at once, starts no agent. It still
+    announces its phases the way the engine does -- a `phase_start` with the workflow's
+    label before any unit is answered -- because a dry run exists to show a workflow what
+    its own event stream looks like. What it does not write is `unit_start`: that event
+    says an agent really spawned, and in a dry run none does (see run_phase)."""
 
     def __init__(self, run, answer):
         self.run_dir = pathlib.Path(run)
@@ -33,8 +37,20 @@ class FakeSwarm:
         self.answer = answer
         self.deadline = None
         self.dropped = self.agents_run = self.tokens = 0
+        self.seats = 1              # the units are answered one at a time: the only seat here
+        self._phase_no = 0          # numbers a phase the workflow left unnamed, as the engine does
 
-    def run_phase(self, units, seats=None):
+    def run_phase(self, units, seats=None, label=None):
+        """The dry run of a phase, announced like swarm.Swarm.run_phase: `label` (or
+        "phase N" when the workflow named nothing), `n`, `seats`, `units`, before the first
+        unit is answered. No `unit_start` -- nothing spawns here."""
+        seats = self.seats if seats is None else min(seats, self.seats)
+        self._phase_no += 1
+        if label is None:
+            label = "phase %d" % self._phase_no
+        events.emit_phase_start(self.run_dir, label, len(units), seats,
+                                [{"unit": u.name, "name": u.name,
+                                  "role": pathlib.Path(u.role_file).stem} for u in units])
         out = []
         for u in units:
             role = pathlib.Path(u.role_file).stem

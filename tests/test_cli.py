@@ -122,7 +122,10 @@ def fake(tmp_path):
     return p
 
 
-def run(tmp_path, args, server=None, fake=None, extra=None, timeout=90, cwd=None):
+def run(tmp_path, args, server=None, fake=None, extra=None, timeout=90, cwd=None, proc=None):
+    """The launcher as a caller's child. `proc`, when a test hands over a dict, is filled
+    with the pid of the process it started -- the launcher's own, which is what a watch
+    pointer records as `pid` (subprocess.run would keep that number out of reach)."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("QWEN_", "CLAUDE_", "ANTHROPIC_"))}
     env["QWEN_CONFIG"] = posix(tmp_path / "no-such-config")   # never read the dev's own
@@ -133,9 +136,18 @@ def run(tmp_path, args, server=None, fake=None, extra=None, timeout=90, cwd=None
     if fake is not None:
         env["QWEN_CLAUDE_BIN"] = posix(fake)
     env.update(extra or {})
-    return subprocess.run([BASH, posix(AGENT), *args], env=env, capture_output=True,
-                          encoding="utf-8", errors="replace", timeout=timeout,
-                          cwd=str(cwd or tmp_path))
+    argv = [BASH, posix(AGENT), *args]
+    p = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         encoding="utf-8", errors="replace", cwd=str(cwd or tmp_path))
+    if proc is not None:
+        proc["pid"] = p.pid
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:                      # what subprocess.run does: kill,
+        p.kill()                                           # drain, and let the caller see
+        p.communicate()                                    # the timeout it asked for
+        raise
+    return subprocess.CompletedProcess(argv, p.returncode, out, err)
 
 
 def record(tmp_path):

@@ -74,6 +74,11 @@ qwen-sweep --builder diff --repo . --base main --dry-run   # drop --dry-run to r
 qwen-agent --until-done task.md -C . --max-rounds 6
 ```
 
+Every run prints a `watch:` link to a live page on `127.0.0.1:8790`.
+- **What it shows:** one card per run, and one small robot per agent with its state, its time bar, the tool it is on and its context use. A coder loop also shows its rounds and checklist.
+- **What it never shows:** tool output, prompts or transcripts.
+- **Setup:** the page needs nothing installed beyond Python, and `QWEN_WATCH=0` turns it off. [configuration.md](skill/local-auditor/reference/configuration.md#watch-page-every-command) covers the settings.
+
 `--help` on any command is its complete flag reference; `--test`, `qwen-cc`, research and
 swarms are on the reference pages below.
 
