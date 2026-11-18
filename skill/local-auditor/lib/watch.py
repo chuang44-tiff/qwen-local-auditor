@@ -10,9 +10,15 @@ Pointers live in `$XDG_CACHE_HOME/qwen-agent/watch/<id>.json` (one per run, `run
 makes the id stable across a resume). `serve()` runs a small HTTP server on
 127.0.0.1:8790 (QWEN_WATCH_HOST/QWEN_WATCH_PORT, environment first, then the config
 file -- a config line in the `NAME="${NAME:-default}"` form reads as its default) that
-answers /health for the liveness probe, /api/runs and /api/run/<id> for the page, and
-/ for lib/watch_page.html itself; `python lib/watch.py url <id>` prints the link to
-paste (`http://HOST:PORT/#<id>`). QWEN_WATCH_HOST may be a COMMA-SEPARATED LIST: serve
+answers /health for the liveness probe, /api/runs (`{"runs": [...], "page": version}`)
+and /api/run/<id> (the run plus its `"page"`) for the page, and / for
+lib/watch_page.html itself -- served with its `__PAGE_VERSION__` placeholder replaced
+by the page's version, the first 12 hex digits of the sha256 of the file's bytes
+counted BEFORE the replacement, computed once per process (at server start, or on the
+first page read): a tab keeps running the code it first loaded, so it compares the
+version it loaded with the answers' `page` and reloads itself ONCE when they differ
+(sessionStorage keeps that from becoming a loop; the page's side of it, below).
+`python lib/watch.py url <id>` prints the link to paste (`http://HOST:PORT/#<id>`). QWEN_WATCH_HOST may be a COMMA-SEPARATED LIST: serve
 binds every address on the same port, in one process, one server thread per address, and
 the url, the /health probe and server.json name the FIRST one. The viewer STAYS UP:
 `serve` records itself in `<watch_dir>/server.json` ({pid, host, port, start}) and waits
@@ -1221,11 +1227,59 @@ def list_runs(now):
 NOT_FOUND = b"watch: not found\n"
 
 
+# ---------------------------------------------------------------- the page version
+# A tab keeps running the page code it first loaded: after the viewer restarts on newer
+# code the tab polls the new API with old JavaScript and the new states never show. The
+# version below is what lets the tab notice -- the served page and every /api answer
+# carry the same hash, and the page reloads itself once when they differ.
+
+PAGE_FILE = "watch_page.html"
+PAGE_PLACEHOLDER = b"__PAGE_VERSION__"        # the page says var PAGE_VERSION="...";
+PAGE_VERSION_HEX = 12                         # leading hex digits of the file's sha256
+
+_page_lock = threading.Lock()
+_page_state = {}                              # {"raw": bytes, "version": str}, read once
+
+
+def _read_page():
+    """(the page file's bytes, its version) read ONCE and kept for the life of the
+    process: the version is the first 12 hex digits of the sha256 of those bytes,
+    counted BEFORE the `__PAGE_VERSION__` replacement (the file on disk still carries
+    the placeholder), and serving the same bytes and the same version every time is
+    what makes the tab's comparison trustworthy -- the page's own PAGE_VERSION and the
+    `page` the API answers share ONE read. Raises OSError when the file cannot be read
+    (the caller's 404); a failed read is not remembered: a page that appears later
+    serves."""
+    with _page_lock:
+        if not _page_state:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   PAGE_FILE), "rb") as fh:
+                raw = fh.read()
+            _page_state["raw"] = raw
+            _page_state["version"] = hashlib.sha256(raw).hexdigest()[:PAGE_VERSION_HEX]
+        return _page_state["raw"], _page_state["version"]
+
+
+def page_version():
+    """The page's version string: see _read_page. Computed once per process -- serve()
+    asks when the server starts, the routes ask on the first page read -- and stable
+    after that, which is the whole point: a tab left open across a restart sees the new
+    hash in the API answers, reloads itself, and not again for it within the guard
+    window. "" when the page file cannot be read: the page must not reload itself on a
+    version that is not a version."""
+    try:
+        return _read_page()[1]
+    except OSError:
+        return ""
+
+
 class _Handler(BaseHTTPRequestHandler):
-    """The viewer's routes: GET /health, /api/runs, /api/run/<id> and / (the page
-    itself); any other path is 404, and so is every method we declare except GET (a
-    verb the stdlib does not know is its own 501). Quiet by default: a watcher that
-    shouts at every request is a watcher the user closes."""
+    """The viewer's routes: GET /health, /api/runs (the runs list wrapped, with the
+    page's version beside it), /api/run/<id> (the run plus the same `"page"`) and /
+    (the page itself, its placeholder replaced at serve time); any other path is 404,
+    and so is every method we declare except GET (a verb the stdlib does not know is
+    its own 501). Quiet by default: a watcher that shouts at every request is a
+    watcher the user closes."""
 
     def log_message(self, fmt, *args):
         pass
@@ -1251,12 +1305,15 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/health":
             self._json({"app": APP})
         elif path == "/api/runs":
-            self._json(list_runs(time.time()))
+            # the bare list wrapped the way the page reads it, with the version beside
+            # it: the tab compares `page` against the PAGE_VERSION it loaded (render)
+            self._json({"runs": list_runs(time.time()), "page": page_version()})
         elif path.startswith("/api/run/"):
             st = run_detail(path[len("/api/run/"):], time.time())
             if st is None:
                 self._missing()
             else:
+                st["page"] = page_version()       # a fresh dict per call (run_detail)
                 self._json(st)
         elif path == "/":
             self._page()
@@ -1265,13 +1322,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _page(self):
         try:
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "watch_page.html"), "rb") as fh:
-                page = fh.read()
+            raw, version = _read_page()
         except OSError:
             self._missing()
             return
-        self._send(200, page, "text/html; charset=utf-8")
+        self._send(200, raw.replace(PAGE_PLACEHOLDER, version.encode("ascii")),
+                   "text/html; charset=utf-8")
 
     def do_HEAD(self):
         self._missing()
@@ -1370,6 +1426,8 @@ def serve(host, port, idle_exit=0):
     if not servers:
         return 1
     first = servers[0]
+    page_version()      # the page's version is computed once, at server start: the
+    # served page and every later API answer carry this one, restart or no restart
     _record_server(first.server_address[0], first.server_address[1])
     # port 0: record the port we ACTUALLY got
     for extra in servers[1:]:

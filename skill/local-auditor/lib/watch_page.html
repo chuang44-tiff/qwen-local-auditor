@@ -230,6 +230,10 @@ svg.robot.dropped,svg.robot.killed,svg.robot.notrun{filter:grayscale(1);opacity:
 <main id="app" aria-live="polite"></main>
 <script>
 "use strict";
+var PAGE_VERSION="__PAGE_VERSION__";  /* lib/watch.py replaces this placeholder at serve
+                                         time with the page's version (sha256[:12] of
+                                         the file's bytes); the tab compares it against
+                                         the `page` every API answer carries below */
 var FAM={
   planner:{c:"#E9A23B",roles:["planner","scoper","triager"],prop:"clip"},
   searcher:{c:"#3FA7D6",roles:["searcher","reader"],prop:"glass"},
@@ -530,6 +534,27 @@ function hide(ids){var h=hidden(),now=Date.now();ids.forEach(function(i){h[i]=no
 document.addEventListener("click",function(e){var b=e.target.closest("[data-hide]");if(!b)return;
   e.preventDefault();e.stopPropagation();hide(b.getAttribute("data-hide").split(","));});
 var app=document.getElementById("app"),lastOk=0;
+var RELOAD_KEY="qwen-watch-reload";
+function isVersion(s){return typeof s==="string"&&/^[0-9a-f]{12}$/.test(s);}
+function checkPageVersion(d){
+  // The tab keeps running the page code it first loaded: after the viewer restarts on
+  // newer code the API answers a different `page`, and the tab reloads itself ONCE --
+  // location.reload() keeps the URL as it is, hash included, so the user stays on the
+  // run they were looking at. Both sides must read as real versions (12 hex digits:
+  // never empty, never the unreplaced placeholder the raw file carries). sessionStorage
+  // remembers the last version we reloaded for and when: the same server version never
+  // reloads the tab twice within 60 s -- that is the guard against a reload loop (a
+  // middle layer forever handing back the old page, say).
+  if(!d||!isVersion(d.page)||!isVersion(PAGE_VERSION)||d.page===PAGE_VERSION)return;
+  var now=Date.now(),g=null;
+  // read and write SEPARATELY: unreadable or junk in the stored value must not keep
+  // the tab reloading every poll (the set below still runs, so the junk is replaced),
+  // and a junk "at" must not silence the reload forever (a real one is a finite number)
+  try{g=JSON.parse(sessionStorage.getItem(RELOAD_KEY)||"null");}catch(e){}
+  if(g&&g.page===d.page&&typeof g.at==="number"&&isFinite(g.at)&&now-g.at<60000)return;
+  try{sessionStorage.setItem(RELOAD_KEY,JSON.stringify({page:d.page,at:now}));}catch(e){}
+  location.reload();
+}
 function topbar(n){var stale=lastOk&&Date.now()-lastOk>10000;
   return '<div class="top"><span class="brand">qwen watch</span><span class="pulse"><span class="dot '+(stale?"stale":n?"live":"")+'"></span>'+
    (stale?"Viewer not answering":n?"Live":"Idle")+'</span></div>';}
@@ -541,8 +566,9 @@ function render(){
     return res.json();
   }).then(function(d){
     lastOk=Date.now();
+    checkPageVersion(d);
     if(id){ app.innerHTML=topbar(d&&!d.missing&&outcome(d)==="running")+(d.missing?'<a class="back" href="#">← All runs</a><p class="note">This run is no longer on the page. Finished runs leave after a while.</p>':detail(d)); }
-    else { var live=d.filter(function(r){return outcome(r)==="running";}).length; app.innerHTML=topbar(live)+overview(d); }
+    else { var runs=Array.isArray(d)?d:(d&&d.runs); var live=runs.filter(function(r){return outcome(r)==="running";}).length; app.innerHTML=topbar(live)+overview(runs); }
   }).catch(function(){ if(!app.innerHTML) app.innerHTML=topbar(0)+'<p class="note">Can’t reach the viewer. It may have been stopped; the next local agent run starts it again.</p>'; else { var t=app.querySelector(".top"); if(t) t.outerHTML=topbar(0);} });
 }
 window.addEventListener("hashchange",function(){window.scrollTo(0,0);render();});

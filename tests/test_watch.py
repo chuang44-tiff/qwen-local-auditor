@@ -6,6 +6,7 @@ Nothing here ever starts a real server through register(): start_server=False, o
 spawn is mocked (the health probe itself runs against a junk listener). The viewer's own
 lifetime (serve, stop) is tested against one real server, started as a subprocess and
 ended by `stop` itself -- the only way to prove the port is actually handed back."""
+import hashlib
 import inspect
 import json
 import os
@@ -810,7 +811,7 @@ def test_server_health_and_api(tmp_path, monkeypatch):
         assert resp.status == 200
         assert json.loads(body) == {"app": "qwen-watch"}
         resp, body = get("/api/runs")
-        runs = json.loads(body)
+        runs = json.loads(body)["runs"]              # wrapped: {"runs": [...], "page": ...}
         assert [r["id"] for r in runs] == [rid]               # newest first, one run
         assert runs[0]["state"] == "running" and runs[0]["title"] == "server run"
         resp, body = get("/api/run/" + rid)
@@ -867,7 +868,7 @@ def test_api_runs_carries_until_done_rounds(tmp_path, monkeypatch):
         httpd.server_close()
         thread.join(timeout=10)
     assert secret not in body.decode("utf-8", "replace")          # filename count only
-    runs = {r["id"]: r for r in json.loads(body)}
+    runs = {r["id"]: r for r in json.loads(body)["runs"]}     # wrapped: {"runs", "page"}
     assert runs[rid]["rounds"] == 3 == watch.run_detail(rid, time.time())["rounds"]
     assert runs[rid]["report_stop"] == "stop: goal reached (exit 0)"
     assert runs[rid3]["rounds"] == 0 and runs[rid3]["report_stop"] is None   # a missing
@@ -1239,6 +1240,54 @@ def test_page_has_no_external_urls():
     text = page_text()
     assert "http://" not in text and "https://" not in text
     assert text.lstrip().lower().startswith("<!doctype html>")
+
+
+def test_page_version_served_and_carried_by_both_api_routes(tmp_path, monkeypatch):
+    """The version a long-open tab compares against: the first 12 hex digits of the
+    sha256 of the watch_page.html bytes, counted BEFORE the placeholder replacement
+    (the file on disk still carries `__PAGE_VERSION__`). The served HTML contains the
+    version and holds no placeholder left, and BOTH API routes answer the same value
+    at the top level: /api/runs wraps its list the way the page reads it (`runs`),
+    /api/run/<id> carries `page` beside the run's own fields. And the page's source
+    holds the reload logic and the sessionStorage guard that make the comparison pay
+    off -- a tab whose PAGE_VERSION differs from the server's reloads itself once."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    run = tmp_path / "run"
+    write_events(run, [ev("run_start", workflow="swarm", goal="g")])
+    rid = watch.register("swarm", "t", run_path=str(run), start_server=False)
+    with open(os.path.join(os.path.dirname(os.path.abspath(watch.__file__)),
+                           "watch_page.html"), "rb") as fh:
+        version = hashlib.sha256(fh.read()).hexdigest()[:12]
+    assert len(version) == 12 and all(c in "0123456789abcdef" for c in version)
+    httpd = watch.make_server("127.0.0.1", 0)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.02},
+                              daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:%d" % port
+    try:
+        def get(path):
+            with urllib.request.urlopen(base + path, timeout=10) as resp:
+                return resp, resp.read()
+        resp, body = get("/")
+        assert resp.status == 200 and "text/html" in resp.headers.get("Content-Type", "")
+        assert b"__PAGE_VERSION__" not in body              # replaced at serve time
+        assert ('var PAGE_VERSION="%s";' % version).encode("ascii") in body
+        resp, body = get("/api/runs")
+        listed = json.loads(body)
+        assert listed["page"] == version                     # same version, top level
+        assert [r["id"] for r in listed["runs"]] == [rid]    # the list, wrapped
+        resp, body = get("/api/run/" + rid)
+        assert json.loads(body)["page"] == version           # both routes agree
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=10)
+    text = page_text()                    # the page's own side of the bargain, as it
+    assert "__PAGE_VERSION__" in text     # sits on disk: placeholder, reload, guard
+    assert "var PAGE_VERSION=" in text
+    assert "location.reload()" in text
+    assert "sessionStorage" in text
 
 
 def test_page_maps_every_builtin_role():
