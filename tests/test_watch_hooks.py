@@ -34,10 +34,11 @@ import pytest
 import lib.swarm as sw
 from lib import supervisor, watch
 from lib.swarm_engine import events
-from test_cli import fake, server              # the CLI suite's fake claude and /v1/models
-from test_swarm import fake as fake_swarm, swarm, unit
+from test_cli import fake, server              # noqa: F401  (the fixture is used by name --
+                                               # the CLI suite's fake claude and /v1/models)
+from test_swarm import fake as fake_swarm, swarm, unit  # noqa: F401  (the fixture is used by name)
 from test_swarm_runner import echo, swarm_main
-from test_supervisor import env, script, sup
+from test_supervisor import env, script, sup   # noqa: F401  (the fixture is used by name)
 import test_cli
 from swarm_fixtures import FAKE
 
@@ -116,7 +117,7 @@ def pointers():
 
 # ------------------------------------------------------------------ the engine
 
-def test_run_phase_emits_phase_start_and_unit_start(tmp_path, fake_swarm):
+def test_run_phase_emits_phase_start_and_unit_start(tmp_path, fake_swarm):  # noqa: F811
     """run_phase announces the whole phase -- label, size, seats, units -- BEFORE its
     first unit spawns, and every unit that really runs says so on the way in; a phase
     nobody labelled numbers itself. That is all the page needs to show a phase running."""
@@ -157,7 +158,7 @@ def test_run_phase_emits_phase_start_and_unit_start(tmp_path, fake_swarm):
                for u in f["units"].values())
 
 
-def test_unit_start_carries_timeout(tmp_path, fake_swarm):
+def test_unit_start_carries_timeout(tmp_path, fake_swarm):  # noqa: F811
     """unit_start's timeout is the very seconds budget that unit's qwen-agent call is
     spawned with -- the Swarm's, the unit's own, or, for a review-round unit, the
     halved budget it actually gets -- and the fake records exactly that number at its
@@ -184,7 +185,7 @@ def test_unit_start_carries_timeout(tmp_path, fake_swarm):
     assert f["units"]["a"]["started"] == starts["a"]["t"]
 
 
-def test_cached_unit_emits_no_unit_start(tmp_path, fake_swarm):
+def test_cached_unit_emits_no_unit_start(tmp_path, fake_swarm):  # noqa: F811
     """A cache hit is not work, and neither is a unit the run's deadline stopped before it
     started: no unit_start line for either, so the page never turns a spinner on a unit
     that was never running."""
@@ -289,7 +290,7 @@ def test_a_phase_line_that_will_not_fit_still_folds(tmp_path):
 
 # --------------------------------------------------------------------- runners
 
-def test_swarm_run_registers_and_finishes_one_pointer(tmp_path, fake_swarm, capsys):
+def test_swarm_run_registers_and_finishes_one_pointer(tmp_path, fake_swarm, capsys):  # noqa: F811
     """One engine run leaves exactly one pointer: the run's own folder, the goal it was
     started with, and its exit once it is over -- and the agents it spawned add none of
     their own, because register() handed them QWEN_WATCH_CHILD."""
@@ -324,7 +325,7 @@ def test_swarm_run_registers_and_finishes_one_pointer(tmp_path, fake_swarm, caps
     assert all(e.get("QWEN_WATCH") == "1" for e in envs)
 
 
-def test_swarm_run_with_the_page_off_registers_nothing(tmp_path, fake_swarm, monkeypatch,
+def test_swarm_run_with_the_page_off_registers_nothing(tmp_path, fake_swarm, monkeypatch,  # noqa: F811
                                                        capsys):
     """QWEN_WATCH=0 is the switch, not a broken page: no pointer, no link line, and the
     run is exactly the run it was before the watch page existed."""
@@ -338,7 +339,7 @@ def test_swarm_run_with_the_page_off_registers_nothing(tmp_path, fake_swarm, mon
     assert [ln for ln in captured.err.splitlines() if "run folder:" in ln]
 
 
-def test_watch_failure_never_changes_exit_code(tmp_path, fake_swarm, monkeypatch, capsys):
+def test_watch_failure_never_changes_exit_code(tmp_path, fake_swarm, monkeypatch, capsys):  # noqa: F811
     """The best-effort promise, on the failure the page can really meet: another service
     holds QWEN_WATCH_PORT. The run prints one `watch: ...` warning line, still gets its
     pointer, and leaves by exactly the exit the same run leaves by with the page off."""
@@ -401,7 +402,7 @@ def test_watch_failure_never_changes_exit_code(tmp_path, fake_swarm, monkeypatch
         thread.join(timeout=5)
 
 
-def test_a_junk_port_costs_the_link_and_nothing_else(tmp_path, fake_swarm, env, server, fake,
+def test_a_junk_port_costs_the_link_and_nothing_else(tmp_path, fake_swarm, env, server, fake,  # noqa: F811
                                                      monkeypatch, capsys):
     """QWEN_WATCH_PORT is read with int() and has no fallback (watch.watch_port), so a value
     that is not a number -- a proxy-style "8790,8791" -- makes watch.url() raise, and it
@@ -450,7 +451,7 @@ def test_a_junk_port_costs_the_link_and_nothing_else(tmp_path, fake_swarm, env, 
 
 # ------------------------------------------------------------------------ CLI
 
-def test_qwen_agent_single_shot_registers_agent_pointer(tmp_path, server, fake):
+def test_qwen_agent_single_shot_registers_agent_pointer(tmp_path, server, fake):  # noqa: F811
     """A single-shot session puts itself on the page under its role and the first 60
     characters of the ask, and cleanup records its exit; the child switch and QWEN_WATCH=0
     each keep a second pointer out, so the whole run is one pointer."""
@@ -485,14 +486,14 @@ def test_qwen_agent_single_shot_registers_agent_pointer(tmp_path, server, fake):
     assert not [ln for ln in r3.stderr.splitlines() if ln.startswith("watch:")]
 
 
-def test_single_shot_exports_child_flag(tmp_path, server):
+def test_single_shot_exports_child_flag(tmp_path, server):  # noqa: F811
     """The processes the single-shot launcher spawns are the registered run's children.
     python's register() sets QWEN_WATCH_CHILD=1 only in the child python's own
     environment -- which dies one line later -- so after a SUCCESSFUL registration the
     shell exports the switch itself, and the agent (and anything it runs) inherits it
     and never registers a pointer of its own. The fake claude records its environment;
     the flag is in it. An empty WATCH_ID (page off, python dead) sets nothing."""
-    fake = tmp_path / "fake-env-claude"
+    fake = tmp_path / "fake-env-claude"  # noqa: F811  (a path, not the imported fixture)
     fake.write_text("""#!/usr/bin/env bash
 # like test_cli.FAKE_CLAUDE, minus the modes, plus the whole QWEN_ environment.
 if [ "${1:-}" = --help ]; then
@@ -520,14 +521,14 @@ printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"num_turns
     assert child.get("QWEN_WATCH") == "1"            # the page stays on for the child
 
 
-def test_single_shot_exports_parent_pid(tmp_path, server):
+def test_single_shot_exports_parent_pid(tmp_path, server):  # noqa: F811
     """The export says WHICH registration the spawn must not redo, not just that one
     exists: after a SUCCESSFUL registration the shell exports QWEN_WATCH_PARENT=$$
     beside the child switch -- its own pid, the very pid the pointer carries -- so a
     child's register() reads a parent that is not its own pid and refuses even when
     the CHILD flag was lost on the way (a re-exec, an env scrub). No registration,
     no exports: with the page off the shell sets neither switch."""
-    fake = tmp_path / "fake-parent-claude"
+    fake = tmp_path / "fake-parent-claude"  # noqa: F811  (a path, not the imported fixture)
     fake.write_text("""#!/usr/bin/env bash
 # like test_cli.FAKE_CLAUDE, minus the modes, plus the whole QWEN_ environment.
 if [ "${1:-}" = --help ]; then
@@ -563,7 +564,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"num_turns
     assert "QWEN_WATCH_CHILD=" not in offenv               # the shell exports neither
 
 
-def test_qwen_agent_title_of_a_prompt_file_is_its_name(tmp_path, server, fake):
+def test_qwen_agent_title_of_a_prompt_file_is_its_name(tmp_path, server, fake):  # noqa: F811
     """A prompt read from a file gives the page the file's NAME only: the body is a prompt,
     and the page may never show one. The exits that leave the script early -- --dry-run and
     --preflight-only among them -- register nothing either."""
@@ -585,7 +586,7 @@ def test_qwen_agent_title_of_a_prompt_file_is_its_name(tmp_path, server, fake):
         assert not [ln for ln in rr.stderr.splitlines() if ln.startswith("watch:")]
 
 
-def test_a_detached_run_registers_nothing(tmp_path, server, fake):
+def test_a_detached_run_registers_nothing(tmp_path, server, fake):  # noqa: F811
     """`-w` is the one mode that must stay off the page: the branch below the registration
     hands TMPD to a detached subshell, drops the EXIT trap and exits 0, so a pointer written
     by the parent would belong to a pid that dies at once while the job goes on running --
@@ -597,7 +598,7 @@ def test_a_detached_run_registers_nothing(tmp_path, server, fake):
     assert not [ln for ln in r.stderr.splitlines() if ln.startswith("watch:")]
 
 
-def test_until_done_registers_and_finishes(env, capsys):
+def test_until_done_registers_and_finishes(env, capsys):  # noqa: F811
     """The loop is the run: one `until-done` pointer, titled for the task FILE, pointed at
     the run folder, its rounds counted against --max-rounds, and closed with the exit."""
     repo, task, tmp = env
@@ -621,7 +622,7 @@ def test_until_done_registers_and_finishes(env, capsys):
     assert st["report_stop"] and st["report_stop"].startswith("stop:")
 
 
-def test_until_done_finishes_the_pointer_on_every_exit(env):
+def test_until_done_finishes_the_pointer_on_every_exit(env):  # noqa: F811
     """A loop that never reaches its goal still closes its pointer: every way out of the
     run finishes it, with the exit the caller gets, so the page never keeps showing a loop
     that ended long ago as running."""
@@ -636,7 +637,7 @@ def test_until_done_finishes_the_pointer_on_every_exit(env):
     assert watch.run_detail(p["id"], time.time())["state"] == "ended"
 
 
-def test_until_done_closes_the_pointer_when_the_run_crashes(env, monkeypatch):
+def test_until_done_closes_the_pointer_when_the_run_crashes(env, monkeypatch):  # noqa: F811
     """A crash closes the pointer in both of its shapes: without --probe the exception runs
     straight through the finally and out to the caller, and with --probe the run reports and
     returns 8 -- either way that finally finishes the pointer with 8, so the page never goes
@@ -666,7 +667,7 @@ def test_until_done_closes_the_pointer_when_the_run_crashes(env, monkeypatch):
     assert len({p["id"] for p in ps}) == 2                # the run folders differ, so the ids
 
 
-def test_until_done_closes_the_pointer_when_the_loop_is_interrupted(env, monkeypatch):
+def test_until_done_closes_the_pointer_when_the_loop_is_interrupted(env, monkeypatch):  # noqa: F811
     """Ctrl-C on the way out of a round: the 130 path finishes the pointer like every
     other, so the page shows an interrupted run as ended at 130 rather than running."""
     repo, task, tmp = env
@@ -746,7 +747,7 @@ def act_entries(cfg):
     return got
 
 
-def test_settings_file_holds_both_hooks_when_both_are_on(tmp_path, server):
+def test_settings_file_holds_both_hooks_when_both_are_on(tmp_path, server):  # noqa: F811
     """--plan's hook and the activity hook share ONE settings file, because claude takes
     one --settings: the plan's entry is read in and the activity hook's four are appended
     beside it, the plan hook's matcher, timeout and command unchanged. PreToolUse,
@@ -754,7 +755,7 @@ def test_settings_file_holds_both_hooks_when_both_are_on(tmp_path, server):
     Every one of the four runs the same command, and no argument names the activity file
     -- the session's own environment does (QWEN_WATCH_ACTIVITY), so the file holds no
     path of the run's."""
-    fake = cfg_fake(tmp_path)
+    fake = cfg_fake(tmp_path)  # noqa: F811  (a path, not the imported fixture)
     r = test_cli.run(tmp_path, ["--shallow", "-r", "coder", "-q", "--plan", "opus", "hi"],
                      server, fake, extra=cfg_on(tmp_path))
     assert r.returncode == 0, r.stderr
@@ -795,11 +796,11 @@ def test_settings_file_holds_both_hooks_when_both_are_on(tmp_path, server):
     assert os.path.exists(watch.activity_path(ps[0]["id"])) is False   # the hook makes it
 
 
-def test_settings_file_names_only_the_activity_hook(tmp_path, server):
+def test_settings_file_names_only_the_activity_hook(tmp_path, server):  # noqa: F811
     """With the page on and --plan off, the file holds the activity hook and nothing else;
     with the page off it is not written or passed at all, and --plan's own file goes
     through untouched (the behaviour the plan suite pins)."""
-    fake = cfg_fake(tmp_path)
+    fake = cfg_fake(tmp_path)  # noqa: F811  (a path, not the imported fixture)
     on = cfg_on(tmp_path)
     r = test_cli.run(tmp_path, ["--shallow", "-r", "coder", "-q", "hi"], server, fake,
                      extra=dict(on))
@@ -837,13 +838,13 @@ def test_settings_file_names_only_the_activity_hook(tmp_path, server):
     assert cfg3["hooks"]["PreToolUse"][0]["matcher"] == "Edit|Write|MultiEdit|NotebookEdit"
 
 
-def test_settings_file_registers_post_tool_use_failure(tmp_path, server):
+def test_settings_file_registers_post_tool_use_failure(tmp_path, server):  # noqa: F811
     """A failed tool call fires PostToolUseFailure, not PostToolUse -- so that event is
     registered too, next to the other watch entries: matcher "*" and the very same hook
     command, written beside --plan's entry untouched. Without this registration the hook
     never runs for a failing call, its `pre` line waits for a `post` that never comes,
     and the page reads the tool as running forever."""
-    fake = cfg_fake(tmp_path)
+    fake = cfg_fake(tmp_path)  # noqa: F811  (a path, not the imported fixture)
     r = test_cli.run(tmp_path, ["--shallow", "-r", "coder", "-q", "--plan", "opus", "hi"],
                      server, fake, extra=cfg_on(tmp_path))
     assert r.returncode == 0, r.stderr
@@ -854,7 +855,9 @@ def test_settings_file_registers_post_tool_use_failure(tmp_path, server):
     [h] = act["PostToolUseFailure"]["hooks"]
     assert h["type"] == "command" and set(h) == {"type", "command"}
     assert h["command"] == act["PreToolUse"]["hooks"][0]["command"]   # one command, four events
-    assert h["command"].replace("\\", "/").endswith("lib/watch_hook.py")
+    # the last argument, not the raw line: the command ENDS in the closing quote of the
+    # hook path, so endswith could never see it (same parse the entry above pins)
+    assert shlex.split(h["command"])[-1].replace("\\", "/").endswith("lib/watch_hook.py")
     # the plan hook's own entry sits in the same file, untouched
     plan = [e for e in cfg["hooks"]["PreToolUse"]
             if e.get("matcher") == "Edit|Write|MultiEdit|NotebookEdit"]
@@ -891,12 +894,12 @@ def run_merge_block(watch_tmpd, plan_settings, tmpdir=None):
     RESOLVED is `${WATCH_SETTINGS:-$PLAN_SETTINGS}`, the very expansion the argv build
     hands to --settings (qwen-agent.sh:3338). `watch_tmpd` "" leaves the block to its
     own fallback mktemp, and a `tmpdir` that cannot hold a folder makes THAT fail."""
-    script = ('native_path() { printf "%s" "$1"; }\n'
+    script = ('native_path() { printf "%s" "$1"; }\n'  # noqa: F811  (a string, not the fixture)
               "DRY_RUN=0\nINTERACTIVE=0\nCTX=\n"
               + merge_block()
               + 'printf "WATCH_SETTINGS=%s\\n" "${WATCH_SETTINGS:-}"\n'
               + 'printf "RESOLVED=%s\\n" "${WATCH_SETTINGS:-$PLAN_SETTINGS}"\n')
-    env = dict(os.environ)
+    env = dict(os.environ)  # noqa: F811  (a dict, not the imported fixture)
     env.pop("CTX", None)
     env.update({"QA_PY": sys.executable,
                 "SKILL_DIR": str(test_cli.AGENT.parent),
@@ -1005,19 +1008,23 @@ def test_unreadable_plan_settings_file_keeps_the_plan_hook_kept(tmp_path):
                       encoding="utf-8")
     p, got = run_merge_block(wd, str(plan_f))
     assert p.returncode == 0, (p.stdout, p.stderr)
-    assert got.get("WATCH_SETTINGS") == str(wd / "settings.json"), (got, p.stderr)
-    assert got.get("RESOLVED") == str(wd / "settings.json")
+    # the block joins the folder and settings.json with /, Python joins them with \ on
+    # Windows: compare paths, not spellings
+    assert os.path.normpath(got.get("WATCH_SETTINGS", "")) \
+        == os.path.normpath(str(wd / "settings.json")), (got, p.stderr)
+    assert os.path.normpath(got.get("RESOLVED", "")) \
+        == os.path.normpath(str(wd / "settings.json"))
     cfg = json.loads((wd / "settings.json").read_text(encoding="utf-8"))
     assert cfg["hooks"]["PreToolUse"][0] == plan_entry
     assert {e.get("matcher") for e in cfg["hooks"]["PreToolUse"][1:]} == {"*"}
 
 
-def test_single_shot_exports_its_activity_file(tmp_path, server):
+def test_single_shot_exports_its_activity_file(tmp_path, server):  # noqa: F811
     """The single-shot session's hook writes beside its pointer: the launcher exports the
     path python's activity_path(id) handed back, so the agent -- and every hook Claude Code
     runs for it -- inherits the very file the page will read for that id. A session that
     registered nothing exports nothing, and a child launcher keeps what it was given."""
-    fake = tmp_path / "fake-act-claude"
+    fake = tmp_path / "fake-act-claude"  # noqa: F811  (a path, not the imported fixture)
     fake.write_text("""#!/usr/bin/env bash
 if [ "${1:-}" = --help ]; then
   echo "  --permission-mode <mode>  Permission mode to use for the session"
@@ -1043,7 +1050,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"num_turns
     assert r.returncode == 0, r.stderr
     ps = pointers()
     assert len(ps) == 1 and ps[0]["kind"] == "agent", ps
-    env = child_env("act-env.txt")
+    env = child_env("act-env.txt")  # noqa: F811  (a dict, not the imported fixture)
     assert env["QWEN_WATCH_ACTIVITY"] == watch.activity_path(ps[0]["id"])   # the id's own file
     assert env["QWEN_WATCH_ACTIVITY"].endswith(".activity.jsonl")           # never a pointer
     assert os.path.dirname(env["QWEN_WATCH_ACTIVITY"]) == watch.watch_dir()
@@ -1067,14 +1074,14 @@ printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"num_turns
 
 # ---------------------------------------------------------------- the units
 
-def _unit_envs(fake_swarm):
+def _unit_envs(fake_swarm):  # noqa: F811
     """The QWEN_ environment of every unit the fake swarm agent ran, one dict per spawn
     (a retry is a spawn of its own, so the same unit appears once per try)."""
     return [json.loads(ln) for ln in
             (fake_swarm / "env.jsonl").read_text(encoding="utf-8").splitlines()]
 
 
-def test_a_swarm_unit_environment_names_its_own_activity_file(tmp_path, fake_swarm,
+def test_a_swarm_unit_environment_names_its_own_activity_file(tmp_path, fake_swarm,  # noqa: F811
                                                               monkeypatch):
     """RUN/activity/<unit name>.jsonl, one file per unit: the unit's launcher inherits the
     switch and the folder from the run that registered, so the unit's session and its hooks
@@ -1123,7 +1130,7 @@ def test_a_swarm_unit_environment_names_its_own_activity_file(tmp_path, fake_swa
 
 # ------------------------------------------------------------- the coder loop
 
-def _loop(env, monkeypatch, steps, *extra):
+def _loop(env, monkeypatch, steps, *extra):  # noqa: F811
     """One until-done run of the fake agent, with the page on: (exit code, pointer, run
     folder). QWEN_TIMEOUT is the round's own budget, which round_start reports."""
     repo, task, tmp = env
@@ -1137,7 +1144,7 @@ def _loop(env, monkeypatch, steps, *extra):
     return rc, ps[0], pathlib.Path(ps[0]["run_path"])
 
 
-def test_until_done_loop_writes_its_round_events(env, monkeypatch):
+def test_until_done_loop_writes_its_round_events(env, monkeypatch):  # noqa: F811
     """The loop announces itself into RUN/events.jsonl through the engine's own writer: a
     round_start before the call (which round, of how many, on what budget, and whether it
     is the review round), a checks_start immediately before the harness is asked (which
@@ -1188,7 +1195,7 @@ def test_until_done_loop_writes_its_round_events(env, monkeypatch):
     assert all(isinstance(e["t"], float) for e in evs)
 
 
-def test_until_done_run_detail_and_api_expose_the_loop(env, monkeypatch):
+def test_until_done_run_detail_and_api_expose_the_loop(env, monkeypatch):  # noqa: F811
     """What the page builds a coder loop from: run_detail's `round` (n, timeout, started),
     `checks` (the counts, the items and the round they belong to), `activity` -- folded
     from RUN/activity.jsonl, the file each round's launcher was told to fill -- and
@@ -1254,7 +1261,7 @@ def test_until_done_page_data_survives_a_loop_that_wrote_nothing(tmp_path, monke
     assert small["activity"] is None
 
 
-def test_until_done_round_events_close_a_round_the_loop_lost(env, monkeypatch):
+def test_until_done_round_events_close_a_round_the_loop_lost(env, monkeypatch):  # noqa: F811
     """A round that never reaches its checks still closes: the checks_start line said the
     runner was asked, and then it died -- the loop emits its round_end and no checks line
     (there is nothing to say), so the page is left with a closed round and a run that
@@ -1276,7 +1283,7 @@ def test_until_done_round_events_close_a_round_the_loop_lost(env, monkeypatch):
 _FAKE_AGENT = os.path.join(os.path.dirname(__file__), "fake_agent.py")
 
 
-def _audited_run(env, monkeypatch, steps, expect_rc):
+def _audited_run(env, monkeypatch, steps, expect_rc):  # noqa: F811
     """One until-done run WITH the deviation audit on (the `sup` helper switches it off),
     the fake agent scripted, the page on: returns (pointer, events). Like every supervisor
     test, one run per test: the fake agent walks its script by a counter file of its own."""
@@ -1293,7 +1300,7 @@ def _audited_run(env, monkeypatch, steps, expect_rc):
     return ps[0], events_of(pathlib.Path(ps[0]["run_path"]))
 
 
-def test_until_done_writes_checks_start_before_the_checks(env, monkeypatch):
+def test_until_done_writes_checks_start_before_the_checks(env, monkeypatch):  # noqa: F811
     """`checks_start` is in the file by the moment checks.run_checks is called -- not
     only after it returns: the page must already say Testing while a check still runs.
     It carries the round and the checklist's size, and nothing a check could print."""
@@ -1318,7 +1325,7 @@ def test_until_done_writes_checks_start_before_the_checks(env, monkeypatch):
     assert evs[2]["kind"] == "checks"                     # ...and right before the checks
 
 
-def test_until_done_writes_audit_events_around_the_deviation_audit(env, monkeypatch):
+def test_until_done_writes_audit_events_around_the_deviation_audit(env, monkeypatch):  # noqa: F811
     """The deviation audit announces itself too: audit_start immediately before
     deviation_audit is called and audit_end right after it returns, with `result` one
     fixed word -- "clean" when nothing went unlogged. The two lines carry the round and
@@ -1337,7 +1344,7 @@ def test_until_done_writes_audit_events_around_the_deviation_audit(env, monkeypa
     assert st["step"] is None                             # ended: no step, no spinner
 
 
-def test_until_done_audit_end_says_deviations_when_something_went_unlogged(env, monkeypatch):
+def test_until_done_audit_end_says_deviations_when_something_went_unlogged(env, monkeypatch):  # noqa: F811
     """audit_end calls found contradictions "deviations" -- and the next round's clean
     audit says "clean" right beside it: two audits, two honest lines, each with its own
     audit_start before it. The run itself behaves exactly as before the lines existed."""
@@ -1352,7 +1359,7 @@ def test_until_done_audit_end_says_deviations_when_something_went_unlogged(env, 
     assert [e["kind"] for e in evs].count("audit_start") == 2   # every end had its start
 
 
-def test_until_done_audit_end_says_unusable_when_the_reply_never_parses(env, monkeypatch):
+def test_until_done_audit_end_says_unusable_when_the_reply_never_parses(env, monkeypatch):  # noqa: F811
     """A reply that parses as nothing twice over is "unusable" -- written on the path
     that breaks the run: the loop emits the line and THEN hands the diff to a human with
     its own EXIT_PARTIAL. The line rides along; it does not steer the exit."""
@@ -1363,7 +1370,7 @@ def test_until_done_audit_end_says_unusable_when_the_reply_never_parses(env, mon
     assert [e["kind"] for e in evs][-2] == "audit_start"
 
 
-def test_until_done_audit_end_says_error_when_the_audit_call_dies(env, monkeypatch):
+def test_until_done_audit_end_says_error_when_the_audit_call_dies(env, monkeypatch):  # noqa: F811
     """A dead or refused audit call is "error" -- not "unusable", even though the reply
     is as unreadable as one -- and the line is there before the run breaks with its own
     server-error exit, so the page shows Reviewing that ended, not one that hangs."""
@@ -1374,7 +1381,7 @@ def test_until_done_audit_end_says_error_when_the_audit_call_dies(env, monkeypat
     assert [e["kind"] for e in evs][-2] == "audit_start"        # written before the break
 
 
-def test_until_done_review_round_marked_on_its_round_start(env, monkeypatch):
+def test_until_done_review_round_marked_on_its_round_start(env, monkeypatch):  # noqa: F811
     """--review-round asks one extra round after the checks pass; that round's
     round_start says `review: true` and every other round's says false -- the rounds
     AFTER the review too, when it broke a check and the loop had to keep going."""

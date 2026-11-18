@@ -63,6 +63,7 @@ import math
 import os
 import re
 import signal
+import socketserver
 import statistics
 import subprocess
 import sys
@@ -1291,10 +1292,25 @@ class _Handler(BaseHTTPRequestHandler):
         self._missing()
 
 
+class _ViewerServer(ThreadingHTTPServer):
+    """The viewer's server, with the name lookup taken out. HTTPServer.server_bind
+    calls socket.getfqdn(host) -- a reverse DNS lookup that can hang a long time on
+    macOS runners (and on any machine with slow DNS): the viewer never came up, no
+    server.json was ever written, and the launcher's health probe waited forever.
+    This subclass binds through the plain socketserver and names itself from the
+    address it was GIVEN; getfqdn is never asked."""
+
+    def server_bind(self):
+        host = self.server_address[0]                  # the host string as GIVEN,
+        socketserver.TCPServer.server_bind(self)       # before bind rewrites it
+        self.server_name = host                        # a name, never a lookup
+        self.server_port = self.server_address[1]      # the port ACTUALLY bound (port 0)
+
+
 def make_server(host, port, idle_exit=1800):
     """The viewer's HTTP server, bound and ready (serve_forever() it; tests bind port
     0 and read server_address for the port they got)."""
-    httpd = ThreadingHTTPServer((host, int(port)), _Handler)
+    httpd = _ViewerServer((host, int(port)), _Handler)
     httpd.daemon_threads = True
     httpd.last_request = time.time()
     return httpd

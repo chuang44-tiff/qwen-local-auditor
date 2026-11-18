@@ -3167,6 +3167,14 @@ if [ "${QWEN_WATCH:-1}" != 0 ] && [ "${QWEN_WATCH_CHILD:-0}" != 1 ] && [ "$BG" -
   # registered nothing must leave nothing behind (cleanup takes the folder away).
   WATCH_TMPD="$(mktemp -d "${TMPDIR:-/tmp}/qwen-watch.XXXXXXXX")" || WATCH_TMPD=""
   if [ -n "$WATCH_TMPD" ]; then
+    # The pid the pointer and the owner stamp carry has to be one the CALLER can check.
+    # Under Git Bash/MSYS/Cygwin `$$` is the MSYS pid, while the Windows process running
+    # this shell -- the pid the caller's Popen holds and os.kill reaches -- has ANOTHER
+    # number, which MSYS exposes as /proc/$$/winpid: take it when that file reads, and
+    # plain `$$` everywhere else (a macOS box has no /proc, and a read that comes back
+    # empty is no answer at all).
+    WATCH_PID="$(tr -d '[:space:]' 2>/dev/null < "/proc/$$/winpid")"
+    [ -n "$WATCH_PID" ] || WATCH_PID="$$"
     # The id comes back in a file, not a command substitution: a here-document inside
     # $( ... ) is the one construction the old shells (macOS's bash 3.2, Git Bash) have
     # historically disagreed about. Only stdout is redirected: the `watch:` link line the
@@ -3176,7 +3184,7 @@ if [ "${QWEN_WATCH:-1}" != 0 ] && [ "${QWEN_WATCH_CHILD:-0}" != 1 ] && [ "$BG" -
     # hex digits, so nothing but a real registration can close a pointer. The SECOND line
     # is where this session's activity lines land (beside its pointer, lib/watch.py's
     # activity_path), so the shell never has to guess the registry's location.
-    PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" - "$WATCH_TITLE" "$$" "${TIMEOUT:-}" \
+    PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" - "$WATCH_TITLE" "$WATCH_PID" "${TIMEOUT:-}" \
       >"$WATCH_TMPD/watch.id" <<'PY'
 import sys
 try:
@@ -3207,13 +3215,14 @@ PY
     # the child python's own environment, which died with it, so the shell sets the
     # switches for its children here -- exported, so a wrapper or hook the agent runs
     # inherits them too and none of them registers a pointer of its own. QWEN_WATCH_PARENT
-    # says WHICH process the registration belongs to (this shell, $$): register() trusts
-    # the child switch only in a process that is not the named owner, so a child can
+    # says WHICH process the registration belongs to (this shell, the very WATCH_PID
+    # it registered under): register() trusts the child switch only in a process that
+    # is not the named owner, so a child can
     # never mistake itself for the registered run, while a second register() inside the
     # owning process itself stays the legitimate re-registration it is. With WATCH_ID
     # empty (the page off, or a python that could not run) there is no registered run
     # to be a child of, and nothing is set.
-    [ -n "$WATCH_ID" ] && export QWEN_WATCH_CHILD=1 QWEN_WATCH_PARENT=$$
+    [ -n "$WATCH_ID" ] && export QWEN_WATCH_CHILD=1 QWEN_WATCH_PARENT="$WATCH_PID"
     # The activity hook's target, exported the same way: the agent inherits it, and every
     # hook Claude Code runs for it inherits it too -- which is how the hook knows WHICH
     # file to append to without one path being written into the settings file. A session

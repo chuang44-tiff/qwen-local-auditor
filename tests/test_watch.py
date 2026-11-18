@@ -53,8 +53,11 @@ def ev_at(kind, t, **fields):
 
 
 def write_events(run, lines):
+    """The events file as the engine's emitter would hand it: EXACTLY these bytes.
+    Written binary on purpose -- text mode would turn every line ending into CRLF on
+    Windows, and the incremental fold counts bytes."""
     run.mkdir(parents=True, exist_ok=True)
-    (run / "events.jsonl").write_text("".join(x + "\n" for x in lines), encoding="utf-8")
+    (run / "events.jsonl").write_bytes(("".join(x + "\n" for x in lines)).encode("utf-8"))
 
 
 def pointer(**over):
@@ -527,7 +530,7 @@ def test_incremental_fold_equals_full_fold_and_reads_only_new_bytes(tmp_path, mo
     assert log == [("seek", committed), ("read", 0)]    # nothing new: zero new bytes
     done = ev_at("unit_done", 102.0, unit="a", role="r", ok=True, cached=False,
                  seconds=5.0, why="")                   # a line appended mid-poll
-    with real_open(path, "a", encoding="utf-8") as fh:
+    with real_open(path, "a", encoding="utf-8", newline="\n") as fh:
         fh.write(done + "\n")
     f = poll()
     assert f == watch.fold_events(lines + [done])
@@ -540,12 +543,12 @@ def test_incremental_fold_equals_full_fold_and_reads_only_new_bytes(tmp_path, mo
     f["phases"].append({"label": "junk"})                # never remember a trace
     part = ev_at("unit_done", 103.0, unit="b", role="r", ok=True, cached=False,
                  seconds=2.0, why="")
-    with real_open(path, "a", encoding="utf-8") as fh:  # the emitter caught mid-line
+    with real_open(path, "a", encoding="utf-8", newline="\n") as fh:  # mid-line
         fh.write(part[:20])
     f = poll()
     assert f == watch.fold_events(lines)                # no half line is folded...
     assert log == [("seek", committed), ("read", 20)]   # ...and its bytes stay unread
-    with real_open(path, "a", encoding="utf-8") as fh:  # the newline arrives
+    with real_open(path, "a", encoding="utf-8", newline="\n") as fh:  # the newline lands
         fh.write(part[20:] + "\n")
     f = poll()
     assert f == watch.fold_events(lines + [part])       # folded EXACTLY once: the wreck
@@ -554,8 +557,8 @@ def test_incremental_fold_equals_full_fold_and_reads_only_new_bytes(tmp_path, mo
     lines.append(part)
     committed += len(part) + 1
     resume = ev_at("run_start", 200.0, workflow="swarm", goal="again")
-    with real_open(path, "a", encoding="utf-8") as fh:  # a resume mid-file: the fold
-        fh.write(resume + "\n")                          # resets, as a full fold would
+    with real_open(path, "a", encoding="utf-8", newline="\n") as fh:  # a resume mid-file
+        fh.write(resume + "\n")                          # the fold resets, as it would
     f = poll()
     assert f == watch.fold_events(lines + [resume])
     assert f["goal"] == "again" and f["units"] == {} and f["phases"] == []
@@ -567,7 +570,7 @@ def test_incremental_fold_equals_full_fold_and_reads_only_new_bytes(tmp_path, mo
 
     def emit():
         for rec in extra:
-            with real_open(path, "a", encoding="utf-8") as fh:
+            with real_open(path, "a", encoding="utf-8", newline="\n") as fh:
                 fh.write(rec + "\n")
             time.sleep(0.001)
 
@@ -582,6 +585,20 @@ def test_incremental_fold_equals_full_fold_and_reads_only_new_bytes(tmp_path, mo
         t.join(timeout=60)
     assert not any(t.is_alive() for t in threads)
     assert watch._fold_for(pointer) == watch.fold_events(lines + [resume] + extra)
+    # and a Windows emitter: the next line arrives with a CRLF ending. The incremental
+    # fold must take exactly those bytes, fold the line into a fold EQUAL to the full
+    # one, and a \r must never end up inside a value (_fold_for cuts at the last \n
+    # and splitlines() eats the \r that rides in front of it)
+    crlf = ev_at("attention", 500.0, item="crlf", reason="r", detail="d")
+    with real_open(path, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(crlf + "\r\n")
+    f = poll()
+    assert f == watch.fold_events(lines + [resume] + extra + [crlf])
+    assert f["recent"][-1]["item"] == "crlf"
+    assert log[-1] == ("read", len(crlf) + 2)            # only the CRLF line came in
+    dumped = json.dumps(f)
+    assert "\r" not in dumped and "\\r" not in dumped    # no CR in the fold, no CR in
+    # any value either (json would print a real one as an escaped \r -- none is there)
 
 
 def test_incremental_fold_rereads_from_zero_when_the_file_is_truncated_or_replaced(
@@ -959,14 +976,44 @@ def test_serve_default_never_idles(monkeypatch):
     assert not os.path.exists(watch._server_path())      # ...and gone after a clean exit
 
 
+def test_make_server_never_resolves_its_host_name(monkeypatch):
+    """The viewer may never ask the resolver a thing: HTTPServer.server_bind calls
+    socket.getfqdn(host), a reverse DNS lookup that hangs a macOS runner (and any
+    machine with slow DNS) so long that no server.json is EVER written and the run's
+    health probe waits forever. With getfqdn rigged to raise, make_server still
+    binds -- and names itself from the host it was given and the port it got."""
+    def no_lookup(*args, **kwargs):
+        raise AssertionError("the viewer must never resolve its host name")
+    monkeypatch.setattr(socket, "getfqdn", no_lookup)
+    httpd = watch.make_server("127.0.0.1", 0)
+    try:
+        assert httpd.server_address[0] == "127.0.0.1" and httpd.server_address[1] > 0
+        assert httpd.server_name == "127.0.0.1"           # the host string, not a lookup
+        assert httpd.server_port == httpd.server_address[1]   # the port ACTUALLY bound
+    finally:
+        httpd.server_close()
+
+
 def test_serve_binds_every_listed_address():
     """QWEN_WATCH_HOST may be a comma-separated list, and `serve` binds EVERY address
     on the same port in ONE process: each answers /health, the single live process is
-    the one server.json names, and the record carries the FIRST address."""
+    the one server.json names, and the record carries the FIRST address. macOS loopback
+    holds only 127.0.0.1 by default, so the test first probes whether 127.0.0.2 can be
+    bound at all: when that probe fails the address is not ours to assign, and the test
+    asserts instead that 127.0.0.1 serves, server.json names it, and the viewer printed
+    exactly one `watch:` warning naming 127.0.0.2."""
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))                      # a port nothing else holds
     port = listener.getsockname()[1]
     listener.close()
+    bind_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        bind_probe.bind(("127.0.0.2", 0))            # probe: is 127.0.0.2 bindable
+        can_bind_002 = True                          # here at all? (macOS loopback:
+    except OSError:                                  # 127.0.0.1 only by default)
+        can_bind_002 = False
+    finally:
+        bind_probe.close()
     proc = subprocess.Popen([sys.executable, WATCH_PY, "serve", "--host",
                              "127.0.0.1,127.0.0.2", "--port", str(port)],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -981,16 +1028,24 @@ def test_serve_binds_every_listed_address():
             if time.time() > deadline:
                 pytest.fail("no %s after 30 s" % record)
             time.sleep(0.05)
-        for host in ("127.0.0.1", "127.0.0.2"):          # both addresses answer
+        for host in ("127.0.0.1", "127.0.0.2") if can_bind_002 else ("127.0.0.1",):
             with urllib.request.urlopen("http://%s:%d/health" % (host, port),
                                         timeout=10) as resp:
                 assert json.loads(resp.read()) == {"app": "qwen-watch"}, host
         info = watch.server_info()
         assert info["pid"] == proc.pid                    # ONE process, both addresses
         assert info["host"] == "127.0.0.1" and info["port"] == port   # the first one
-        if os.path.isdir("/proc"):                        # one server thread per address
+        if can_bind_002 and os.path.isdir("/proc"):       # one server thread per address
             assert len(os.listdir("/proc/%d/task" % proc.pid)) >= 2   # the caller's own
             # serve_forever plus the extra address's thread, all in this one process
+        if not can_bind_002:
+            # the address we could not bind is exactly what the page lost, and no more:
+            # stop first (a closed stderr is the complete warning record), then name it
+            watch.main(["stop"])
+            err = proc.stderr.read()
+            proc.wait(timeout=10)
+            warn = [ln for ln in err.splitlines() if ln.startswith("watch:")]
+            assert len(warn) == 1 and "127.0.0.2" in warn[0], err
     finally:
         if proc.poll() is None:
             watch.main(["stop"])                          # the documented way down
@@ -1411,7 +1466,8 @@ def test_hook_writes_one_line_per_tool_call(tmp_path):
     with open(out, encoding="utf-8") as fh:
         lines = fh.read().splitlines()                              # appended, never rewritten
     assert [json.loads(ln)["ev"] for ln in lines] == ["pre", "post"]
-    assert oct(os.stat(out).st_mode & 0o777) == "0o600"
+    if os.name == "posix":                                # Windows reports 0o666: NTFS
+        assert oct(os.stat(out).st_mode & 0o777) == "0o600"   # has no POSIX file modes
     # the four events the page registers, and a SubagentStop as a stop too
     for event, want in (("PreToolUse", "pre"), ("PostToolUse", "post"),
                         ("PostToolUseFailure", "post"),
