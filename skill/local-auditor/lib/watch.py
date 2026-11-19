@@ -26,6 +26,21 @@ until `python lib/watch.py stop` SIGTERMs it (an `idle_exit` above 0 is the old
 self-exit, off by default). `python lib/watch.py dismiss <id>` removes an ended or
 killed run's pointer now instead of at the prune.
 
+TITLES: describe(path, limit=60) gives a launcher the short description of a file's OWN
+text that belongs in its title -- at most the first 64 KiB read as UTF-8 (errors
+replaced; any OSError reads as no description at all). The text comes from the first
+non-empty line after a `# Goal` heading (case-insensitive, any heading level), else from
+the first non-empty line that is no heading, no `---` front-matter fence or front-matter
+content and no fenced-code line, else from the first heading's text (its `#`s gone). It
+is cleaned (link syntax folded to its text, emphasis and backticks gone, list markers
+dropped, control characters removed, whitespace collapsed), cut at the first sentence
+end (`. `, `? `, `! ` or end of line), then to `limit` characters at a word boundary --
+an ellipsis marks a cut -- and a trailing `.` or `:` goes. The until-done loop titles
+itself `"<description> (<file name>)"` (lib/supervisor.py) and the single-shot
+`-f FILE` run `"<role>: <description> (<file name>)"` (qwen-agent.sh); either falls
+back to the plain file-name title when describe() finds nothing, and inline prompts and
+`-f -` never consult the file rule at all.
+
 BEST EFFORT: every watch call in a launcher is wrapped so a failure prints at most one
 `watch: ...` warning line to stderr and never changes the run's exit code. QWEN_WATCH=0
 disables registration and server start (environment first, then the config file);
@@ -109,6 +124,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -381,6 +397,126 @@ def finish(run_id, exit_code):
     pointer["end"] = time.time()
     pointer["exit"] = exit_code
     _write_json(_pointer_path(run_id), pointer)
+
+
+# ---------------------------------------------------------------- run titles
+# The one-line description a launcher takes from a FILE's own text for its title (the
+# docstring's TITLES paragraph): describe() is pure reading -- a file it cannot open
+# simply has no description, and nothing here may raise at a launcher.
+
+DESCRIBE_BYTES = 64 * 1024                      # at most this many bytes are read
+DESCRIBE_LIMIT = 60                             # the default description length
+_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})(?:[ \t]+(.*))?$")
+_GOAL_RE = re.compile(r"^\s{0,3}#{1,6}[ \t]+goal$", re.IGNORECASE)
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_LIST_MARKER_RE = re.compile(r"^(?:[-*][ \t]+|[0-9]+\.[ \t]+)")
+_SENTENCE_RE = re.compile(r"[.?!][ \t]")
+_STRONG_STAR_RE = re.compile(r"\*\*(.+?)\*\*")
+_STRONG_UNDER_RE = re.compile(r"(?<!\w)__(.+?)__(?!\w)")
+_EM_STAR_RE = re.compile(r"\*([^*]+?)\*")
+_EM_UNDER_RE = re.compile(r"(?<!\w)_([^_]+?)_(?!\w)")
+
+
+def _desc_clean(line):
+    """One candidate line as the description reads it: link syntax folded to its text,
+    the list marker dropped, markdown emphasis and backticks gone -- emphasis being
+    what it is in markdown, a PAIRED delimiter (** __ * _), so a delimiter that sits
+    inside a word (snake_case_name) is literal text and stays -- control characters
+    removed and every run of whitespace collapsed to a single space (which trims the
+    line)."""
+    s = _LINK_RE.sub(r"\1", line)
+    s = _LIST_MARKER_RE.sub("", s, count=1)
+    s = _STRONG_STAR_RE.sub(r"\1", s)
+    s = _STRONG_UNDER_RE.sub(r"\1", s)
+    s = _EM_STAR_RE.sub(r"\1", s)
+    s = _EM_UNDER_RE.sub(r"\1", s)
+    s = s.replace("`", "")
+    return "".join(ch for ch in " ".join(s.split()) if unicodedata.category(ch)[0] != "C")
+
+
+def _desc_cut(s, limit):
+    """The description's own length rule: keep at most the first sentence (cut before
+    the space that ends a `.`, `?` or `!`), then at most `limit` characters -- a cut
+    that landed inside a word backs off to the last word boundary, and an ellipsis
+    marks every cut. A trailing `.` or `:` goes with it; what is left is returned
+    ("" when nothing survives the stripping)."""
+    m = _SENTENCE_RE.search(s)
+    if m:
+        s = s[:m.start() + 1]
+    if 0 < limit < len(s):
+        cut = s[:limit]
+        if not s[limit].isspace():              # inside a word: back off to its start
+            sp = cut.rfind(" ")
+            if sp > 0:
+                cut = cut[:sp]
+        s = cut.rstrip() + "…"
+    while s.endswith((".", ":")):
+        s = s[:-1].rstrip()
+    return s
+
+
+def describe(path, limit=DESCRIBE_LIMIT):
+    """A short, readable description of a file's text for a run title, or "" when the
+    file cannot be read (any OSError, most simply one that is not there) or holds
+    nothing usable. At most the first DESCRIBE_BYTES bytes are read, decoded as UTF-8
+    with errors replaced. The text is the first non-empty line after a `# Goal`
+    heading (case-insensitive, any level); a file with no such section is read from
+    its first non-empty line that is no heading, no `---` front-matter fence or
+    front-matter content and no fenced-code line; a file with no such line but a
+    heading reads as the first heading's text (without the `#`s). Everything found is
+    cleaned (_desc_clean) and cut (_desc_cut)."""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(DESCRIBE_BYTES)
+    except OSError:
+        return ""
+    lines = data.decode("utf-8", "replace").splitlines()
+    fm_end = 0                                  # front matter, when closed, is [0:fm_end)
+    if lines and lines[0].strip() == "---":
+        for j in range(1, len(lines)):
+            if lines[j].strip() == "---":
+                fm_end = j + 1
+                break
+    goal_after = None                           # index just after the Goal heading
+    first_heading = None                        # the first heading's text
+    prose = None                                # the first plain-prose line
+    in_code = None                              # the open fence's marker, if any
+    for i, line in enumerate(lines):
+        if i < fm_end or (fm_end == 0 and i == 0 and lines[0].strip() == "---"):
+            continue                            # front matter: the fences and their text
+        m = _FENCE_RE.match(line)
+        if m:                                   # a fence line is never content: the
+            if in_code is None:                 # opening one starts a block and the
+                in_code = m.group(1)            # same marker ends it (an unclosed one
+            elif m.group(1) == in_code:         # runs to the end of what was read)
+                in_code = None
+            continue
+        if in_code is not None:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        head = _HEADING_RE.match(line)
+        if head:
+            if first_heading is None:
+                first_heading = head.group(2) or ""
+            if goal_after is None and _GOAL_RE.match(stripped):
+                goal_after = i + 1
+            continue
+        if prose is None:
+            prose = stripped
+    cand = None
+    if goal_after is not None:                  # the Goal section: the first non-empty
+        for line in lines[goal_after:]:         # line after it, taken as it stands
+            if line.strip():
+                cand = line.strip()
+                break
+    if cand is None:
+        cand = prose
+    if cand is None:
+        cand = first_heading
+    return _desc_cut(_desc_clean(cand or ""), limit)
 
 
 def _health():

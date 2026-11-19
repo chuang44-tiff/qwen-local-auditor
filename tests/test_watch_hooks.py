@@ -570,10 +570,11 @@ printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"num_turns
     assert "QWEN_WATCH_CHILD=" not in offenv               # the shell exports neither
 
 
-def test_qwen_agent_title_of_a_prompt_file_is_its_name(tmp_path, server, fake):  # noqa: F811
-    """A prompt read from a file gives the page the file's NAME only: the body is a prompt,
-    and the page may never show one. The exits that leave the script early -- --dry-run and
-    --preflight-only among them -- register nothing either."""
+def test_qwen_agent_title_of_a_prompt_file_describes_it(tmp_path, server, fake):  # noqa: F811
+    """A prompt read from a file gives the page a short description taken from the file's
+    OWN text, with the file's name kept at the end for identification. The exits that
+    leave the script early -- --dry-run and --preflight-only among them -- register
+    nothing either."""
     ask = tmp_path / "the leaked secret ask.md"          # a space in the name, as any file may
     ask.write_text("the whole prompt body, which the page must never read\n", encoding="utf-8")
     on = {"QWEN_WATCH": "1", "QWEN_WATCH_NOSERVE": "1"}
@@ -582,8 +583,8 @@ def test_qwen_agent_title_of_a_prompt_file_is_its_name(tmp_path, server, fake): 
     assert r.returncode == 0, r.stderr
     ps = pointers()
     assert len(ps) == 1, ps
-    assert ps[0]["title"] == "auditor: the leaked secret ask.md"
-    assert "prompt body" not in json.dumps(ps[0])        # nothing of it reached the registry
+    assert ps[0]["title"] == ("auditor: the whole prompt body, which the page must never "
+                              "read (the leaked secret ask.md)")
     assert ps[0]["timeout"] is None                      # --no-timeout: nothing to count down
     for args in (["--dry-run", "-r", "auditor", "hi"], ["--preflight-only"]):
         rr = test_cli.run(tmp_path, args, server, fake, extra=dict(on))
@@ -605,7 +606,8 @@ def test_a_detached_run_registers_nothing(tmp_path, server, fake):  # noqa: F811
 
 
 def test_until_done_registers_and_finishes(env, capsys):  # noqa: F811
-    """The loop is the run: one `until-done` pointer, titled for the task FILE, pointed at
+    """The loop is the run: one `until-done` pointer, titled for what the task file asks
+    (its describe()'d first description) with the file's name at the end, pointed at
     the run folder, its rounds counted against --max-rounds, and closed with the exit."""
     repo, task, tmp = env
     script(tmp, [{"result": "tried"},
@@ -614,7 +616,7 @@ def test_until_done_registers_and_finishes(env, capsys):  # noqa: F811
     ps = pointers()
     assert len(ps) == 1, ps                              # the rounds' agents add none
     p = ps[0]
-    assert p["kind"] == "until-done" and p["title"] == "task.md"
+    assert p["kind"] == "until-done" and p["title"] == "Make the value good (task.md)"
     assert p["pid"] == os.getpid() and p["timeout"] is None
     assert p["max_rounds"] == 3                          # --max-rounds: the denominator
     assert p["end"] is not None and p["exit"] == 0

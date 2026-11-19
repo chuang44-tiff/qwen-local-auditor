@@ -3252,8 +3252,11 @@ fi
 # a detached subshell, drops the EXIT trap and exits 0, so a pointer written here would be
 # owned by a pid that dies at once while the job goes on running -- the page would read a
 # live run as killed, and nothing would ever finish it. The title is the role and what was
-# asked for -- the first 60 characters of the prompt, or the prompt file's NAME, since the
-# page may never read a prompt body.
+# asked for: the first 60 characters of an inline prompt, or -- for `-f FILE` -- the
+# description lib/watch.py's describe() takes from the file's own text with the file's
+# name kept at the end (`-f -` reads the prompt from stdin, which is no file to
+# describe, so it stays on the file-name title; an empty description, a python that
+# could not answer or an unresolved QA_PY keeps today's title too).
 # BEST EFFORT: one `watch: ...` line on stderr at most, and never a change to the run's
 # exit code -- an empty WATCH_ID makes every later watch call, cleanup's included, a no-op.
 if [ "${QWEN_WATCH:-1}" != 0 ] && [ "${QWEN_WATCH_CHILD:-0}" != 1 ] && [ "$BG" -eq 0 ] \
@@ -3273,6 +3276,28 @@ if [ "${QWEN_WATCH:-1}" != 0 ] && [ "${QWEN_WATCH_CHILD:-0}" != 1 ] && [ "$BG" -
     # empty is no answer at all).
     WATCH_PID="$(tr -d '[:space:]' 2>/dev/null < "/proc/$$/winpid")"
     [ -n "$WATCH_PID" ] || WATCH_PID="$$"
+    # `-f FILE` names the run for what the file ASKS FOR: describe()'s one-line reading
+    # of the file's own text, with the file's name kept at the end for identification
+    # (the WATCH_TITLE above stands when the answer comes back empty: no file to read,
+    # an unresolved QA_PY, or a python that could not run). Same PYTHONPATH/QA_PY
+    # pattern as the registration below; the answer goes to a file, not a command
+    # substitution -- the here-document rule two comments down. \r stripped on the read
+    # (K8): a native Windows python ends its lines CRLF.
+    if [ -n "$PROMPT_FILE" ] && [ "$PROMPT_FILE" != "-" ] && [ -f "$PROMPT_FILE" ] \
+       && [ -n "$QA_PY" ]; then
+      PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" - "$(native_path "$PROMPT_FILE")" \
+        >"$WATCH_TMPD/desc.txt" 2>/dev/null <<'PY'
+import sys
+try:
+    from lib import watch
+    sys.stdout.write(watch.describe(sys.argv[1]))
+except Exception:
+    pass
+PY
+      _watch_desc="$(tr -d '\r' <"$WATCH_TMPD/desc.txt" 2>/dev/null || true)"
+      [ -n "$_watch_desc" ] && WATCH_TITLE="$ROLE: $_watch_desc (${PROMPT_FILE##*/})"
+      unset _watch_desc
+    fi
     # The id comes back in a file, not a command substitution: a here-document inside
     # $( ... ) is the one construction the old shells (macOS's bash 3.2, Git Bash) have
     # historically disagreed about. Only stdout is redirected: the `watch:` link line the

@@ -1004,6 +1004,20 @@ def _watch_start(title, run_dir, max_rounds):
                                       # so _watch_end still closes the pointer
 
 
+def _watch_title(task_path):
+    """The loop's page title: a short description taken from the task file's OWN text
+    and its name kept at the end -- "<description> (<file name>)", or just the file
+    name when watch.describe() finds nothing (or the file cannot be read: a title is
+    never a reason to fail the run, so this is best effort all the way down)."""
+    name = os.path.basename(str(task_path))
+    try:
+        desc = watch.describe(task_path)
+    except Exception as e:
+        watch._warn("the title description failed (%s); the file name stands alone" % e)
+        desc = ""
+    return "%s (%s)" % (desc, name) if desc else name
+
+
 def _watch_end(run_id, code):
     """Record the loop's end and exit in its pointer, on every way out of the run.
     Likewise best effort: one warning line, the exit unchanged."""
@@ -1290,10 +1304,11 @@ def _run(o):
         # the page registers it -- the registration is the address a note is sent to,
         # and the inbox must already answer when that address goes public.
         run_inbox = _run_inbox_init(run_dir)
-        # The page shows the loop as soon as it has a folder to show: the task file's
-        # name is its title, the folder its progress (the round files under it), and
+        # The page shows the loop as soon as it has a folder to show: what the task
+        # file asks for (its own first description) with its name kept at the end is
+        # the title, the folder the progress (the round files under it), and
         # --max-rounds the denominator of that progress.
-        watch_id = _watch_start(os.path.basename(o.task), run_dir, o.max_rounds)
+        watch_id = _watch_start(_watch_title(o.task), run_dir, o.max_rounds)
         if o.advisor:
             # ONE state dir for the whole loop, handed to every coder round: the budget
             # and the call log are shared, so QWEN_ADVISOR_MAX_CALLS caps the run rather
