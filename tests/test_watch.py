@@ -2684,7 +2684,7 @@ def test_phase_collapse_defaults_and_the_users_choice_wins():
     src = _page_fn("phaseOpen")
     probe = src + "\nconsole.log(JSON.stringify([phaseOpen(null,true),phaseOpen(null,false)," \
         "phaseOpen(true,true),phaseOpen(false,false),phaseOpen('x',true)]));"
-    out = subprocess.run(["node", "-e", probe], capture_output=True, text=True, timeout=30)
+    out = subprocess.run(["node", "-e", probe], capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout) == [False, True, True, False, False]
 
@@ -2785,7 +2785,7 @@ def _page_eval(expr, printer):
         ["node"],
         input=_page_script() + "\n"
               + printer % "eval(process.env.WATCH_PAGE_EXPR)",
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, encoding="utf-8", timeout=30,
         env=dict(os.environ, WATCH_PAGE_EXPR=expr))
     assert out.returncode == 0, out.stderr
     return out.stdout
@@ -3755,7 +3755,7 @@ def test_claude_ledger_rereads_only_when_size_or_mtime_changes(tmp_path):
     path = watch.claude_ledger_path()
     st = os.stat(path)
     data = ledger_raw()
-    with open(path, "w", encoding="utf-8") as fh:
+    with open(path, "w", encoding="utf-8", newline="") as fh:  # no CRLF on Windows
         fh.write(data.replace('"m1"', '"m2"'))                # same bytes...
     assert os.path.getsize(path) == st.st_size
     os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))       # ...written at the same stamp
