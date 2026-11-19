@@ -81,5 +81,12 @@
    "hours": 8
   }
  },
+ "phases": [
+  {"label": "research: scope", "n": 1},
+  {"label": "research: search"},
+  {"label": "research: fetch"},
+  {"label": "research: verify"},
+  {"label": "research: synthesize", "n": 1}
+ ],
  "default_depth": "standard"
 }

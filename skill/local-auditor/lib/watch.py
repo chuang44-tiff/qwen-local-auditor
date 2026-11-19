@@ -34,7 +34,9 @@ QWEN_WATCH_PARENT=<own pid>, and a later register() refuses unless its own pid i
 registered owner (so a swarm agent's own subprocesses never re-register, while a second
 register() in the owning process itself still works).
 
-THE FOLD: fold_events turns the run's events into the page's data -- the current phase
+THE FOLD: fold_events turns the run's events into the page's data -- the current phase,
+the workflow's declared outline (`plan`, from phase_plan: run_detail hands the entries no
+phase has taken yet to the page as `planned`, its placeholders for the phases to come),
 plus one `phases` entry per phase_start (its seat usage: wall, busy, usage, tail, filled
 in once the phase finishes), and per-unit timings (started, ended, and the unit_start's
 timeout budget) so the run view can draw a per-agent time bar (a unit's `progress` over
@@ -90,7 +92,7 @@ ACTIVITY_DIR = "activity"                     # a swarm run's per-unit hook file
 ACTIVITY_SUFFIX = ".activity.jsonl"           # a single-shot session's file, beside its
                                               # pointer (never *.json: never a pointer)
 SERVER_FILE = "server.json"                    # who holds the port: what `stop` reads
-RECENT_KEEP = 15                              # fold_events keeps the last N events
+RECENT_KEEP = 50                              # fold_events keeps the last N events
 AGENT_HIDE_AFTER = 600                        # s an ended agent run stays in /api/runs
 PRUNE_AFTER = 3600                            # s after which a pointer file is deleted
 HEALTH_TIMEOUT = 1.0                          # s to wait for /health when probing
@@ -387,7 +389,8 @@ def _num(value):
 
 def _empty_fold():
     return {"workflow": None, "goal": None, "phase": None, "phases": [], "units": {},
-            "attention": [], "recent": [], "ended": False, "exit": None, "_end_t": None}
+            "attention": [], "recent": [], "ended": False, "exit": None, "_end_t": None,
+            "plan": []}
 
 
 def _touch_unit(fold, name, role):
@@ -414,14 +417,16 @@ def _touch_unit(fold, name, role):
 def fold_events(lines):
     """Fold RUN/events.jsonl into what the page shows:
     {workflow, goal, phase: {label, n, seats, units: [...]}, phases: [...],
-     units: {name: {role, state, seconds, why, started, ended, finished_t, timeout}},
-     attention: [...], recent: [...], ended, exit}.
+     units: {name: {role, state, seconds, why, started, ended, finished_t, timeout, ok}},
+     attention: [...], recent: [...], ended, exit, plan: [{label, n, state}]}.
     phases is one entry per phase_start -- {label, n, seats, start, end, wall, busy,
     usage, tail, units} -- with the seat-usage numbers filled in for the phases that
     finished (_finish_phases); end is None while a phase is still running.
     A line that does not parse (a truncated last line, garbage) is skipped, never
     raised. A second run_start (a --resume) resets the fold: only events after the
-    last one count. recent holds the last 15 events."""
+    last one count. recent holds the last RECENT_KEEP (50) events: the page shows
+    eight and offers the rest, and a window that only ever held fifteen made its
+    "show more" a lie."""
     fold = _fold_into(_empty_fold(), lines)
     _finish_phases(fold)
     return fold
@@ -452,7 +457,10 @@ def _fold_into(fold, lines):
         fold["recent"].append(rec)
         if len(fold["recent"]) > RECENT_KEEP:
             fold["recent"].pop(0)
-        if kind == "phase_start":
+        if kind == "phase_plan":
+            fold["plan"] = _plan_entries(rec.get("phases"))
+        elif kind == "phase_start":
+            _consume_plan(fold, rec.get("label"))
             names = []
             items = rec.get("units")
             if not isinstance(items, (list, tuple)):
@@ -464,7 +472,8 @@ def _fold_into(fold, lines):
                 if unit is None or name in names:
                     continue
                 unit.update(state="queued", seconds=None, why="", started=None,
-                            ended=None, finished_t=None, timeout=None)  # a re-listed unit
+                            ended=None, finished_t=None, timeout=None,
+                            ok=None)                        # a re-listed unit
                 names.append(name)                                      # starts clean
             n = rec.get("n")
             if not isinstance(n, int) or isinstance(n, bool) or n < 0:
@@ -491,6 +500,10 @@ def _fold_into(fold, lines):
             unit = _touch_unit(fold, rec.get("unit"), rec.get("role"))
             if unit is not None:
                 unit["state"] = "cached" if rec.get("cached") else "done"
+                # an ok:false unit_done is still a DONE state (the unit finished its
+                # turn), but it ended badly: keep the verdict so the page can show a
+                # failed unit as failed instead of a green check
+                unit["ok"] = rec.get("ok") is not False
                 seconds = rec.get("seconds")
                 unit["seconds"] = (seconds if isinstance(seconds, (int, float))
                                    and not isinstance(seconds, bool)
@@ -516,6 +529,59 @@ def _fold_into(fold, lines):
             fold["exit"] = rec.get("exit")
             fold["_end_t"] = _num(rec.get("t"))
     return fold
+
+
+def _plan_entries(items):
+    """A phase_plan's phases as the fold keeps them: {label, n, state} per entry with a
+    usable label -- state "pending" until a phase_start takes it. n is an int >= 0 or
+    None. A later phase_plan replaces the outline whole."""
+    out = []
+    if not isinstance(items, (list, tuple)):
+        return out
+    for item in items[:64]:                     # bound what a hand-built line can ask for
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label")
+        if not isinstance(label, str) or not label:
+            continue
+        n = item.get("n")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            n = None
+        out.append({"label": label, "n": n, "state": "pending"})
+    return out
+
+
+def _consume_plan(fold, label):
+    """A phase_start takes the FIRST pending outline entry with its label (a label the
+    outline lists twice is taken once per phase_start). The pending entries before the
+    taken one are passed over -- the workflow went past them (a review with nothing to
+    review) -- and stop being placeholders. A label the outline does not list (a phase
+    added at run time) takes nothing: it shows as a phase all the same."""
+    plan = fold.get("plan") or []
+    for j, entry in enumerate(plan):
+        if entry["state"] == "pending" and entry["label"] == label:
+            for earlier in plan[:j]:
+                if earlier["state"] == "pending":
+                    earlier["state"] = "skipped"
+            entry["state"] = "started"
+            return
+
+
+def planned_phases(fold):
+    """The outline entries no phase_start has taken yet, in outline order, as {label, n}:
+    the page's placeholders for the phases still to come (or, once the run has ended,
+    the ones it never reached). [] for a run whose workflow declared no outline -- every
+    events file written before phase_plan existed among them."""
+    return [{"label": e["label"], "n": e["n"]} for e in fold.get("plan") or []
+            if e["state"] == "pending"]
+
+
+def skipped_phases(fold):
+    """The outline entries a phase_start passed over (the workflow jumped from plan to
+    read), in outline order, as {label, n}: the page's "Skipped" placeholders -- a phase
+    that vanished from the run's shape read "Phase 2 of 3" on a five-phase outline."""
+    return [{"label": e["label"], "n": e["n"]} for e in fold.get("plan") or []
+            if e["state"] == "skipped"]
 
 
 def _finish_phases(fold):
@@ -1001,7 +1067,9 @@ def _unit_activity_file(run_path, name):
 
 def _checks_view(rec):
     """A `checks` event as the page wants it: the counts, and each item's text (the
-    emitter trimmed it to 100 characters) with the state it ended in."""
+    emitter trimmed it to 100 characters -- a line cut there says so with a visible
+    ellipsis, so a reader knows they are not seeing the whole check) with the state
+    it ended in."""
     def count(value):
         return value if isinstance(value, int) and not isinstance(value, bool) else None
     listed = rec.get("items")
@@ -1011,7 +1079,9 @@ def _checks_view(rec):
             continue
         text = item.get("text")
         status = item.get("status")
-        items.append({"text": text[:100] if isinstance(text, str) else "",
+        cut = text[:100] if isinstance(text, str) else ""
+        trimmed = isinstance(text, str) and len(text) > 100
+        items.append({"text": cut + ("…" if trimmed else ""),
                       "status": status if isinstance(status, str) and status in CHECK_STATES
                       else "UNVERIFIED"})
     return {"round": count(rec.get("round")), "passed": count(rec.get("passed")),
@@ -1110,7 +1180,9 @@ def run_state(pointer, now):
 
 def run_detail(run_id, now):
     """One run's page data: run_state plus the fold (workflow, goal, phase, phases,
-    attention, recent, ended), a per-unit `progress` for the agent rows' bars
+    attention, recent, ended), `planned` (the declared phases not started yet:
+    planned_phases) and `skipped` (the declared phases a phase_start passed over:
+    skipped_phases), a per-unit `progress` for the agent rows' bars
     (_unit_progress), and, for an until-done run, the rounds count and report.md's
     stop: line. Besides those: `activity` on the run itself for a single-shot session or
     a coder loop, `activity` on each unit whose hook file exists for a swarm or research
@@ -1126,6 +1198,8 @@ def run_detail(run_id, now):
     fold = _fold_for(pointer)
     for key in ("workflow", "goal", "phase", "phases", "attention", "recent", "ended"):
         st[key] = fold[key]
+    st["planned"] = planned_phases(fold)
+    st["skipped"] = skipped_phases(fold)   # the outline entries the run jumped over
     for unit in st["units"].values():
         unit["progress"] = _unit_progress(unit, now)
     if st.get("exit") is None:
@@ -1173,7 +1247,9 @@ def list_runs(now):
     last activity) is more than PRUNE_AFTER s ago is deleted here -- its activity file
     with it, so the registry holds nothing a gone run left behind. For the overview's
     agent and coder-loop cards it carries the small `activity` (state, cls, tool, target,
-    since, ctx, win) and, for a coder loop, round.n and the checks' passed/total."""
+    since, ctx, win) and, for a coder loop, round.n and the checks' passed/total.
+    Every entry also carries `last_t`: the moment of the run's freshest event (its start
+    when it has none) -- what an overview card measures its silence against."""
     try:
         names = os.listdir(watch_dir())
     except OSError:
@@ -1220,6 +1296,8 @@ def list_runs(now):
         if run_file:
             # one status line and the context meter per agent or coder loop, no call list
             st["activity"] = _small_activity(activity_fold(run_file, now))
+        # the card's "No update for" flag reads this: the freshest moment the run spoke
+        st["last_t"] = _last_activity(pointer)
         runs.append(st)
     runs.sort(key=lambda st: st.get("start") if isinstance(st.get("start"),
                                                             (int, float)) else 0,

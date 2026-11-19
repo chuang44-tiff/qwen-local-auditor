@@ -61,6 +61,7 @@ my-workflow/
 | `knobs` | name -> `int` (>= 0), `float`, `str` or `bool`; a name may not shadow a config key (`depth`, `goal`, `budget`, ...); `--set` also takes the engine knobs `budget`, `retries`, `rounds` and `hours` without their being declared |
 | `presets.D` | may name only declared knobs and the engine knobs, and must set every declared knob plus `budget` (int >= 1, seconds per item), `retries` (int >= 0) and `rounds` (int >= 1 or `"until"`); `hours` is optional (> 0; required with `"until"`) |
 | `default_depth` | names a preset |
+| `phases` | optional: the run's outline for the watch page, at most 32 `{"label": ..., "n": ...}` objects in the order the phases are expected. `label` (1-60 characters) is the exact `label=` the workflow passes for that phase; `n`, optional, is its agent count, an int >= 0 or the name of an `int` knob that holds it. Before a phase starts, the page draws it as a placeholder; a phase the outline does not name still shows the moment it starts, and an outline entry the run goes past is dropped. The engine never runs, skips or checks a phase by it. Phases whose labels depend on the round can only be outlined for the first round, and a phase that runs only sometimes (a review with nothing to review) is best left out: unconsumed, it would sit as a placeholder below the later rounds' phases until a later outlined phase starts |
 
 Unknown keys are rejected; every error names its field and exits 2.
 
@@ -422,6 +423,7 @@ written.
 | kind | fields | when |
 |---|---|---|
 | `run_start` | `workflow`, `goal`, `run` (absolute path), `resumed`, `depth`, `knobs` | the run folder exists |
+| `phase_plan` | `phases` (each `label`, `n`: the manifest's outline, `n` resolved from its knob, `null` when unknown) | right after `run_start`, only when workflow.json has a `phases` outline |
 | `phase_start` | `label`, `n`, `seats`, `units` (each `unit`, `name`, `role`) | when the phase begins, before any of its units spawns. It is written even when no unit spawns (all cached). A phase no workflow named is labelled `phase N`. A roster too wide for one 4 KB line is announced without it -- `label`, `seats`, `truncated` -- because a unit name cut short stops matching that unit's own lines, and a part-roster would leave the progress bar stuck below 100% |
 | `unit_start` | `unit`, `role`, `timeout` (the seconds budget that call is spawned with -- the halved one for a review-round unit; the per-agent bar divides by it) | every unit that really spawns: not a cache hit, not one the deadline stopped |
 | `unit_done` | `unit`, `role`, `ok`, `cached`, `seconds`, `why` (on failure only) | every unit, cached ones included |

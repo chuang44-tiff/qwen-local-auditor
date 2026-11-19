@@ -17,5 +17,11 @@
   "deep": {"bench": "", "tests": "", "ideas": 6, "voters": 3, "min_gain": 0.01, "budget": 1800, "retries": 2, "rounds": 3},
   "overnight": {"bench": "", "tests": "", "ideas": 8, "voters": 3, "min_gain": 0.005, "budget": 2400, "retries": 2, "rounds": "until", "hours": 8}
  },
+ "phases": [
+  {"label": "optimize: bench check"},
+  {"label": "round 1: profile", "n": 1},
+  {"label": "round 1: implement"},
+  {"label": "optimize: report", "n": 1}
+ ],
  "default_depth": "deep"
 }

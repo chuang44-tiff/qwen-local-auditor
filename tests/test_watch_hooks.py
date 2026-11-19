@@ -1394,3 +1394,91 @@ def test_until_done_review_round_marked_on_its_round_start(env, monkeypatch):  #
     starts = [e for e in events_of(run) if e["kind"] == "round_start"]
     assert [(e["round"], e["review"]) for e in starts] == [(1, False), (2, True),
                                                            (3, False)], starts
+
+
+# ------------------------------------------------------------- the phase outline
+
+def test_a_manifest_outline_goes_out_as_phase_plan_after_run_start(tmp_path, fake_swarm):  # noqa: F811
+    """A workflow.json "phases" outline reaches the page as ONE phase_plan line, right
+    after run_start and before the first phase_start, every n resolved: an int as given,
+    a knob name as that knob's value this run, an absent n as null. The fold takes the
+    outline entry its phase_start names, and the rest are the page's placeholders."""
+    wf = echo(tmp_path, manifest={"phases": [{"label": "phase 1", "n": "items"},
+                                             {"label": "wrap up", "n": 1},
+                                             {"label": "tidy"}]})
+    out = tmp_path / "run"
+    assert swarm_main(wf, "say hi", "--out", str(out)) == 0
+    evs = events_of(out)
+    kinds = [e["kind"] for e in evs]
+    assert kinds[:3] == ["run_start", "phase_plan", "phase_start"]
+    assert evs[1]["phases"] == [{"label": "phase 1", "n": 3}, {"label": "wrap up", "n": 1},
+                                {"label": "tidy", "n": None}]
+    fold = watch.fold_events(lines_of(out))
+    assert watch.planned_phases(fold) == [{"label": "wrap up", "n": 1},
+                                          {"label": "tidy", "n": None}]
+
+
+def test_no_outline_writes_no_phase_plan(tmp_path, fake_swarm):  # noqa: F811
+    """A manifest without "phases" -- every workflow written before it existed -- adds
+    no line: the event stream is the one it always was."""
+    out = tmp_path / "run"
+    assert swarm_main(echo(tmp_path), "say hi", "--out", str(out)) == 0
+    assert "phase_plan" not in [e["kind"] for e in events_of(out)]
+    assert watch.planned_phases(watch.fold_events(lines_of(out))) == []
+
+
+def test_phase_plan_is_an_engine_kind():
+    """A workflow cannot forge an outline through wf.event: phase_plan is the engine's."""
+    assert "phase_plan" in events.ENGINE_KINDS
+    assert "phase_plan   phases: [{label, n}]" in (events.__doc__ or "")
+
+
+@pytest.mark.parametrize("phases, ok", [
+    ([], True),
+    ([{"label": "a"}, {"label": "b", "n": 0}, {"label": "c", "n": "items"}], True),
+    ("a, b", False),                                   # not a list
+    ([{"label": ""}], False),                          # empty label
+    ([{"label": "x" * 61}], False),                    # longer than one line can hold
+    ([{"label": "a", "n": -1}], False),
+    ([{"label": "a", "n": True}], False),
+    ([{"label": "a", "n": "nope"}], False),            # no such knob
+    ([{"label": "a", "seats": 2}], False),             # unknown key
+    ([{"label": "p%d" % i} for i in range(33)], False),  # over MAX_PHASES
+])
+def test_manifest_validates_the_outline(tmp_path, phases, ok):
+    from lib.swarm_engine import manifest
+    from swarm_fixtures import make_workflow
+    folder = make_workflow(tmp_path / "wfs", manifest={"phases": phases})
+    if ok:
+        assert manifest.load(folder).phases == phases
+    else:
+        with pytest.raises(manifest.ManifestError, match="phases"):
+            manifest.load(folder)
+
+
+def test_a_str_knob_cannot_count_agents(tmp_path):
+    from lib.swarm_engine import manifest
+    from swarm_fixtures import make_workflow
+    folder = make_workflow(tmp_path / "wfs", manifest={
+        "knobs": {"items": "int", "word": "str"},
+        "presets": {"quick": {"items": 3, "word": "", "budget": 100, "retries": 0, "rounds": 1}},
+        "phases": [{"label": "a", "n": "word"}]})
+    with pytest.raises(manifest.ManifestError, match="int knob"):
+        manifest.load(folder)
+
+
+def test_builtin_outlines_name_labels_their_workflows_pass():
+    """Every built-in workflow's outline entry is a label its workflow.py really passes
+    (with round 1 filled in for a round label): an outline label nothing passes would sit
+    as a placeholder until the run ended. Each outline also loads, n and all."""
+    from lib.swarm_engine import manifest
+    root = pathlib.Path(watch.__file__).resolve().parent / "workflows"
+    for folder in sorted(p for p in root.iterdir() if (p / "workflow.json").is_file()):
+        m = manifest.load(folder)
+        assert m.phases, folder.name
+        src = (folder / "workflow.py").read_text(encoding="utf-8")
+        for ph in m.phases:
+            label = ph["label"]
+            plain = 'label="%s"' % label
+            rounded = 'label="%s"' % label.replace("round 1:", "round %d:")
+            assert plain in src or rounded in src, (folder.name, label)

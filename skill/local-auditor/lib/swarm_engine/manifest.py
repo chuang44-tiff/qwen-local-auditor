@@ -14,6 +14,10 @@ KNOB_TYPES = ("int", "float", "str", "bool")
 ENGINE_KNOBS = ("budget", "retries", "rounds", "hours")
 TOP_KEYS = ("name", "description", "goal", "target", "roles", "knobs", "presets",
             "default_depth")
+# keys a manifest MAY carry: "phases" is the watch page's outline of the run (validate)
+OPTIONAL_KEYS = ("phases",)
+MAX_PHASES = 32                       # outline entries; with MAX_LABEL, one events line
+MAX_LABEL = 60                        # holds the whole outline (events.emit_phase_plan)
 ROLE_KEYS = ("file", "fence", "budget_weight", "effort", "deep")
 # qwen-agent depth switches a role may ask for ("deep": true, or no "deep" field at all,
 # = all of them on a fence with tools; "deep": false = none of them), in the order
@@ -64,10 +68,11 @@ class Role:
 
 class Manifest:
     def __init__(self, folder, name, description, goal, target, roles, knobs, presets,
-                 default_depth):
+                 default_depth, phases=()):
         self.folder, self.name, self.description, self.goal = folder, name, description, goal
         self.target, self.roles, self.knobs = target, roles, knobs
         self.presets, self.default_depth = presets, default_depth
+        self.phases = [dict(p) for p in phases]   # [{label, n?}]: n an int or an int knob
 
 
 def _is_int(v):
@@ -154,8 +159,9 @@ def validate(data, folder):
     if not isinstance(data, dict):
         raise ManifestError("workflow.json must hold one JSON object")
     for k in data:
-        if k not in TOP_KEYS:
-            raise ManifestError("unknown key %r (allowed: %s)" % (k, ", ".join(TOP_KEYS)))
+        if k not in TOP_KEYS and k not in OPTIONAL_KEYS:
+            raise ManifestError("unknown key %r (allowed: %s)"
+                                % (k, ", ".join(TOP_KEYS + OPTIONAL_KEYS)))
     for k in TOP_KEYS:
         if k not in data:
             raise ManifestError("missing key %r" % k)
@@ -246,8 +252,44 @@ def validate(data, folder):
         _check_engine(depth, preset)
     if not isinstance(data["default_depth"], str) or data["default_depth"] not in presets:
         raise ManifestError("default_depth must name a preset (one of %s)" % ", ".join(presets))
+    phases = _phases(data.get("phases", []), knobs)
     return Manifest(folder, name, data["description"], data["goal"], data["target"], roles,
-                    dict(knobs), {d: dict(p) for d, p in presets.items()}, data["default_depth"])
+                    dict(knobs), {d: dict(p) for d, p in presets.items()}, data["default_depth"],
+                    phases)
+
+
+def _phases(value, knobs):
+    """The optional "phases" outline: the phases the run is expected to go through, in
+    order, each {"label": the exact label= the workflow passes for it, "n": its agent
+    count -- an int >= 0, or the name of an int knob that holds it -- optional}. It is
+    only what the watch page draws as placeholders before a phase starts: the engine
+    never runs, skips or checks a phase by it, and a phase the outline does not name
+    still shows the moment it starts."""
+    if not isinstance(value, list) or len(value) > MAX_PHASES:
+        raise ManifestError("phases must be a list of at most %d {label, n} objects" % MAX_PHASES)
+    out = []
+    for i, ph in enumerate(value):
+        where = "phases[%d]" % i
+        if not isinstance(ph, dict):
+            raise ManifestError("%s must be an object with a label" % where)
+        for k in ph:
+            if k not in ("label", "n"):
+                raise ManifestError("%s: unknown key %r (allowed: label, n)" % (where, k))
+        label = ph.get("label")
+        if not isinstance(label, str) or not label.strip() or len(label) > MAX_LABEL:
+            raise ManifestError("%s.label must be a non-empty string of at most %d characters"
+                                % (where, MAX_LABEL))
+        entry = {"label": label}
+        if "n" in ph:
+            n = ph["n"]
+            if isinstance(n, str):
+                if knobs.get(n) != "int":
+                    raise ManifestError("%s.n %r names no int knob" % (where, n))
+            elif not (_is_int(n) and n >= 0):
+                raise ManifestError("%s.n must be an int >= 0 or the name of an int knob" % where)
+            entry["n"] = n
+        out.append(entry)
+    return out
 
 
 def load(folder):

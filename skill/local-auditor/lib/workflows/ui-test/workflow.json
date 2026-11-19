@@ -14,5 +14,9 @@
             "confirm_model": "opus", "confirm_max": 10,
             "budget": 900, "retries": 1, "rounds": 1}
  },
+ "phases": [
+  {"label": "ui-test: scenarios"},
+  {"label": "ui-test: confirm"}
+ ],
  "default_depth": "quick"
 }

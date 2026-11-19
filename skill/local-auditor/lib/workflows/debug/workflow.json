@@ -18,5 +18,11 @@
   "deep": {"hypotheses": 8, "voters": 3, "repro": "", "tests": "", "budget": 1200, "retries": 2, "rounds": 3},
   "overnight": {"hypotheses": 12, "voters": 5, "repro": "", "tests": "", "budget": 1800, "retries": 3, "rounds": "until", "hours": 8}
  },
+ "phases": [
+  {"label": "debug: triage", "n": 1},
+  {"label": "round 1: hypothesize", "n": 1},
+  {"label": "round 1: probe"},
+  {"label": "debug: report", "n": 1}
+ ],
  "default_depth": "standard"
 }

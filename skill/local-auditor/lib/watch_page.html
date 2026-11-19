@@ -10,13 +10,21 @@
   --paper:#EDF0F3;--panel:#FFFFFF;--sunk:#E3E8EE;--ink:#18202B;--muted:#5B6676;--line:#D5DBE2;
   --run:#2F6FED;--ok:#17905F;--bad:#D9484F;--warn:#B87708;--warn-bg:#FBF1DD;--floor:#C9D1DB;
   --r-lg:14px;--r-sm:8px;
+  /* the inks: the status colours darkened (light) or lifted (dark) for TEXT on the
+     tinted chips, where the plain colours fall under 4.5:1 */
+  --run-ink:#2353B8;--ok-ink:#11734B;--warn-ink:#875700;--bad-ink:#B3262E;
+  --test-ink:#A8306F;--mark-ink:#fff;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --paper:#0F141A;--panel:#171D25;--sunk:#1E2630;--ink:#E4E9F0;--muted:#93A0B1;--line:#263040;
-  --run:#6A9BFF;--ok:#3CC58A;--bad:#F06A70;--warn:#F0B04A;--warn-bg:#2A2214;--floor:#2C3644;}}
+  --run:#6A9BFF;--ok:#3CC58A;--bad:#F06A70;--warn:#F0B04A;--warn-bg:#2A2214;--floor:#2C3644;
+  --run-ink:#8DB3FF;--ok-ink:#5AD29D;--warn-ink:#F3BF66;--bad-ink:#F58C91;
+  --test-ink:#EE8DBF;--mark-ink:#0F141A;}}
 :root[data-theme="dark"]{
   --paper:#0F141A;--panel:#171D25;--sunk:#1E2630;--ink:#E4E9F0;--muted:#93A0B1;--line:#263040;
-  --run:#6A9BFF;--ok:#3CC58A;--bad:#F06A70;--warn:#F0B04A;--warn-bg:#2A2214;--floor:#2C3644;}
+  --run:#6A9BFF;--ok:#3CC58A;--bad:#F06A70;--warn:#F0B04A;--warn-bg:#2A2214;--floor:#2C3644;
+  --run-ink:#8DB3FF;--ok-ink:#5AD29D;--warn-ink:#F3BF66;--bad-ink:#F58C91;
+  --test-ink:#EE8DBF;--mark-ink:#0F141A;}
 *{box-sizing:border-box}
 body{margin:0;background:var(--paper);color:var(--ink);
   font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif;
@@ -25,6 +33,9 @@ main{max-width:880px;margin:0 auto;padding:16px 16px 48px}
 a{color:inherit}
 button{font:inherit;color:inherit}
 :focus-visible{outline:2px solid var(--run);outline-offset:2px;border-radius:6px}
+/* one quiet live region for screen readers: the announcements the poll must never make
+   (timers, every re-render) stay out of it -- only the real transitions of finding 1 */
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
 /* top bar */
 .top{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:10px}
@@ -48,11 +59,16 @@ button{font:inherit;color:inherit}
   text-decoration:none;padding-bottom:4px}
 .mate svg{width:58px;height:58px;display:block;margin:0 auto}
 .mate span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* the crew strip shows 16 robots at most: the rest count into this chip */
+.mate.chip{padding-bottom:18px;font-size:13px}
 .crew .empty{color:var(--muted);font-size:14px;padding:0 0 18px}
 
 /* sections */
 h2{font-size:15px;font-weight:650;margin:26px 0 10px;display:flex;gap:8px;align-items:baseline}
 h2 small{font-weight:400;color:var(--muted);font-size:13px}
+/* a section's title with its control beside it -- the button is a SIBLING of the h2,
+   never inside it (an interactive element inside a heading is no heading link) */
+.sec-head{display:flex;align-items:baseline;justify-content:space-between}
 
 /* running run cards */
 .run{display:grid;grid-template-columns:52px 1fr;gap:4px 12px;background:var(--panel);
@@ -64,7 +80,7 @@ h2 small{font-weight:400;color:var(--muted);font-size:13px}
 .run .sub{font-size:13px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 12px}
 .run .meter{grid-column:2}
 .kind{font-size:12px;font-weight:600;color:var(--muted)}
-.flag{color:var(--warn);font-weight:600}
+.flag{color:var(--warn-ink);font-weight:600}
 
 .bar{height:6px;border-radius:3px;background:var(--sunk);overflow:hidden;margin:8px 0 6px}
 .bar i{display:block;height:100%;border-radius:3px;background:var(--run);transition:width .6s ease}
@@ -72,50 +88,80 @@ h2 small{font-weight:400;color:var(--muted);font-size:13px}
 .bar.hot i{background:var(--warn)}
 .meta{display:flex;justify-content:space-between;font-size:13px;color:var(--muted);gap:8px}
 
-/* finished list: rows, not cards */
-.done-list{background:var(--panel);border-radius:var(--r-lg);overflow:hidden}
-.row{display:grid;grid-template-columns:20px 1fr;gap:2px 10px;align-items:center;padding:11px 14px;
-  text-decoration:none;border-top:1px solid var(--line)}
+/* finished list: rows, not cards -- a <ul> of <li class="row">, each one a link and a
+   hide button side by side (a button inside a link is invalid HTML and untabbable) */
+.done-list{background:var(--panel);border-radius:var(--r-lg);overflow:hidden;
+  list-style:none;margin:0;padding:0}
+.row{position:relative;border-top:1px solid var(--line);padding-right:48px}
 .row:first-child{border-top:0}
+.row-link{display:grid;grid-template-columns:20px 1fr;gap:2px 10px;align-items:center;
+  padding:11px 14px;text-decoration:none}
+/* the list clips its corners; pull the ring inside so it is never the clipped part */
+.row-link:focus-visible{outline:2px solid var(--run);outline-offset:-2px}
 .row .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .row .r{grid-column:2;font-size:13px;color:var(--muted)}
-.row{position:relative;padding-right:44px}
-.x-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);width:30px;height:30px;border:0;border-radius:8px;
+.x-btn{position:absolute;right:2px;top:50%;transform:translateY(-50%);width:44px;height:44px;border:0;border-radius:8px;
   background:transparent;color:var(--muted);font-size:18px;line-height:1;cursor:pointer}
 .x-btn:hover{background:var(--sunk);color:var(--ink)}
-.clear{margin-left:auto;border:0;background:transparent;color:var(--muted);font-size:13px;cursor:pointer;padding:4px 6px;border-radius:6px}
+.clear{margin-left:auto;border:0;background:transparent;color:var(--muted);font-size:13px;cursor:pointer;padding:10px 12px;min-height:44px;border-radius:6px}
 .clear:hover{background:var(--panel);color:var(--ink)}
-.mark{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:11px;font-weight:700}
+.mark{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;color:var(--mark-ink);font-size:11px;font-weight:700}
 .mark.ok{background:var(--ok)} .mark.bad{background:var(--bad)} .mark.gone{background:var(--muted)}
 
 /* run view */
-.back{display:inline-block;font-size:14px;color:var(--muted);text-decoration:none;margin:2px 0 12px}
+.back{display:inline-block;font-size:14px;color:var(--muted);text-decoration:none;margin:-6px 0 4px;padding:10px 12px 10px 0}
+.back:hover{color:var(--ink)}
+/* what the run is doing this minute, under its goal: the one line to read first */
+.now{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;margin:6px 0 2px;font-size:15px}
+.now .ph{font-weight:650}
+.now small{color:var(--muted);font-size:13px}
 .hero{background:var(--panel);border-radius:var(--r-lg);padding:16px;display:grid;
   grid-template-columns:64px 1fr;gap:4px 14px}
 .hero svg{width:64px;height:64px;grid-row:span 2}
-.hero h1{font-size:20px;line-height:1.3;margin:0;font-weight:650;overflow-wrap:break-word}
+.hero h1{font-size:20px;line-height:1.3;margin:0;font-weight:650;overflow-wrap:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.hero.full h1{display:block;overflow:visible}
 .hero .stat{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:14px;color:var(--muted)}
 .hero .stat b{color:var(--ink);font-weight:600}
 .hero .meter{grid-column:1/-1}
 .pill{font-size:12px;font-weight:650;padding:2px 9px;border-radius:99px;background:var(--sunk);color:var(--muted)}
-.pill.running{color:var(--run)} .pill.ended{color:var(--ok)} .pill.failed,.pill.killed{color:var(--bad)}
+.pill.running{color:var(--run-ink)} .pill.ended{color:var(--ok-ink)} .pill.failed,.pill.killed{color:var(--bad-ink)}
 
 .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px}
+/* the phases are a sequence: one rail runs through their status marks, showing
+   through the gaps between the cards (and through the dashed placeholders) */
+.phases{position:relative}
+.phases::before{content:"";position:absolute;left:22px;top:22px;bottom:22px;width:2px;background:var(--line);border-radius:1px}
+.phases .wave{position:relative}
+.wave.live{box-shadow:inset 3px 0 0 var(--run)}
+.ph-head .mark,.ph-head .spin{position:relative;z-index:1;box-shadow:0 0 0 3px var(--panel)}
+.wave.planned .mark{box-shadow:0 0 0 3px var(--paper)}
+/* agents still waiting for a seat: one quiet row of small sleepers, not a tile each */
+.queue{margin-top:10px;padding:8px 4px 2px;border-top:1px solid var(--line)}
+.queue p{margin:0 0 6px;font-size:13px;color:var(--muted)}
+.queue ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.queue li{display:flex;align-items:center;gap:4px;padding:2px 10px 2px 2px;border-radius:99px;background:var(--paper);font-size:13px;color:var(--muted)}
+.queue svg{width:26px;height:26px}
+.more{display:block;width:100%;margin-top:6px;padding:9px;border:0;border-radius:var(--r-sm);background:transparent;color:var(--muted);font-size:13px;cursor:pointer}
+.more:hover{background:var(--panel);color:var(--ink)}
+.feed li.minor span{color:var(--muted)}
+@media (max-width:480px){.checks li{grid-template-columns:20px 1fr}.checks .tm{grid-column:2}
+  .hero{grid-template-columns:48px 1fr;gap:4px 12px;padding:14px}
+  .hero svg{width:48px;height:48px}
+  .hero h1{font-size:18px}
+  .tile{padding:16px 12px 8px;grid-template-columns:50px 1fr}
+  .tile svg{width:48px;height:48px}
+  .feed li{grid-template-columns:56px 1fr;gap:8px}
+}
 .tile{background:var(--panel);border-radius:var(--r-sm);padding:22px 12px 8px;display:grid;
-  grid-template-columns:62px 1fr;gap:0 12px;align-items:center;min-width:0}
+  grid-template-columns:62px 1fr;gap:0 12px;align-items:center;align-content:start;min-width:0}
 .tile svg{width:60px;height:60px;grid-row:span 2;margin-top:4px}
 .tile b{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tile .role{font-size:12px;color:var(--muted)}
 .tile .bar,.tile .meta{grid-column:1/-1}
 .tile .bar{margin:8px 0 4px;height:4px}
-.tile .why{grid-column:1/-1;font-size:12px;color:var(--bad);margin-top:2px}
-.tile.quiet{opacity:.6}
-
-table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:var(--r-sm);overflow:hidden;font-size:14px}
-th,td{padding:8px 10px;text-align:right;border-top:1px solid var(--line);white-space:nowrap}
-th{font-weight:600;color:var(--muted);font-size:13px;border-top:0}
-th:first-child,td:first-child{text-align:left}
-.tablewrap{overflow-x:auto;border-radius:var(--r-sm)}
+.tile .why{grid-column:1/-1;font-size:12px;color:var(--bad-ink);margin-top:2px}
+/* a running unit that has passed its own timeout: the number in the warn ink */
+.tile .meta .over{color:var(--warn-ink);font-weight:600}
 
 .feed{list-style:none;margin:0;padding:0;background:var(--panel);border-radius:var(--r-sm)}
 .feed li{display:grid;grid-template-columns:62px 1fr;gap:10px;padding:8px 12px;border-top:1px solid var(--line);font-size:14px}
@@ -124,22 +170,19 @@ th:first-child,td:first-child{text-align:left}
 .feed li.attn{background:var(--warn-bg);box-shadow:inset 3px 0 var(--warn)}
 .feed .x{color:var(--muted)}
 
-.fin{margin-top:10px;background:var(--panel);border-radius:var(--r-sm)}
-.fin summary{cursor:pointer;padding:11px 14px;font-weight:600;font-size:14px;list-style:none;display:flex;gap:8px;align-items:baseline}
-.fin summary::-webkit-details-marker{display:none}
-.fin summary::before{content:"";width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s;align-self:center}
-.fin[open] summary::before{transform:rotate(45deg)}
-.fin summary small{font-weight:400;color:var(--muted);font-size:13px}
-.fin ul{list-style:none;margin:0;padding:0 0 4px}
-.fin li{display:grid;grid-template-columns:20px 1fr auto;gap:2px 10px;align-items:center;padding:8px 14px;border-top:1px solid var(--line);font-size:14px}
-.fin li small{color:var(--muted)} .fin .tm{color:var(--muted);font-size:13px;white-space:nowrap}
-.fin .why{grid-column:2/-1;color:var(--bad);font-size:12px}
 .wave{margin-bottom:8px;background:var(--panel);border-radius:var(--r-sm)}
-.wave summary{cursor:pointer;padding:11px 14px;list-style:none;display:grid;grid-template-columns:18px 1fr;gap:1px 10px;align-items:center}
-.wave summary::-webkit-details-marker{display:none}
+.ph-head{width:100%;border:0;background:transparent;text-align:left;cursor:pointer;padding:11px 14px;
+  display:grid;grid-template-columns:18px 1fr 14px;gap:1px 10px;align-items:center;border-radius:var(--r-sm)}
+.ph-head:focus-visible{outline:2px solid var(--run);outline-offset:-2px}
 .wave .wl{font-weight:600;font-size:14px}
-.wave summary small{grid-column:2;color:var(--muted);font-size:13px}
-.wave[open] summary{border-bottom:1px solid var(--line)}
+.ph-head small{grid-column:2;color:var(--muted);font-size:13px}
+.ph-head .chev{grid-column:3;grid-row:1/span 2;width:8px;height:8px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(45deg);transition:transform .15s}
+.ph-head[aria-expanded="false"] .chev{transform:rotate(-45deg)}
+.ph-head[aria-expanded="true"]{border-bottom:1px solid var(--line);border-radius:var(--r-sm) var(--r-sm) 0 0}
+.wave.planned{background:transparent;border:1px dashed var(--line)}
+.wave.planned .ph-head{cursor:default}
+.wave.planned .mark{background:transparent;border:2px dashed var(--muted)}
+.wave.planned .wl{font-weight:500;color:var(--muted)}
 .wbody{padding:10px}
 .wbody .tiles .tile{background:var(--paper)}
 .frows{list-style:none;margin:8px 0 0;padding:0}
@@ -147,7 +190,7 @@ th:first-child,td:first-child{text-align:left}
 .frows li{display:grid;grid-template-columns:20px 1fr auto;gap:2px 10px;align-items:center;padding:7px 4px;border-top:1px solid var(--line);font-size:14px}
 .frows li:first-child{border-top:0}
 .frows small{color:var(--muted)} .frows .tm{color:var(--muted);font-size:13px;white-space:nowrap}
-.frows .why{grid-column:2/-1;color:var(--bad);font-size:12px}
+.frows .why{grid-column:2/-1;color:var(--bad-ink);font-size:12px}
 .tail{margin:8px 4px 0;font-size:13px;color:var(--muted)}
 .spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--sunk);border-top-color:var(--run);animation:sp 1s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
@@ -168,24 +211,34 @@ svg.robot.waiting .prop{opacity:.55}
 @keyframes zz{0%{opacity:0;transform:translate(-4px,8px) scale(.6)}20%{opacity:1}70%{opacity:1}100%{opacity:0;transform:translate(6px,-8px) scale(1.15)}}
 .act{grid-column:1/-1;font-size:13px;margin-top:6px;display:flex;gap:6px;align-items:center;min-width:0}
 .act .k{flex:0 0 auto;font-size:11px;font-weight:650;padding:1px 7px;border-radius:99px;background:var(--sunk);color:var(--muted)}
-.act .k.think{color:var(--run)} .act .k.wait{color:var(--warn)} .act .k.tool{color:var(--ok)}
-/* the harness's own work (checks, the deviation audit): the tester family's colour */
-.act .k.test{color:#D65A9A}
-.act .v{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.act .k.think{color:var(--run-ink)} .act .k.wait{color:var(--warn-ink)} .act .k.tool{color:var(--ok-ink)}
+/* the harness's own work (checks, the deviation audit): the tester family's colour,
+   darkened for text -- the plain #D65A9A on --sunk is 2.94:1 in light, under AA */
+.act .k.test{color:var(--test-ink)}
+.act{align-items:flex-start}
+.act .k{margin-top:1px}
+/* what a working agent is on right now: up to two lines, so the end of the command or
+   path -- the part that tells two calls apart -- stays readable on a phone */
+.act .v{min-width:0;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .act code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
 .calls{grid-column:1/-1;margin-top:6px;font-size:12px}
-.calls summary{cursor:pointer;color:var(--muted);list-style:none}
+.calls summary{cursor:pointer;color:var(--muted);list-style:none;display:flex;align-items:center;min-height:36px}
 .calls summary::-webkit-details-marker{display:none}
 .calls summary::before{content:"▸ ";} .calls[open] summary::before{content:"▾ ";}
 .calls ol{margin:6px 0 0;padding:0;list-style:none}
-.calls li{display:grid;grid-template-columns:1fr auto;gap:8px;padding:3px 0;border-top:1px solid var(--line)}
-.calls li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.calls li.bad span:first-child{color:var(--bad)}
-.calls .tm{color:var(--muted)}
+.calls summary small{font-size:12px}
+.calls li{display:grid;grid-template-columns:auto 1fr auto;gap:2px 8px;align-items:baseline;padding:5px 0;border-top:1px solid var(--line)}
+.calls .ct{font-weight:600}
+/* a call's target wraps (two lines at most) instead of losing its tail to an ellipsis:
+   the end of a path or a command is usually the part that says what it is */
+.calls code{font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere;min-width:0;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.calls li.bad .ct{color:var(--bad-ink)}
+.calls .tm{color:var(--muted);white-space:nowrap}
 .ctx{grid-column:1/-1;display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;font-size:12px;color:var(--muted);margin-top:6px}
 .cbar{height:4px;border-radius:2px;background:var(--sunk);overflow:hidden}
 .cbar i{display:block;height:100%;background:#8b7fd6}
-.ctx.hot .cbar i{background:var(--warn)} .ctx.hot span:last-child{color:var(--warn);font-weight:600}
+.ctx.hot .cbar i{background:var(--warn)} .ctx.hot span:last-child{color:var(--warn-ink);font-weight:600}
 .tile.solo{margin-bottom:4px}
 .checks{list-style:none;margin:0;padding:0;background:var(--panel);border-radius:var(--r-sm)}
 .checks li{display:grid;grid-template-columns:20px 1fr auto;gap:10px;align-items:center;padding:9px 12px;border-top:1px solid var(--line);font-size:14px}
@@ -223,11 +276,28 @@ svg.robot.running.p-merge .prop path{stroke-dasharray:4 4;animation:flow .8s lin
 svg.robot.queued{opacity:.5}
 svg.robot.dropped,svg.robot.killed,svg.robot.notrun{filter:grayscale(1);opacity:.55}
 @keyframes bob{50%{transform:translateY(-3px)}}
-@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.robot .zzz text{opacity:1}svg.robot.waiting .body{transform:rotate(-6deg) translateY(2px)}}
+/* the in-page motion pause (WCAG 2.2.2: endless motion needs a control, not only the
+   OS setting): Pause motion in the top bar puts `still` on <html> and every loop stops
+ -- the robots stay, frozen; the Zzz marks show, since their loop is what drew them */
+.still *,.still *::before,.still *::after{animation-play-state:paused!important}
+.still .robot .zzz text{opacity:1}
+.still-btn{border:0;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;
+  padding:6px 8px;border-radius:6px}
+.still-btn:hover{background:var(--sunk);color:var(--ink)}
+/* a viewer that stopped answering: freeze what the page last showed and say so --
+   the running pill goes quiet and the loops stop, so nothing pretends the run is live */
+.pulse.warn{color:var(--warn-ink)}
+.dot.warn{background:var(--warn)}
+p.offline{background:var(--warn-bg);color:var(--ink);box-shadow:inset 3px 0 var(--warn);
+  padding:10px 12px;margin:0 0 12px;border-radius:var(--r-sm)}
+.offline svg.robot *,.offline .spin,.offline .dot{animation-play-state:paused!important}
+.offline .pill.running{color:var(--muted)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.dot.live{box-shadow:none}.spin{border-top-color:var(--run);border-right-color:var(--run)}.robot .zzz text{opacity:1}svg.robot.waiting .body{transform:rotate(-6deg) translateY(2px)}}
 </style>
 </head>
 <body>
-<main id="app" aria-live="polite"></main>
+<main id="app"></main>
+<div id="sr-status" class="sr-only" role="status" aria-live="polite"></div>
 <script>
 "use strict";
 var PAGE_VERSION="__PAGE_VERSION__";  /* lib/watch.py replaces this placeholder at serve
@@ -285,12 +355,18 @@ function pct(p){return Math.round(Math.max(0,Math.min(1,p||0))*100);}
 function cnt(n,w){return esc(n)+" "+(n===1?w:w+"s");}  /* "1 agent", "2 agents" */
 function outcome(r){ if(r.state==="killed")return "killed"; if(r.state!=="ended")return "running";
   return (r.exit===0||r.exit==null)?"ended":"failed";}
-function bar(p,cls){return '<div class="bar '+(cls||"")+'" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="'+pct(p)+'"><i style="width:'+pct(p)+'%"></i></div>';}
+/* A bar is a progressbar a screen reader lands on, so it needs a name and its fill a
+   reading: label what the bar is, text what the fill MEANS ("probe: 2 of 40 agents
+   done") -- an unnamed 6-pixel strip tells a blind user nothing. */
+function bar(p,cls,label,text){
+  return '<div class="bar '+(cls||"")+'" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="'+pct(p)+
+    '" aria-label="'+esc(label||"Progress")+'"'+(text?' aria-valuetext="'+esc(text)+'"':"")+'><i style="width:'+pct(p)+'%"></i></div>';}
 
 function cardMeter(r){
   var o=outcome(r);
-  if(o!=="running") return bar(1,o==="ended"?"ok":"bad");
-  return bar(r.progress, r.kind==="agent"&&r.progress>0.85?"hot":"");
+  // a failed or killed run shows how far it got, not a full bar: its real progress
+  if(o!=="running") return bar(r.progress!=null?r.progress:1,o==="ended"?"ok":"bad","Run progress",progA11y(r));
+  return bar(r.progress, r.kind==="agent"&&r.progress>0.85?"hot":"","Run progress",progA11y(r));
 }
 function progressText(r){
   if(r.kind==="until-done"){var rn=r.round&&r.round.n!=null?r.round.n:r.rounds;
@@ -302,6 +378,27 @@ function progressText(r){
   return (ph.label||"Phase")+": "+done+" of "+cnt(ph.n||0,"agent")+" done";
 }
 function etaText(r){return r.eta!=null&&outcome(r)==="running"?("About "+dur(r.eta)+" left"):"";}
+/* A live duration is NEVER baked into the page's HTML: it is a tick span, filled by the
+   1 s ticker from its own data-since. A run that said nothing in the last 2.5 s then
+   produces a byte-identical page, and render() can skip the rebuild (or rebuild only
+   the sections whose HTML changed) instead of tearing down the robots, the selection
+   and the crew strip every poll. */
+function tickSpan(since,fmt){return typeof since==="number"&&isFinite(since)
+  ?'<span class="tick" data-since="'+since+'" data-fmt="'+fmt+'"></span>':"";}
+function elapsedHtml(r){return outcome(r)==="running"&&typeof r.start==="number"&&isFinite(r.start)
+  ?tickSpan(r.start,"dur"):dur(r.elapsed);}
+function agoHtml(t){return tickSpan(t,"ago");}
+/* the progress line and the bar's valuetext, tick-safe: the agent's live elapsed is a
+   tick span in the visible line and stays out of the bar's text entirely (a number
+   baked there changes the HTML every poll and re-announces itself to no one) */
+function progHtml(r){
+  if(outcome(r)==="running"&&r.kind==="agent"&&typeof r.start==="number"&&isFinite(r.start))
+    return tickSpan(r.start,"dur")+(r.timeout?" of a "+dur(r.timeout)+" limit":"");
+  return esc(progressText(r));}
+function progA11y(r){
+  if(outcome(r)==="running"&&r.kind==="agent")
+    return r.timeout?"Running against a "+dur(r.timeout)+" limit":"Running";
+  return progressText(r);}
 
 function overview(runs){
   var live=runs.filter(function(r){return outcome(r)==="running";});
@@ -314,11 +411,14 @@ function overview(runs){
   });
   var head=live.length?(mates.length+(mates.length===1?" agent":" agents")+" at work"):"All quiet";
   var sub=live.length?(live.length===1?"One run in progress":live.length+" runs in progress"):"Start a local agent and it appears here.";
-  var h='<section class="floor"><h1>'+head+'</h1><p>'+sub+'</p><div class="crew">';
-  h+=mates.length?mates.map(function(m){return '<a class="mate" href="#'+esc(m.id)+'" title="'+esc(m.label)+'">'+robot(m.f,"running")+'<span>'+esc(m.label)+'</span></a>';}).join(""):['planner','builder','checker'].map(function(k){return '<span class="mate" aria-hidden="true">'+robot(FAM[k],'queued')+'</span>';}).join('');
-  h+='</div></section>';
+  var h='<div data-sec="floor"><section class="floor"><h1>'+head+'</h1><p>'+sub+'</p><div class="crew">';
+  // sixteen robots at most: a two-hundred-agent run is a wall of identical loops, and
+  // every one of them is a tab stop and an animation for nothing -- the rest count in
+  // the chip. They are decoration beside the cards below, so they leave the tab order.
+  h+=mates.length?mates.slice(0,CREW_SHOW).map(function(m){return '<a class="mate" href="#'+esc(m.id)+'" data-fk="mate:'+esc(m.id)+':'+esc(m.label)+'" title="'+esc(m.label)+'" tabindex="-1" aria-hidden="true">'+robot(m.f,"running")+'<span>'+esc(m.label)+'</span></a>';}).join("")+(mates.length>CREW_SHOW?'<span class="mate chip" aria-hidden="true">+'+(mates.length-CREW_SHOW)+'</span>':""):['planner','builder','checker'].map(function(k){return '<span class="mate" aria-hidden="true">'+robot(FAM[k],'queued')+'</span>';}).join('');
+  h+='</div></section></div>';
   if(live.length){
-    h+='<h2>Running <small>'+live.length+'</small></h2>';
+    h+='<div data-sec="runs"><h2>Running <small>'+live.length+'</small></h2>';
     h+=live.map(function(r){
       var f=FAM[KIND_FAM[r.kind]]||FAM.plain,att=r.attention_count||0;
       // A single-shot session or a coder loop has no tiles of its own, so the card itself
@@ -331,6 +431,7 @@ function overview(runs){
       // harness runs the checks it is the tester at work, while the deviation audit
       // reads the diff the checker, and in between the builder thinks.
       var st=r.kind==="until-done"?r.step:null;
+      var quiet=quietFor(r);  // a live pid saying nothing for 15 minutes is not live
       if(st&&st.name!=="coding"){
         f=st.name==="testing"?FAM.tester:st.name==="reviewing"?FAM.checker:FAM.builder;
         pose=st.name==="between"?"thinking":"running";
@@ -338,65 +439,124 @@ function overview(runs){
           (st.name==="testing"?"Testing":st.name==="reviewing"?"Reviewing":"Between rounds")+
           '</span></div>'+(a?ctxHtml(a):"");
       }
-      return '<a class="run" href="#'+esc(r.id)+'">'+robot(f,pose)+
+      return '<a class="run" href="#'+esc(r.id)+'" data-fk="run:'+esc(r.id)+'">'+robot(f,pose)+
         '<div><div class="kind">'+esc(KIND_NAME[r.kind]||r.kind)+'</div><div class="title">'+esc(r.title)+'</div></div>'+
-        '<div class="sub"><span>'+esc(progressText(r))+'</span>'+(att?'<span class="flag">'+att+(att===1?" item needs":" items need")+' you</span>':"")+'</div>'+
-        '<div class="meter">'+cardMeter(r)+'<div class="meta"><span>'+dur(r.elapsed)+' elapsed</span><span>'+esc(etaText(r))+'</span></div></div>'+
+        '<div class="sub"><span>'+progHtml(r)+'</span>'+(att?'<span class="flag">'+att+(att===1?" item needs":" items need")+' you</span>':"")+
+          (quiet>900?'<span class="flag">No update for '+dur(quiet)+'</span>':"")+'</div>'+
+        '<div class="meter">'+cardMeter(r)+'<div class="meta"><span>'+elapsedHtml(r)+' elapsed</span><span>'+esc(etaText(r))+'</span></div></div>'+
         extra+'</a>';
     }).join("");
+    h+='</div>';
   }
   if(fin.length){
-    h+='<h2>Finished <small>'+fin.length+'</small><button class="clear" data-hide="'+esc(fin.map(function(r){return r.id;}).join(','))+'">Clear finished</button></h2><div class="done-list">';
+    h+='<div data-sec="done"><div class="sec-head"><h2>Finished <small>'+fin.length+'</small></h2><button type="button" class="clear" data-fk="clear" data-hide="'+esc(fin.map(function(r){return r.id;}).join(','))+'">Clear finished</button></div><ul class="done-list">';
     h+=fin.map(function(r){var o=outcome(r);
-      var m=o==="ended"?'<span class="mark ok" aria-label="succeeded">✓</span>':o==="failed"?'<span class="mark bad" aria-label="failed">!</span>':'<span class="mark gone" aria-label="killed">×</span>';
-      var right=(o==="failed"?"exit "+esc(String(r.exit))+", ":o==="killed"?"stopped, ":"")+"took "+dur(r.elapsed)+(r.end?", "+ago(r.end):"");
-      return '<a class="row" href="#'+esc(r.id)+'">'+m+'<span class="t">'+esc(r.title)+'</span><span class="r">'+esc(right)+'</span><button class="x-btn" data-hide="'+esc(r.id)+'" aria-label="Hide this run" title="Hide">×</button></a>';}).join("");
-    h+='</div>';
+      var m=o==="ended"?'<span class="mark ok" role="img" aria-label="finished">✓</span>':o==="failed"?'<span class="mark bad" role="img" aria-label="failed">!</span>':'<span class="mark gone" role="img" aria-label="Stopped">×</span>';
+      var right=(o==="failed"?"exit "+esc(String(r.exit))+", ":o==="killed"?"stopped, ":"")+"took "+dur(r.elapsed);
+      // the "when" only joins the line when the end is a real stamp (a hand-built
+      // pointer can put anything in end; a comma for a clock that will never fill is not a reading)
+      var when=typeof r.end==="number"&&isFinite(r.end)?", "+agoHtml(r.end):"";
+      return '<li class="row"><a class="row-link" href="#'+esc(r.id)+'" data-fk="row:'+esc(r.id)+'">'+m+'<span class="t">'+esc(r.title)+'</span><span class="r">'+esc(right)+when+'</span></a>'+
+        '<button type="button" class="x-btn" data-fk="hide:'+esc(r.id)+'" data-hide="'+esc(r.id)+'" aria-label="Hide this run" title="Hide">×</button></li>';}).join("");
+    h+='</ul></div>';
   }
   return h;
 }
 
-var STATE_WORD={running:"working",queued:"waiting",done:"done",cached:"reused",dropped:"dropped","not run":"not run"};
+/* The hero's "now" line for a run made of phases: which phase is running, where it
+   sits among all of them (the outline's placeholders count), and who is busy in it. */
+function nowHtml(r,o){
+  if(o!=="running"||(r.kind!=="swarm"&&r.kind!=="research")||!r.phase)return "";
+  // the outline's whole shape: started, planned — and the phases the workflow jumped over
+  var total=(r.phases||[]).length+(Array.isArray(r.planned)?r.planned.length:0)+(Array.isArray(r.skipped)?r.skipped.length:0);
+  var us=r.units||{},run=0,wait=0;
+  (r.phase.units||[]).forEach(function(n){var u=us[n];if(!u)return;if(u.state==="running")run++;else if(u.state==="queued")wait++;});
+  var where=total>1?"Phase "+(r.phases||[]).length+" of "+total:"";
+  var who=[run?run+" working":"",wait?wait+" waiting":""].filter(Boolean).join(", ");
+  return '<div class="now"><span class="ph">'+esc(r.phase.label||"Phase")+'</span>'+
+    (where?'<small>'+esc(where)+'</small>':"")+(who?'<small>'+esc(who)+'</small>':"")+'</div>';
+}
+var STATE_WORD={running:"working",queued:"waiting",done:"done",cached:"reused",dropped:"dropped","not run":"did not run"};
 function detail(r){
   var o=outcome(r),f=FAM[KIND_FAM[r.kind]]||FAM.plain;
   var pillWord={running:"Running",ended:"Finished",failed:"Failed (exit "+esc(String(r.exit))+")",killed:"Stopped"}[o];
-  var h='<a class="back" href="#">← All runs</a>';
-  h+='<section class="hero">'+robot(f,o==="running"?"running":o==="ended"?"done":"killed")+
-     '<div><h1>'+esc(r.goal||r.title)+'</h1></div>'+
-     '<div class="stat"><span class="pill '+o+'">'+pillWord+'</span><span>'+esc(KIND_NAME[r.kind]||r.kind)+'</span><span><b>'+dur(r.elapsed)+'</b> elapsed</span>'+
-       (etaText(r)?'<span>'+esc(etaText(r))+'</span>':"")+'</div>'+
-     '<div class="meter">'+(o==="running"?bar(r.progress):bar(1,o==="ended"?"ok":"bad"))+
-       '<div class="meta"><span>'+esc(progressText(r))+'</span>'+(r.report_stop?'<span>'+esc(r.report_stop)+'</span>':"")+'</div></div></section>';
+  var quiet=quietFor(r);
+  var h='<div data-sec="back"><a class="back" href="#" data-fk="back">← All runs</a></div>';
+  // the stat row sits ABOVE the goal: a long goal must not fill the first phone screen
+  // before any status shows, so it clamps at three lines until the reader opens it.
+  // The button appears from 80 characters: three phone lines hold ~96 at most, so any
+  // goal the clamp can bite is past the threshold -- a clamped goal is never unopenable
+  var goal=esc(r.goal||r.title),longGoal=(r.goal||r.title||"").length>80||!!goalFull[r.id];
+  var gbtn=longGoal?'<button type="button" class="more" data-goal="'+esc(r.id)+'" data-fk="goal" aria-expanded="'+(goalFull[r.id]?"true":"false")+'">'+(goalFull[r.id]?"Show less":"Show full goal")+'</button>':"";
+  h+='<section class="hero'+(goalFull[r.id]?" full":"")+'" data-sec="hero">'+robot(f,o==="running"?"running":o==="ended"?"done":"killed")+
+     '<div class="stat"><span class="pill '+o+'">'+pillWord+'</span><span>'+esc(KIND_NAME[r.kind]||r.kind)+'</span><span><b>'+elapsedHtml(r)+'</b> elapsed</span>'+
+       (etaText(r)?'<span>'+esc(etaText(r))+'</span>':"")+
+       (o==="running"&&quiet>900?'<span class="flag">No update for '+dur(quiet)+'</span>':"")+'</div>'+
+     '<div><h1>'+goal+'</h1>'+gbtn+nowHtml(r,o)+'</div>'+
+     '<div class="meter">'+bar(o==="running"?r.progress:(r.progress!=null?r.progress:1),
+       o==="running"?"":(o==="ended"?"ok":"bad"),"Run progress",progA11y(r))+
+       '<div class="meta"><span>'+progHtml(r)+'</span>'+(r.report_stop?'<span>'+esc(r.report_stop)+'</span>':"")+'</div></div></section>';
+  // the attention items the overview counts with its flag, listed here in full: the run
+  // page must say WHAT needs you, latest first, not just that something does
+  var atts=Array.isArray(r.attention)?r.attention.slice().reverse():[];
+  if(atts.length){
+    h+='<div data-sec="att"><h2>Needs you <small>'+atts.length+'</small></h2><ul class="feed">'+
+      atts.map(function(a){return '<li class="attn"><time>'+clock(a.t)+'</time><span><b>'+esc(a.reason)+
+        '</b>'+(a.detail?' <span class="x">'+esc(a.detail)+'</span>':"")+'</span></li>';}).join("")+'</ul></div>';
+  }
 
-  if(r.kind==="until-done"||r.kind==="agent") h+=soloHtml(r,o);
-  var us=r.units||{},names=Object.keys(us);
-  if(names.length){
-    var phases=(r.phases||[]).slice(),seen={};
+  if(r.kind==="until-done"||r.kind==="agent"){var sHtml=soloHtml(r,o);if(sHtml)h+='<div data-sec="solo">'+sHtml+'</div>';}
+  var us=r.units||{},names=Object.keys(us),planned=Array.isArray(r.planned)?r.planned:[];
+  // the outline entries a phase_start jumped over: they must not vanish from the shape
+  // of the run -- each one shows, in outline order, as a placeholder saying Skipped
+  var skips=Array.isArray(r.skipped)?r.skipped:[];
+  if(names.length||planned.length||skips.length){
+    var phases=(r.phases||[]).slice(),seen={},occ={};
+    // a phase's key is its label plus which time that label came up: stable while
+    // phases are added around it (an index is not), and two "check" phases stay apart
+    function pkey(label){var l=String(label==null?"":label);occ[l]=(occ[l]||0)+1;return r.id+"|"+l+"|"+occ[l];}
     var waves=phases.map(function(p,i){var list=(p.units||[]).filter(function(n){return us[n];});
-      list.forEach(function(n){seen[n]=1;});return {p:p,i:i,list:list};});
+      list.forEach(function(n){seen[n]=1;});return {p:p,i:i,list:list,key:pkey(p.label||("Phase "+(i+1)))};});
     var loose=names.filter(function(n){return !seen[n];});
-    if(loose.length) waves.push({p:{label:"Other agents",n:loose.length,end:null},i:waves.length,list:loose,loose:true});
-    var working=names.filter(function(n){return us[n].state==="running";}).length;
-    var waiting=names.filter(function(n){return us[n].state==="queued";}).length;
-    h+='<h2>Agents <small>'+working+' working, '+waiting+' waiting, '+waves.length+(waves.length===1?" wave":" waves")+'</small></h2>';
-    h+=waves.map(function(w){return wave(w,r,us,o);}).join("");
+    if(loose.length) waves.push({p:{label:"Other agents",n:loose.length,end:null},i:waves.length,list:loose,loose:true,key:pkey("Other agents")});
+    // the declared phases no phase_start has taken yet: quiet placeholders after the
+    // started ones, so the whole run shows from its first second
+    planned.forEach(function(p){waves.push({p:p,i:waves.length,list:[],planned:true,key:pkey(p.label)});});
+    skips.forEach(function(p){waves.push({p:p,i:waves.length,list:[],planned:true,skipped:true,key:pkey(p.label)});});
+    var started=waves.filter(function(w){return !w.planned&&!w.loose;}).length;
+    // the subtitle only says how far the run got into its outline: the hero's "now"
+    // line already names who is working and who is waiting, in the live phase
+    var sub=(planned.length||skips.length)?started+" of "+(started+planned.length+skips.length)+" started"
+                                          :cnt(waves.length,"phase");
+    h+='<div data-sec="ph-hd"><h2>Phases <small>'+esc(sub)+'</small></h2></div><div class="phases">';
+    h+=waves.map(function(w){return wave(w,r,us,o);}).join("")+'</div>';
   }
   // latest first; same stamp keeps file order, so a phase_start never lands below the
   // units it started (or a checks_start below its round, or an audit_end below its audit)
   var ev=(r.recent||[]).map(function(e,i){return {e:e,i:i};})
     .sort(function(x,y){return y.e.t-x.e.t||x.i-y.i;});
   if(ev.length){
-    h+='<h2>Activity <small>latest first</small></h2><ul class="feed">';
-    h+=ev.map(function(x){var e=x.e;var txt=evText(e);return '<li class="'+(e.kind==="attention"?"attn":"")+'"><time>'+clock(e.t)+'</time><span>'+txt+'</span></li>';}).join("");
+    // eight lines by default; the button says EARLIER (it lifts older lines into view)
+    // and only when hiding would actually hide something worth a tap -- with two or
+    // fewer left over, all of them show. When the server's window is full, say where
+    // the rest went.
+    var leftover=ev.length-FEED_SHOW,openAll=!!feedAll[r.id],all=openAll||leftover<=2;
+    var shown=all?ev:ev.slice(0,FEED_SHOW);
+    h+='<div data-sec="feed"><h2>Activity <small>latest first</small></h2><ul class="feed">';
+    h+=shown.map(function(x){var e=x.e;var txt=evText(e);return '<li class="'+(e.kind==="attention"?"attn":e.kind==="unit_start"?"minor":"")+'"><time>'+clock(e.t)+'</time><span>'+txt+'</span></li>';}).join("");
     h+='</ul>';
-  } else if(!names.length && r.kind!=="agent"){h+='<p class="note">No activity recorded yet.</p>';}
+    if((r.recent||[]).length>=RECENT_KEEP) h+='<p class="tail">Older events are not kept here.</p>';
+    if(leftover>2) h+='<button type="button" class="more" data-more="'+esc(r.id)+'" data-fk="more:'+esc(r.id)+'" aria-expanded="'+openAll+'">'+(openAll?"Show fewer":"Show "+leftover+" earlier")+'</button>';
+    h+='</div>';
+  } else if(!names.length && r.kind!=="agent"){h+='<div data-sec="note"><p class="note">No activity recorded yet.</p></div>';}
   return h;
 }
 
 var CLS_WORD={shell:"Running",python:"Running Python",read:"Reading",edit:"Editing",web:"On the web",mcp:"Using",delegate:"Delegating",other:"Using"};
 function actPose(u){var a=u.activity;if(u.state!=="running"||!a)return u.state;return a.state==="thinking"?"thinking":a.state==="waiting"?"waiting":"running";}
 function actLine(u){var a=u.activity;if(u.state!=="running"||!a||a.state==="done")return "";
-  var since=a.since?dur(Date.now()/1000-a.since):"";
+  // "Asking the model, 30s" / "Waiting 3m": the clock is a tick span, not a baked number
+  var since=a.since?tickSpan(a.since,"dur"):"";
   if(a.state==="thinking")return '<div class="act"><span class="k think">Thinking</span><span class="v">Asking the model'+(since?", "+since:"")+'</span></div>';
   var tgt=a.target?'<code>'+esc(a.target)+'</code>':esc(a.tool||"");
   var verb=a.cls==="python"&&/pytest/.test(a.target||"")?"Running tests":(a.cls==="mcp"||a.cls==="other"?"Using "+esc(a.tool||""):CLS_WORD[a.cls]||esc(a.tool||""));
@@ -404,38 +564,93 @@ function actLine(u){var a=u.activity;if(u.state!=="running"||!a||a.state==="done
   return '<div class="act"><span class="k tool">'+verb+'</span><span class="v">'+tgt+'</span></div>';}
 function callsHtml(key,u){var a=u.activity;if(!a||!a.calls||!a.calls.length)return "";
   var split=(a.thinking_s!=null?"thinking "+dur(a.thinking_s):"")+(a.tools_s!=null?", tools "+dur(a.tools_s):"");
-  return '<details class="calls" data-key="'+esc(key)+'"'+(openFin[key]?" open":"")+'><summary>Last '+a.calls.length+' tool calls'+(split?" ("+esc(split)+")":"")+'</summary><ol>'+
-    a.calls.slice().reverse().map(function(c){return '<li class="'+(c.ok===false?"bad":"")+'"><span>'+esc(c.tool)+(c.target?": "+esc(c.target):"")+'</span><span class="tm">'+(c.abandoned?"no reply":dur(c.seconds))+'</span></li>';}).join("")+'</ol></details>';}
+  return '<details class="calls" data-key="'+esc(key)+'"'+(openFin[key]?" open":"")+'><summary data-fk="calls:'+esc(key)+'">'+(a.calls.length===1?"Last tool call":"Last "+a.calls.length+" tool calls")+(split?' <small>'+esc(split)+'</small>':"")+'</summary><ol>'+
+    a.calls.slice().reverse().map(function(c){return '<li class="'+(c.ok===false?"bad":"")+'"><span class="ct">'+esc(c.tool)+'</span><code title="'+esc(c.target||"")+'">'+esc(c.target||"")+'</code><span class="tm">'+(c.abandoned?"no reply":c.ok===false?"failed, "+dur(c.seconds):dur(c.seconds))+'</span></li>';}).join("")+'</ol></details>';}
 function kTok(x){return x>=1024?Math.round(x/1024)+"k":String(x);}  /* binary k: 524288 tokens is the 512k window */
 function ctxHtml(a){if(!a||!a.ctx||!a.win)return "";var p=a.ctx/a.win,hot=p>=0.8;
   return '<div class="ctx'+(hot?" hot":"")+'"><span>Context</span><div class="cbar"><i style="width:'+pct(p)+'%"></i></div><span>'+kTok(a.ctx)+' / '+kTok(a.win)+'</span></div>';}
-function tileHtml(n,u,rid){var secs=u.state==="running"&&u.started?(Date.now()/1000-u.started):u.seconds;
-  var t=u.state==="queued"?"waiting for a seat":(dur(secs)+(u.timeout?" / "+dur(u.timeout):""));
+function tileHtml(n,u,rid){var now=Date.now()/1000,secs=u.state==="running"&&u.started?(now-u.started):u.seconds;
+  // a unit still "running" past its own timeout is stuck: say so in the warn ink
+  var over=u.state==="running"&&u.started&&u.timeout&&(now-u.started)>u.timeout;
+  var timeTxt=u.state==="running"&&u.started?tickSpan(u.started,"dur"):dur(secs);
+  var t=u.state==="queued"?"waiting for a seat":(over?timeTxt+", over its "+dur(u.timeout)+" limit":timeTxt+(u.timeout?" / "+dur(u.timeout):""));
   return '<div class="tile'+(u.state==="queued"?" quiet":"")+'">'+robot(famOf(u.role),actPose(u))+
     '<b title="'+esc(n)+'">'+esc(n)+'</b><span class="role">'+esc(u.role)+'</span>'+
-    bar(u.progress||0,u.progress>0.85?"hot":"")+'<div class="meta"><span>'+esc(u.state==="queued"?"":STATE_WORD[u.state])+'</span><span>'+esc(t)+'</span></div>'+
+    bar(u.progress||0,u.progress>0.85?"hot":"")+'<div class="meta"><span>'+esc(u.state==="queued"?"":STATE_WORD[u.state])+'</span>'+
+    (over?'<span class="over">'+t+'</span>':'<span>'+t+'</span>')+'</div>'+
     actLine(u)+(u.state==='running'?ctxHtml(u.activity):'')+callsHtml((rid||"")+":c:"+n,u)+'</div>';}
-function rowHtml(n,u){var mk=u.state==="dropped"||u.state==="not run"?'<span class="mark bad">!</span>':'<span class="mark ok">✓</span>';
-  return '<li>'+mk+'<span class="nm">'+esc(n)+' <small>'+esc(u.role)+'</small></span><span class="tm">'+esc((STATE_WORD[u.state]||u.state)+(u.seconds!=null?", "+dur(u.seconds):""))+'</span>'+
+/* One agent's row. A unit_done that said ok:false is a FAILED unit even though its state
+   is "done" (the fold keeps both): the check goes red and the word is "failed".
+   stt is the state the phase presents it under -- a dead run's rows read "not run". */
+function rowHtml(n,u,stt){var s=stt||u.state;
+  var bad=u.ok===false||s==="dropped"||s==="not run";
+  var mk=bad?'<span class="mark bad" role="img" aria-label="'+(u.ok===false?"failed":s==="dropped"?"dropped":"did not run")+'">!</span>':
+    '<span class="mark ok" role="img" aria-label="finished">✓</span>';
+  var word=u.ok===false?"failed":(STATE_WORD[s]||s);
+  return '<li>'+mk+'<span class="nm">'+esc(n)+' <small>'+esc(u.role)+'</small></span><span class="tm">'+esc(word+(u.seconds!=null?", "+dur(u.seconds):""))+'</span>'+
     (u.why?'<span class="why">'+esc(u.why)+'</span>':"")+'</li>';}
+/* Whether a phase group is open: the user's own choice for it wins (null = none made,
+   so the default rules); by default a finished phase is collapsed to its summary line
+   and every other one -- the running phase above all -- stays expanded. */
+function phaseOpen(choice,finished){return typeof choice==="boolean"?choice:!finished;}
 function wave(w,r,us,o){
-  var p=w.p,list=w.list,act=list.filter(function(n){return us[n].state==="running"||us[n].state==="queued";});
+  var p=w.p,label=esc(p.label||("Phase "+(w.i+1)));
+  if(w.planned){
+    // a phase still to come has no agents to show, so nothing to toggle: its name and,
+    // when the outline knew it, its size -- or, once the run is over, that it never
+    // ran; a phase the workflow jumped over says so even while the run is live
+    var size=p.n!=null?cnt(p.n,"agent"):"";
+    var note=w.skipped?(size?size+", Skipped":"Skipped"):
+      o==="running"?(size?size+", not started":"Not started"):"Did not run";
+    return '<div class="wave planned" data-sec="wave:'+esc(w.key)+'"><div class="ph-head"><span class="mark gone" aria-hidden="true"></span><span class="wl">'+label+'</span><small>'+note+'</small></div></div>';
+  }
+  // a run that ended, failed or was killed has no live units any more: whatever the
+  // fold last saw mid-flight never got its turn. Show it as not run -- rows, not
+  // spinning tiles -- or a dead run keeps the whole page looking alive.
+  var liveRun=o==="running";
+  var list=w.list;
+  function eff(n){var s=us[n].state;return s==="running"||s==="queued"?(liveRun?s:"not run"):s;}
+  var act=liveRun?list.filter(function(n){return us[n].state==="running"||us[n].state==="queued";}):[];
   var fin=list.filter(function(n){return act.indexOf(n)<0;});
-  var drop=fin.filter(function(n){return us[n].state==="dropped"||us[n].state==="not run";}).length;
-  var finished=p.end!=null&&!act.length;
-  var key=r.id+":"+w.i, open=(key in openFin)?openFin[key]:!finished;
+  var drop=fin.filter(function(n){var s=eff(n);return s==="dropped"||s==="not run";}).length;
+  // only done and cached count as done; a unit_done that said ok:false is a failure
+  var failN=fin.filter(function(n){return us[n].ok===false;}).length;
+  var doneN=fin.filter(function(n){var s=eff(n);return (s==="done"||s==="cached")&&us[n].ok!==false;}).length;
+  var finished=!liveRun||p.end!=null&&!act.length;
+  var key=w.key, open=phaseOpen(phaseChoice(key),finished), bid="ph-"+(w.i+1);
   var info=[];
   if(finished){info.push(list.length+(list.length===1?" agent":" agents"));
     if(p.wall!=null)info.push("took "+dur(p.wall));
-    if(p.usage!=null)info.push(pct(p.usage)+"% of seats busy");
-    if(drop)info.push(drop+" dropped");}
-  else if(!w.loose){info.push(fin.length+" of "+(p.n||list.length)+" done");if(act.length)info.push(act.length+" active");}
-  var st=finished?(drop?'<span class="mark bad">!</span>':'<span class="mark ok">✓</span>'):(w.loose?'<span class="mark gone">·</span>':'<span class="spin" aria-label="running"></span>');
-  var h='<details class="wave" data-key="'+esc(key)+'"'+(open?" open":"")+'><summary>'+st+'<span class="wl">'+esc(p.label||("Phase "+(w.i+1)))+'</span><small>'+esc(info.join(", "))+'</small></summary><div class="wbody">';
-  if(act.length) h+='<div class="tiles">'+act.map(function(n){return tileHtml(n,us[n],r.id);}).join("")+'</div>';
-  if(fin.length) h+='<ul class="frows">'+fin.map(function(n){return rowHtml(n,us[n]);}).join("")+'</ul>';
+    if(p.usage!=null)info.push(p.usage>=1?"kept all seats busy":"seats busy "+pct(p.usage)+"% of the time");
+    if(drop)info.push(drop+" dropped");
+    if(failN)info.push(failN+" failed");}
+  else if(!w.loose){info.push(doneN+" of "+(p.n||list.length)+" done");
+    var rest=fin.length-doneN-failN;
+    if(rest)info.push(rest+" did not run");
+    if(failN)info.push(failN+" failed");
+    var nb=act.filter(function(n){return us[n].state==="running";}).length;
+    if(nb)info.push(nb+" working");if(act.length-nb)info.push((act.length-nb)+" waiting");}
+  var st=finished?(drop||failN?'<span class="mark bad" role="img" aria-label="'+(failN?"failed":"finished with drops")+'">!</span>':
+    '<span class="mark ok" role="img" aria-label="finished">✓</span>'):
+    (w.loose?'<span class="mark gone">·</span>':'<span class="spin" role="img" aria-label="running"></span>');
+  var live=!finished&&!w.loose&&act.length>0;
+  var h='<section class="wave'+(finished?" finished":"")+(live?" live":"")+'" data-sec="wave:'+esc(key)+'"><button type="button" class="ph-head" data-ph="'+esc(key)+'" data-fk="ph:'+esc(key)+'" aria-expanded="'+open+'" aria-controls="'+bid+'">'+st+'<span class="wl">'+label+'</span><small>'+esc(info.join(", "))+'</small><span class="chev" aria-hidden="true"></span></button><div class="wbody" id="'+bid+'"'+(open?"":" hidden")+'>';
+  var busy=act.filter(function(n){return us[n].state==="running";}),queued=act.filter(function(n){return us[n].state==="queued";});
+  // two hundred working robots is not information, it is 200 animations and a 37,000 px
+  // page: twelve tiles carry the shape of the phase, the button opens the rest (the
+  // choice kept like the feed's), and the sleepers count out past the twenty-fourth
+  var tilesMore="";
+  if(busy.length>TILE_SHOW){
+    var tOpen=!!feedAll["tiles:"+key];
+    tilesMore='<button type="button" class="more" data-more="tiles:'+esc(key)+'" data-fk="tiles:'+esc(key)+'" aria-expanded="'+tOpen+'">'+(tOpen?"Show fewer":"Show all "+busy.length+" working")+'</button>';
+    if(!tOpen) busy=busy.slice(0,TILE_SHOW);}
+  if(busy.length) h+='<div class="tiles">'+busy.map(function(n){return tileHtml(n,us[n],r.id);}).join("")+'</div>'+tilesMore;
+  if(queued.length) h+='<div class="queue"><p>'+esc(queued.length+" waiting for a seat")+'</p><ul>'+
+    queued.slice(0,QUEUE_SHOW).map(function(n){return '<li title="'+esc(n+", "+(us[n].role||""))+'">'+robot(famOf(us[n].role),"queued")+esc(n)+'</li>';}).join("")+
+    (queued.length>QUEUE_SHOW?'<li>and '+(queued.length-QUEUE_SHOW)+' more</li>':"")+'</ul></div>';
+  if(fin.length) h+='<ul class="frows">'+fin.map(function(n){return rowHtml(n,us[n],eff(n));}).join("")+'</ul>';
   if(finished&&p.tail!=null&&p.usage!=null&&p.usage<1) h+='<p class="tail">Slowest agent ran '+dur(p.tail)+' after the last one started.</p>';
-  return h+'</div></details>';
+  return h+'</div></section>';
 }
 function soloHtml(r,o){var h="",a=r.activity;
   if(o==="running"&&r.kind==="until-done"){
@@ -447,7 +662,7 @@ function soloHtml(r,o){var h="",a=r.activity;
     var rt=r.round?"Round "+esc(r.round.n):esc(r.title);
     if(step.name==="testing"||step.name==="reviewing"){
       var testing=step.name==="testing";
-      var since=step.since?dur(Date.now()/1000-step.since):"";
+      var since=step.since?tickSpan(step.since,"dur"):"";
       var val=testing?(step.total!=null?"Running "+cnt(step.total,"check"):"Running checks")
                      :"Checking the diff against the task";
       h+='<h2>Coder <small>right now</small></h2><div class="tile solo">'+
@@ -461,7 +676,7 @@ function soloHtml(r,o){var h="",a=r.activity;
       h+='<h2>Coder <small>right now</small></h2><div class="tile solo">'+robot(FAM.builder,pose)+
         '<b>'+rt+(r.round&&r.round.review?" (review)":"")+'</b><span class="role">coder</span>';
       if(r.round&&r.round.timeout&&r.round.started){var rs=Date.now()/1000-r.round.started;
-        h+=bar(rs/r.round.timeout,rs/r.round.timeout>0.85?"hot":"")+'<div class="meta"><span>this round</span><span>'+dur(rs)+' / '+dur(r.round.timeout)+'</span></div>';}
+        h+=bar(rs/r.round.timeout,rs/r.round.timeout>0.85?"hot":"")+'<div class="meta"><span>this round</span><span>'+tickSpan(r.round.started,"dur")+' / '+dur(r.round.timeout)+'</span></div>';}
       h+=actLine(fake)+ctxHtml(a)+callsHtml(r.id+":solo",fake)+'</div>';
     } else {
       // between rounds: the last line closed the round and the next has not opened
@@ -484,7 +699,7 @@ function soloHtml(r,o){var h="",a=r.activity;
     if(c&&c.items&&c.items.length){
       h+=c.items.map(function(it){
         var prev=it.status==="PASS"?"passed last round":it.status==="FAIL"?"failed last round":"unverified last round";
-        return '<li><span class="spin" aria-label="testing"></span><span>'+esc(it.text)+'</span>'+
+        return '<li><span class="spin" role="img" aria-label="testing"></span><span>'+esc(it.text)+'</span>'+
           '<span class="tm">testing <span class="x">('+prev+')</span></span></li>';}).join("");
     } else if(r.step.total){
       // the total is DATA (a hand-built events line can carry any JSON): bound the
@@ -492,7 +707,7 @@ function soloHtml(r,o){var h="",a=r.activity;
       // number into the HTML only through esc()
       var n=Math.min(Math.max(0, Math.floor(+r.step.total || 0)), 50);
       for(var i=1;i<=n;i++)
-        h+='<li><span class="spin" aria-label="testing"></span><span>Check '+i+' of '+esc(n)+'</span><span class="tm">testing</span></li>';
+        h+='<li><span class="spin" role="img" aria-label="testing"></span><span>Check '+i+' of '+esc(n)+'</span><span class="tm">testing</span></li>';
     }
     h+='</ul>';
   } else if(c&&c.items&&c.items.length){
@@ -506,8 +721,10 @@ function evText(e){
   var u=esc(e.unit||e.item||"");
   switch(e.kind){
     case "run_start":return "Run started";
-    case "run_end":return "Run ended <span class=x>exit "+esc(e.exit)+"</span>";
-    case "phase_start":return "Phase <b>"+esc(e.label)+"</b> started with "+cnt(e.n,"agent")+" on "+esc(e.seats)+" seats";
+    // one set of verbs: ended cleanly is FINISHED, anything else says FAILED
+    case "run_end":return (e.exit===0||e.exit==null)?"Run finished":"Run failed with exit code "+esc(e.exit);
+    case "phase_plan":return "Planned "+cnt(Array.isArray(e.phases)?e.phases.length:0,"phase");
+    case "phase_start":return "Phase <b>"+esc(e.label)+"</b> started with "+cnt(e.n,"agent")+" on "+cnt(e.seats,"seat");
     case "unit_start":return "<b>"+u+"</b> started";
     case "unit_done":return "<b>"+u+"</b> "+(e.cached?"reused a cached answer":e.ok?"finished in "+dur(e.seconds):"failed")+(e.why?" <span class=x>"+esc(e.why)+"</span>":"");
     case "unit_dropped":return "<b>"+u+"</b> dropped <span class=x>"+esc(e.why)+"</span>";
@@ -523,9 +740,66 @@ function evText(e){
     default:return esc(e.kind)+(u?" "+u:"");
   }
 }
+/* How long ago did the run last say anything: the freshest of its events, its units'
+   starts, its agent's current activity and its loop's step. A run whose every number
+   stopped moving 9 hours ago is not healthy -- the page must say when it went quiet. */
+function quietFor(r){var now=Date.now()/1000,m=0,t;
+  (r.recent||[]).forEach(function(e){t=e&&e.t;if(typeof t==="number"&&isFinite(t)&&t>m)m=t;});
+  var us=r.units||{};Object.keys(us).forEach(function(k){t=us[k]&&us[k].started;
+    if(typeof t==="number"&&isFinite(t)&&t>m)m=t;});
+  var a=r.activity;if(a&&typeof a.since==="number"&&isFinite(a.since)&&a.since>m)m=a.since;
+  var s=r.step;if(s&&typeof s.since==="number"&&isFinite(s.since)&&s.since>m)m=s.since;
+  if(!m&&typeof r.start==="number"&&isFinite(r.start))m=r.start;
+  return m?Math.max(0,now-m):0;}  /* nothing stamped at all: just started, not quiet */
+/* The one live region a screen reader hears: <main> is NOT live, so the 2.5 s poll
+   rewrites it in silence, and this carries only the transitions worth saying --
+   never a timer, never the whole page. */
+var srLast={};
+function srSay(msg){if(!msg)return;var el=document.getElementById("sr-status");
+  if(el&&el.textContent!==msg)el.textContent=msg;}
+function srCheck(d){  /* the detail's data: here the reason is known, not just its count */
+  if(!d||d.missing||typeof d.id!=="string")return;
+  var o=outcome(d),ph=d.phase&&d.phase.label||null;
+  var atts=Array.isArray(d.attention)?d.attention:[],att=atts.length;
+  var p=srLast[d.id];
+  if(p){
+    if(p.o==="running"&&o!=="running")
+      srSay(o==="ended"?"Run finished.":o==="killed"?"Run stopped.":
+        "Run failed with exit code "+(typeof d.exit==="number"?d.exit:"?")+".");
+    else if(ph&&p.ph!==ph)srSay("Phase "+ph+" started.");
+    else if(att>p.att)srSay("Needs you: "+(atts[atts.length-1].reason||"see the run")+".");
+  }
+  srLast[d.id]={o:o,ph:ph,att:att};
+}
+/* The viewer stopped answering: keep showing what it last served, but say WHEN that
+   froze, and stop every loop that would otherwise pretend the run is alive. */
+function offlineHtml(since){
+  return '<p class="offline" role="status">Lost the viewer at '+clock(since)+
+    '. This is what it last showed. Retrying every few seconds.</p>';}
+function htmlClass(cls,on){var h=document.documentElement;
+  if(h&&h.classList)h.classList[on?"add":"remove"](cls);}
 
-var openFin={};
-document.addEventListener("toggle",function(e){var d=e.target;if(d.classList&&(d.classList.contains("wave")||d.classList.contains("calls")))openFin[d.getAttribute("data-key")]=d.open;},true);
+/* what each tab shows, per run: the feed's older lines, a phase's full wall of tiles,
+   a hero's whole goal -- all toggled the same way, all local to the tab */
+var openFin={},feedAll={},goalFull={},FEED_SHOW=8,RECENT_KEEP=50,TILE_SHOW=12,QUEUE_SHOW=24,CREW_SHOW=16;
+document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button[data-more]");if(!b)return;
+  var k=b.getAttribute("data-more");feedAll[k]=!feedAll[k];render();});
+document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button[data-goal]");if(!b)return;
+  var k=b.getAttribute("data-goal");goalFull[k]=!goalFull[k];render();});
+document.addEventListener("toggle",function(e){var d=e.target;if(d.classList&&d.classList.contains("calls"))openFin[d.getAttribute("data-key")]=d.open;},true);
+/* A phase group's open/closed state is the user's only once they tap its header: that
+   choice is kept per tab in sessionStorage, keyed by run and phase, so it survives the
+   re-render every poll does. Storage may be unavailable (a private window, blocked
+   site data): every access is wrapped, and the page then keeps the choice in memory. */
+var PH_KEY="qwen-watch-phases",phMem={};
+function phaseChoices(){try{var v=JSON.parse(sessionStorage.getItem(PH_KEY)||"{}");return v&&typeof v==="object"?v:{};}catch(e){return phMem;}}
+function phaseChoice(key){var c=phaseChoices();return typeof c[key]==="boolean"?c[key]:(typeof phMem[key]==="boolean"?phMem[key]:null);}
+function setPhaseChoice(key,open){phMem[key]=open;var c=phaseChoices();c[key]=open;
+  try{sessionStorage.setItem(PH_KEY,JSON.stringify(c));}catch(e){}}
+document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button[data-ph]");if(!b)return;
+  var open=b.getAttribute("aria-expanded")!=="true",body=document.getElementById(b.getAttribute("aria-controls"));
+  setPhaseChoice(b.getAttribute("data-ph"),open);
+  b.setAttribute("aria-expanded",String(open));if(body)body.hidden=!open;});
 var HIDE_KEY="qwen-watch-hidden";
 function hidden(){try{return JSON.parse(localStorage.getItem(HIDE_KEY)||"{}")||{};}catch(e){return {};}}
 function hide(ids){var h=hidden(),now=Date.now();ids.forEach(function(i){h[i]=now;});
@@ -533,7 +807,20 @@ function hide(ids){var h=hidden(),now=Date.now();ids.forEach(function(i){h[i]=no
   try{localStorage.setItem(HIDE_KEY,JSON.stringify(h));}catch(e){}render();}
 document.addEventListener("click",function(e){var b=e.target.closest("[data-hide]");if(!b)return;
   e.preventDefault();e.stopPropagation();hide(b.getAttribute("data-hide").split(","));});
+/* The endless motion has a pause of its own besides the OS setting (WCAG 2.2.2): the
+   robots keep their shapes, frozen mid-loop. The choice is the tab's, kept in
+   localStorage (wrapped, like every other storage access) and applied before the
+   first render, so a paused page never shows one moving frame on load. */
+var STILL_KEY="qwen-watch-still",stillMem=false;
+function getStill(){try{var v=localStorage.getItem(STILL_KEY);return v==="1";}catch(e){return stillMem;}}
+function setStill(on){stillMem=on;try{localStorage.setItem(STILL_KEY,on?"1":"0");}catch(e){}}
+function applyStill(){htmlClass("still",getStill());}
+document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button.still-btn");if(!b)return;
+  setStill(!getStill());applyStill();render();});
 var app=document.getElementById("app"),lastOk=0;
+var failSince=0,fails=0;  /* since when the viewer has not answered, and how many times
+                             in a row: the first miss may be one slow poll, the second
+                             is a lost viewer */
 var RELOAD_KEY="qwen-watch-reload";
 function isVersion(s){return typeof s==="string"&&/^[0-9a-f]{12}$/.test(s);}
 function checkPageVersion(d){
@@ -555,9 +842,77 @@ function checkPageVersion(d){
   try{sessionStorage.setItem(RELOAD_KEY,JSON.stringify({page:d.page,at:now}));}catch(e){}
   location.reload();
 }
-function topbar(n){var stale=lastOk&&Date.now()-lastOk>10000;
-  return '<div class="top"><span class="brand">qwen watch</span><span class="pulse"><span class="dot '+(stale?"stale":n?"live":"")+'"></span>'+
-   (stale?"Viewer not answering":n?"Live":"Idle")+'</span></div>';}
+/* The top bar: what the viewer is doing right now and the pause-motion control. After a
+   lost connection the word is Reconnecting (in the warn ink) -- never "Up to date",
+   never a quiet grey dot -- until an answer arrives. */
+function topbar(n){var fail=!!failSince,stale=lastOk&&Date.now()-lastOk>10000;
+  var word=fail?"Reconnecting…":(stale?"Viewer not answering":n?"Live":"Up to date");
+  var st=getStill();
+  return '<div class="top" data-sec="top"><span class="brand">qwen watch</span><span class="pulse'+(fail?" warn":"")+
+    '"><span class="dot '+(fail?"warn":(stale?"stale":n?"live":""))+'"></span>'+word+'</span>'+
+    '<button type="button" class="still-btn" data-fk="still" aria-pressed="'+(st?"true":"false")+'">'+
+    (st?"Play motion":"Pause motion")+'</button></div>';}
+/* The tab title follows the run, so the run speaks from the tab strip: the count of
+   live runs on the overview, the outcome (one set of verbs) and a needs-you here.
+   The words, not the escaped pill: a title is text, never HTML. */
+function titleFor(r){var o=outcome(r),att=Array.isArray(r.attention)?r.attention.length:0;
+  var word={running:"Running",ended:"Finished",failed:"Failed",killed:"Stopped"}[o];
+  return (att?"Needs you: ":"")+word+": "+(r.title||"")+" - qwen watch";}
+/* every poll replaces the page's HTML, which would drop a keyboard user's focus each
+   2.5 s: EVERY focusable control carries a stable data-fk, so the element that had
+   focus -- a run card, a finished row, a hide button, a phase header, a feed button,
+   the pause button, anything -- is found again by that key after the swap */
+function focusKey(){var a=document.activeElement;if(!a||!a.getAttribute)return null;
+  return a.hasAttribute("data-fk")?{attr:"data-fk",v:a.getAttribute("data-fk")}:null;}
+function refocus(k){if(!k)return;var bs=app.querySelectorAll("[data-fk]");
+  for(var i=0;i<bs.length;i++){if(bs[i].getAttribute("data-fk")===k.v){bs[i].focus({preventScroll:true});return;}}}
+/* The 1 s ticker fills every live duration -- the numbers are never baked into the
+   HTML (which would rebuild the page every poll just to move a clock). While the
+   viewer is not answering the clocks freeze with everything else: the page says it
+   is what the viewer LAST showed, and a clock moving past that sentence is a lie. */
+function tickAll(){if(!app||failSince)return;var els=app.querySelectorAll(".tick"),now=Date.now()/1000;
+  for(var i=0;i<els.length;i++){var el=els[i],s=parseFloat(el.getAttribute("data-since"));
+    if(!isFinite(s))continue;var t=dur(now-s);
+    var txt=el.getAttribute("data-fmt")==="ago"?t+" ago":t;
+    if(el.textContent!==txt)el.textContent=txt;}}
+/* The poll rewrites as little as it can. Every top-level piece of the page carries a
+   data-sec key (the hero, each wave section, the feed, the run lists); the same HTML
+   as last poll swaps nothing at all -- robots keep looping, selections and the crew
+   strip's scroll survive -- and when one section changed, only it is replaced. If the
+   sections no longer line up (a navigation, a new phase), fall back to one swap. */
+var lastHtml="",lastSecs=null;
+function secEnd(h,i,name){var re=/<(\/?)([a-zA-Z][^\s>/]*)[^>]*?(\/?)>/g,m,d=1;
+  re.lastIndex=i;                                               /* start after the open tag */
+  while((m=re.exec(h))){if(m[3])continue;                        /* self-closed svg parts */
+    if(m[2].toLowerCase()!==name)continue;                       /* foreign tags: noise */
+    if(m[1]){d--;if(!d)return re.lastIndex;}
+    else d++;}
+  return -1;}
+function splitSecs(h){var map={},list=[],re=/data-sec="([^"]*)"/g,m;
+  while((m=re.exec(h))){
+    var lt=h.lastIndexOf("<",m.index),gt=h.indexOf(">",m.index);
+    if(lt<0||gt<0||h.charAt(gt-1)==="/")return null;             /* only whole elements */
+    var nm=h.slice(lt+1).match(/^[a-zA-Z][^\s>/]*/);if(!nm)return null;
+    var end=secEnd(h,gt+1,nm[0].toLowerCase());if(end<0)return null;
+    map[m[1]]=h.slice(lt,end);list.push({k:m[1],html:map[m[1]]});
+    re.lastIndex=end;}                                           /* sections do not nest */
+  return {map:map,list:list};}
+function sameOrder(a,b){if(!a||!b||a.list.length!==b.list.length)return false;
+  for(var i=0;i<a.list.length;i++)if(a.list[i].k!==b.list[i].k)return false;return true;}
+function swap(html){if(!app||html===lastHtml)return;
+  var secs=null;try{secs=splitSecs(html);}catch(e){secs=null;}
+  var crew=app.querySelector(".crew"),sc=crew?crew.scrollLeft:0;
+  var part=!!secs&&sameOrder(secs,lastSecs);
+  if(part)for(var i=0;i<secs.list.length;i++){var s=secs.list[i];
+    if(lastSecs.map[s.k]===s.html)continue;
+    var els=app.querySelectorAll("[data-sec]"),el=null;
+    for(var j=0;j<els.length;j++)if(els[j].getAttribute("data-sec")===s.k){el=els[j];break;}
+    if(!el){part=false;break;}
+    el.outerHTML=s.html;}
+  if(!part)app.innerHTML=html;
+  lastHtml=html;lastSecs=secs;
+  var c2=app.querySelector(".crew");if(c2)c2.scrollLeft=sc;
+  tickAll();}
 function render(){
   var id=location.hash.slice(1);
   var url=id?"/api/run/"+encodeURIComponent(id):"/api/runs";
@@ -565,14 +920,31 @@ function render(){
     if(res.status===404) return {missing:true};
     return res.json();
   }).then(function(d){
+    if(failSince){srSay("Viewer back.");}
+    failSince=0;fails=0;htmlClass("offline",false);
     lastOk=Date.now();
     checkPageVersion(d);
-    if(id){ app.innerHTML=topbar(d&&!d.missing&&outcome(d)==="running")+(d.missing?'<a class="back" href="#">← All runs</a><p class="note">This run is no longer on the page. Finished runs leave after a while.</p>':detail(d)); }
-    else { var runs=Array.isArray(d)?d:(d&&d.runs); var live=runs.filter(function(r){return outcome(r)==="running";}).length; app.innerHTML=topbar(live)+overview(runs); }
-  }).catch(function(){ if(!app.innerHTML) app.innerHTML=topbar(0)+'<p class="note">Can’t reach the viewer. It may have been stopped; the next local agent run starts it again.</p>'; else { var t=app.querySelector(".top"); if(t) t.outerHTML=topbar(0);} });
+    var fk=focusKey();
+    if(id){ if(d.missing) swap(topbar(0)+'<div data-sec="back"><a class="back" href="#" data-fk="back">← All runs</a></div><div data-sec="gone"><p class="note">This run is no longer on the page. Finished runs leave after a while.</p></div>');
+      else { swap(topbar(outcome(d)==="running")+detail(d)); document.title=titleFor(d); }
+      srCheck(d); }
+    else { var runs=Array.isArray(d)?d:(d&&d.runs); var live=runs.filter(function(r){return outcome(r)==="running";}).length;
+      swap(topbar(live)+overview(runs));
+      document.title=(live?live+" running, ":"")+"qwen watch"; }
+    refocus(fk);
+  }).catch(function(){
+    if(!failSince){failSince=Date.now()/1000;srSay("Lost the viewer.");}
+    fails++;
+    htmlClass("offline",true);
+    lastHtml="";lastSecs=null;   // the DOM now carries the banner, not the last good page
+    if(!app.innerHTML) app.innerHTML=topbar(0)+'<p class="note">Can’t reach the viewer. It may have been stopped; the next local agent run starts it again.</p>';
+    else { var t=app.querySelector('[data-sec="top"]'); if(t) t.outerHTML=topbar(0)+(fails>=2?offlineHtml(failSince):""); }
+  });
 }
 window.addEventListener("hashchange",function(){window.scrollTo(0,0);render();});
-render(); setInterval(render,2500);
+// the stored pause choice takes effect before the first frame, not after a moving one
+applyStill();
+render(); setInterval(render,2500); setInterval(tickAll,1000);
 </script>
 </body>
 </html>

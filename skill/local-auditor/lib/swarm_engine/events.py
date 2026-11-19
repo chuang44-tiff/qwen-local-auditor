@@ -9,6 +9,10 @@ or has no trailing newline (a reader can catch a write in flight).
 
 Every line has "kind" and "t" (unix time). The engine's own kinds are ENGINE_KINDS:
   run_start    workflow, goal, run, resumed, depth, knobs   (runner._start)
+  phase_plan   phases: [{label, n}]                        (runner._start, right after
+               run_start, only for a manifest with a "phases" outline: the phases the
+               run expects, n resolved from its knob or null when unknown; the page
+               draws the ones no phase_start has matched yet as placeholders)
   phase_start  label, n, seats, units                        (the engine's run_phase's,
                before the phase's first unit spawns; units is one {unit, name, role} per
                unit -- the watch fold reads an item by "name", so a unit names itself both
@@ -26,7 +30,7 @@ Every line has "kind" and "t" (unix time). The engine's own kinds are ENGINE_KIN
                                                             once the run holds its lock)
 A workflow adds its own kinds through wf.event(kind, **fields); "attention" (fields
 item, reason, detail) means "the main session should look at this".
-The watch page (lib/watch.py) folds run_start, phase_start, unit_start, unit_done,
+The watch page (lib/watch.py) folds run_start, phase_plan, phase_start, unit_start, unit_done,
 unit_dropped, attention and run_end into what it shows; the phase's label is the workflow's
 own words for what the phase does (a workflow passes it to wf.agent/wf.fan_out/wf.vote as
 label=, and a phase without one is "phase N").
@@ -39,7 +43,7 @@ import threading
 import time
 
 FILE = "events.jsonl"
-ENGINE_KINDS = frozenset({"run_start", "phase_start", "unit_start", "unit_done",
+ENGINE_KINDS = frozenset({"run_start", "phase_plan", "phase_start", "unit_start", "unit_done",
                           "unit_dropped", "claude_call", "claude_probe", "run_end"})
 MAX_LINE = 4096                       # bytes, newline included: every line stays below it
 _LOCK = threading.Lock()
@@ -87,6 +91,16 @@ def emit_phase_start(run_dir, label, n, seats, units):
         rec = {"kind": "phase_start", "t": t, "label": label, "n": n, "seats": seats,
                "truncated": True}
     append(run_dir, rec)
+
+
+def emit_phase_plan(run_dir, phases):
+    """The phase_plan line: {phases: [{label, n}]}. Its own line, not a run_start field:
+    run_start carries the goal, which may fill a line and get the clip ladder cutting
+    every string in it -- and a label cut short would never match its phase_start. The
+    manifest bounds the outline (MAX_PHASES x MAX_LABEL), so this line always fits."""
+    if phases:
+        emit(run_dir, "phase_plan", phases=[{"label": p["label"], "n": p.get("n")}
+                                            for p in phases])
 
 
 def emit(run_dir, kind, **fields):

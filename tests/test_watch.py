@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -2559,3 +2560,726 @@ def test_dismiss_and_the_prune_take_the_activity_file_with_the_pointer(tmp_path,
     watch._drop_activity("../../etc/passwd")
     watch._drop_activity(None)
     assert os.path.exists(watch.activity_path(mine))
+
+
+# ------------------------------------------------------------- the phase outline
+
+def _plan(*labels):
+    return ev_at("phase_plan", 0, phases=[{"label": lb, "n": n} for lb, n in labels])
+
+
+def _phase(label, t, *names):
+    return ev_at("phase_start", t, label=label, n=len(names), seats=2,
+                 units=[{"name": n, "role": "r"} for n in names])
+
+
+def test_old_events_have_no_outline_and_fold_as_before():
+    """An events file written before phase_plan existed folds exactly as it did: an
+    empty plan, nothing planned, and phases untouched."""
+    lines = [ev_at("run_start", 0, workflow="w", goal="g"), _phase("classify", 1, "a")]
+    fold = watch.fold_events(lines)
+    assert fold["plan"] == [] and watch.planned_phases(fold) == []
+    assert [p["label"] for p in fold["phases"]] == ["classify"]
+
+
+def test_outline_entries_are_taken_in_order_and_leave_phases_alone():
+    """Each phase_start takes the first pending outline entry with its label; what is
+    left is planned, in outline order. The outline never adds to `phases`, so the seat
+    usage of a finished phase is the same with or without it."""
+    body = [_phase("classify", 1, "a", "b"),
+            ev_at("unit_start", 1, unit="a", role="r", timeout=60),
+            ev_at("unit_start", 1, unit="b", role="r", timeout=60),
+            ev_at("unit_done", 11, unit="a", role="r", ok=True, cached=False, seconds=10),
+            ev_at("unit_done", 21, unit="b", role="r", ok=True, cached=False, seconds=20),
+            _phase("check", 21, "c")]
+    start = ev_at("run_start", 0, workflow="w", goal="g")
+    plain = watch.fold_events([start] + body)
+    outlined = watch.fold_events([start, _plan(("classify", 2), ("check", 1),
+                                               ("report", 1))] + body)
+    assert outlined["phases"] == plain["phases"]                  # byte for byte
+    assert outlined["phases"][0]["usage"] == pytest.approx(30 / 40)
+    assert watch.planned_phases(outlined) == [{"label": "report", "n": 1}]
+    before = watch.fold_events([start, _plan(("classify", 2), ("check", 1))])
+    assert watch.planned_phases(before) == [{"label": "classify", "n": 2},
+                                            {"label": "check", "n": 1}]
+
+
+def test_a_repeated_label_takes_one_entry_per_phase_start():
+    lines = [ev_at("run_start", 0, workflow="w", goal="g"),
+             _plan(("check", 1), ("check", 1), ("report", None)), _phase("check", 1, "a")]
+    assert watch.planned_phases(watch.fold_events(lines)) == [
+        {"label": "check", "n": 1}, {"label": "report", "n": None}]
+
+
+def test_a_phase_the_outline_does_not_name_takes_nothing():
+    """A phase added at run time shows as a phase and leaves the outline as it was."""
+    lines = [ev_at("run_start", 0, workflow="w", goal="g"),
+             _plan(("classify", 1), ("report", 1)), _phase("classify", 1, "a"),
+             _phase("round 2: retry", 2, "b")]
+    fold = watch.fold_events(lines)
+    assert [p["label"] for p in fold["phases"]] == ["classify", "round 2: retry"]
+    assert watch.planned_phases(fold) == [{"label": "report", "n": 1}]
+
+
+def test_an_outline_entry_the_run_went_past_stops_being_a_placeholder():
+    """A review with nothing to review never starts; once the phase after it starts it
+    is passed over -- no placeholder left behind the phases that did run."""
+    lines = [ev_at("run_start", 0, workflow="w", goal="g"),
+             _plan(("probe", 3), ("review", None), ("report", 1)),
+             _phase("probe", 1, "a"), _phase("report", 2, "b")]
+    assert watch.planned_phases(watch.fold_events(lines)) == []
+
+
+def test_a_resume_starts_the_outline_over_and_junk_entries_are_skipped():
+    lines = [ev_at("run_start", 0, workflow="w", goal="g"), _plan(("a", 1)),
+             _phase("a", 1, "x"),
+             ev_at("run_start", 5, workflow="w", goal="g"),
+             ev_at("phase_plan", 5, phases=[{"label": "a", "n": 1}, {"label": ""}, "b",
+                                            {"label": "c", "n": -2}, {"n": 3}])]
+    assert watch.planned_phases(watch.fold_events(lines)) == [
+        {"label": "a", "n": 1}, {"label": "c", "n": None}]
+    assert watch.planned_phases(watch.fold_events(
+        [ev_at("phase_plan", 0, phases="not a list")])) == []
+
+
+def test_run_detail_exposes_planned(tmp_path, monkeypatch):
+    """/api/run/<id> carries `planned`: the outline's entries still to come, read through
+    the incremental fold, and [] for a run with no outline."""
+    run = tmp_path / "run"
+    write_events(run, [ev_at("run_start", 0, workflow="w", goal="g"),
+                       _plan(("classify", 2), ("check", None)), _phase("classify", 1, "a", "b")])
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    rid = watch.register("swarm", "t", run_path=str(run), start_server=False)
+    st = watch.run_detail(rid, time.time())
+    assert st["planned"] == [{"label": "check", "n": None}]
+    assert [p["label"] for p in st["phases"]] == ["classify"]
+    write_events(run, [ev_at("run_start", 0, workflow="w", goal="g")])
+    assert watch.run_detail(rid, time.time())["planned"] == []
+
+
+def _page_fn(name):
+    """One top-level function of the page's script, as written (up to the next one)."""
+    text = page_text()
+    at = text.index("function %s(" % name)
+    end = text.index("\nfunction ", at + 1)
+    return text[at:end]
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_phase_collapse_defaults_and_the_users_choice_wins():
+    """phaseOpen: a finished phase is collapsed, a running one expanded, and a choice the
+    user made (true or false) wins either way; a non-boolean stored value is no choice."""
+    src = _page_fn("phaseOpen")
+    probe = src + "\nconsole.log(JSON.stringify([phaseOpen(null,true),phaseOpen(null,false)," \
+        "phaseOpen(true,true),phaseOpen(false,false),phaseOpen('x',true)]));"
+    out = subprocess.run(["node", "-e", probe], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == [False, True, True, False, False]
+
+
+def test_phase_headers_are_buttons_and_the_choice_survives_the_poll():
+    """The phase header is a real button with aria-expanded and aria-controls; the
+    user's choice lives in sessionStorage per run and phase (every access wrapped), the
+    poll's re-render reads it back, and the old <details> toggle no longer records
+    a default as a choice -- the bug that kept a finished phase expanded forever."""
+    text = page_text()
+    wave = _page_fn("wave")
+    assert '<button type="button" class="ph-head" data-ph="' in wave
+    assert 'aria-expanded="' in wave and 'aria-controls="' in wave
+    assert "phaseOpen(phaseChoice(key),finished)" in wave
+    assert '<details class="wave"' not in text
+    assert 'contains("wave")' not in text                     # toggle tracks calls only
+    store = text[text.index('var PH_KEY="qwen-watch-phases"'):text.index("function focusKey")]
+    assert store.count("try{") >= 2 and "sessionStorage.getItem(PH_KEY" in store
+    assert "sessionStorage.setItem(PH_KEY" in store
+    assert ".ph-head:focus-visible" in text                     # a visible focus
+    assert "refocus(fk)" in text                                # kept across the swap
+    detail = _page_fn("detail")
+    assert "r.planned" in detail and "planned:true" in detail
+    assert 'r.id+"|"+l+"|"+occ[l]' in detail                    # keyed by run and phase
+
+
+def test_detail_page_keeps_long_runs_scannable():
+    """The run view's noise control: agents waiting for a seat are one row of small
+    sleepers rather than a full tile each, the feed shows its latest FEED_SHOW lines with
+    the rest behind a button (whose focus survives the poll like a phase header's), and
+    a running swarm's hero names the phase it is in among all of them."""
+    text = page_text()
+    wave = _page_fn("wave")
+    assert 'class="queue"' in wave and 'robot(famOf(us[n].role),"queued")' in wave
+    assert "busy.map(function(n){return tileHtml(" in wave        # tiles: working only
+    detail = _page_fn("detail")
+    assert "ev.slice(0,FEED_SHOW)" in detail and 'data-more="' in detail
+    assert "nowHtml(r,o)" in detail
+    now = _page_fn("nowHtml")
+    assert '"Phase "+(r.phases||[]).length+" of "+total' in now    # planned ones count
+    assert 'hasAttribute("data-fk")' in text                    # focus kept for it too
+
+
+def test_status_text_on_chips_uses_the_contrast_inks():
+    """Status words on the tinted chips are set in the --*-ink tokens, defined for light
+    and both dark selectors, never in the plain status colours that fall under 4.5:1."""
+    text = page_text()
+    assert text.count("--run-ink:") == 3 and text.count("--warn-ink:") == 3
+    assert text.count("--test-ink:") == 3                    # the Testing/Reviewing chip
+    assert text.count("--mark-ink:") == 3                    # and the marks' glyph
+    assert ".pill.running{color:var(--run-ink)}" in text
+    assert ".act .k.wait{color:var(--warn-ink)}" in text
+    assert ".act .k.test{color:var(--test-ink)}" in text
+    assert "k.test{color:#D65A9A}" not in text               # 2.94:1 in light: gone
+    assert ".flag{color:var(--warn-ink)" in text             # the "items need you" flag
+    assert ".ctx.hot span:last-child{color:var(--warn-ink)" in text   # the hot token count
+    assert "span:last-child{color:var(--warn);" not in text
+
+
+# ------------------------------------------- the page's own script, run under node
+# The audit's checks evaluate the page's top-level functions in node with DOM stubs.
+# The stubs cover everything the script touches while LOADING (the listeners, the
+# getElementById, the first render() and its 2.5 s interval) and nothing else: the
+# builders (overview/detail/wave/...) are pure string functions and do the real work.
+
+_PAGE_STUB = """
+var _store={};
+global.window={addEventListener:function(){},scrollTo:function(){}};
+global.location={hash:""};
+global.setInterval=function(){return 0};global.setTimeout=function(){return 0};
+global.fetch=function(){return {then:function(){return this},catch:function(){return this}}};
+global.localStorage={getItem:function(k){return _store["l"+k]===undefined?null:_store["l"+k]},
+  setItem:function(k,v){_store["l"+k]=String(v)},removeItem:function(k){delete _store["l"+k]}};
+global.sessionStorage={getItem:function(k){return _store["s"+k]===undefined?null:_store["s"+k]},
+  setItem:function(k,v){_store["s"+k]=String(v)},removeItem:function(k){delete _store["s"+k]}};
+global.document={addEventListener:function(){},activeElement:null,
+  getElementById:function(){return null},
+  querySelector:function(){return null},querySelectorAll:function(){return []},
+  documentElement:{classList:{add:function(){},remove:function(){},contains:function(){return false}}}};
+"""
+
+
+def _page_script():
+    """The page's <script> content, ready to run under _PAGE_STUB."""
+    text = page_text()
+    start = text.index("<script>") + len("<script>")
+    return _PAGE_STUB + text[start:text.index("</script>")]
+
+
+def _page_eval(expr, printer):
+    """The audit's node pattern: its harness evals the snippet and reports the
+    completion value of its LAST statement, so a snippet may open with `var`
+    declarations -- the page's own functions are the globals it evaluates against.
+    The program (the DOM stubs plus the page's own script) goes in on STDIN and the
+    snippet in the environment: both are data, never quoted into code -- and a
+    whole page on a Windows command line would not fit one."""
+    out = subprocess.run(
+        ["node"],
+        input=_page_script() + "\n"
+              + printer % "eval(process.env.WATCH_PAGE_EXPR)",
+        capture_output=True, text=True, timeout=30,
+        env=dict(os.environ, WATCH_PAGE_EXPR=expr))
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def _page_true(expr):
+    """The audit's exit-0-iff-truthy node checks: evaluate one JS snippet's value."""
+    return json.loads(_page_eval(expr, "console.log(JSON.stringify(!!(%s)));"))
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def _page_html(expr):
+    """The same, for a snippet whose last statement produces HTML to assert on in python."""
+    return _page_eval(expr, "console.log(String(%s));").rstrip("\n")
+
+
+# ---------------------------------------------------------------- the audit's fixes
+
+
+def test_only_a_status_region_is_live():
+    """Finding 1: <main> is rewritten every 2.5 s, so it must NOT be a live region
+    (a screen reader would re-read the whole page every poll). The one announcement
+    channel is a small sr-only status div outside it, set only on real transitions."""
+    text = page_text()
+    assert '<main id="app" aria-live' not in text               # the page is not a loudspeaker
+    assert '<main id="app"></main>' in text
+    assert 'id="sr-status" class="sr-only" role="status" aria-live="polite"' in text
+    assert ".sr-only{position:absolute;width:1px;height:1px;overflow:hidden;" \
+           "clip:rect(0 0 0 0);white-space:nowrap}" in text
+    assert text.index('id="sr-status"') > text.index("</main>")  # outside the swapped main
+    say = _page_fn("srSay")
+    assert 'getElementById("sr-status")' in say
+    check = _page_fn("srCheck")                                  # transitions only...
+    assert "Run finished." in check and "Run stopped." in check
+    assert "Phase " in check and "Needs you: " in check
+    assert "dur(" not in check and "elapsed" not in check        # ...never a timer
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_every_control_keeps_focus_across_the_poll():
+    """Finding 2: every poll replaces the HTML, so every focusable element -- links,
+    buttons, the tool-call summaries -- must carry a stable data-fk that focusKey()
+    reads and refocus() finds again; a focusable without a key loses the keyboard."""
+    shared = ('(h.match(/<(a|button|summary)[\\s>]/g)||[]).length==='
+              '(h.match(/data-fk="/g)||[]).length')
+    both = ('var R=[{id:"aaaaaaaaaaaa",kind:"agent",state:"running",title:"t",'
+            'elapsed:5,units:{}},{id:"bbbbbbbbbbbb",kind:"agent",state:"ended",'
+            'exit:0,title:"u",elapsed:5,end:1}];'
+            'var h=overview(R)+detail({id:"cccccccccccc",kind:"agent",state:"running",'
+            'title:"t",elapsed:5,units:{},recent:[],activity:{state:"thinking",since:1,'
+            'calls:[{tool:"Read",target:"x",seconds:1}]}});')
+    assert _page_true(both + shared +
+                      '&&/data-fk="mate:/.test(h)&&/data-fk="run:/.test(h)&&'
+                      '/data-fk="clear"/.test(h)&&/data-fk="row:/.test(h)&&'
+                      '/data-fk="hide:/.test(h)&&/data-fk="back"/.test(h)&&'
+                      '/data-fk="calls:/.test(h)')
+    swarm = ('var us={a:{state:"running",role:"reader",started:1,timeout:60},'
+             'b:{state:"done",role:"writer",seconds:3},'
+             'c:{state:"queued",role:"checker"}};'
+             # 12 events: past FEED_SHOW+2, so the earlier-lines button is there --
+             # finding 22 hides it when only two or fewer lines would be hidden
+             'var evs=[];for(var i=0;i<12;i++)evs.push({kind:"run_start",t:100+i});'
+             'var h=detail({id:"dddddddddddd",kind:"swarm",state:"running",title:"t",'
+             'elapsed:5,units:us,recent:evs,planned:[],'
+             'phase:{label:"read",n:3,units:["a","b","c"]},'
+             'phases:[{label:"read",n:3,end:null,units:["a","b","c"]},'
+             '{label:"write",n:1,end:50,units:[]}]});')
+    assert _page_true(swarm + shared +
+                      '&&/data-fk="ph:/.test(h)&&/data-fk="more:/.test(h)&&'
+                      '/data-fk="back"/.test(h)')
+    assert 'hasAttribute("data-fk")' in _page_fn("focusKey")
+    assert "preventScroll:true" in _page_fn("refocus")
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_a_lost_viewer_shows_the_banner_and_freezes_the_page():
+    """Finding 3: when the viewer stops answering, the page must not read "Up to date"
+    over a still-spinning run: Reconnecting in the warn ink, a dated banner after the
+    second miss, and every loop paused while we are offline."""
+    assert _page_true('typeof offlineHtml==="function" && '
+                      '/Lost the viewer/.test(offlineHtml(Date.now()/1000-30))')
+    assert _page_true('/role="status"/.test(offlineHtml(Date.now()/1000-30))')
+    text = page_text()
+    assert "animation-play-state:paused" in text
+    assert ".offline svg.robot *,.offline .spin,.offline .dot{animation-play-state:paused!important}" in text
+    assert ".offline .pill.running{color:var(--muted)}" in text
+    top = _page_fn("topbar")
+    assert "Reconnecting" in top and "Up to date" in top and '"Live"' in top
+    render = text[text.index("function render()"):text.index("window.addEventListener")]
+    assert "offlineHtml(failSince)" in render                    # the banner, after 2 misses
+    assert 'htmlClass("offline"' in render                       # and the freeze, both ways
+    assert 'srSay("Lost the viewer.")' in render and 'srSay("Viewer back.")' in render
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_an_ended_run_has_no_live_phase():
+    """Finding 4: on an ended, failed or killed run nothing may look live -- no
+    spinner, no seat queue, no working tiles -- and "done" counts only done/cached."""
+    assert _page_true('''var h=wave({p:{label:"implement",n:3,end:null},i:1,
+list:["a","b","c"],key:"k"},{id:"r"},{a:{state:"queued",role:"x"},
+b:{state:"done",role:"x"},c:{state:"running",role:"x"}},"failed");
+h.indexOf('class="spin')<0&&h.indexOf('class="queue')<0&&h.indexOf('class="tiles')<0''')
+    assert _page_true('''var h=wave({p:{label:"attack",n:3,end:null},i:0,
+list:["a","b","c"],key:"k"},{id:"r"},{a:{state:"done",role:"x"},
+b:{state:"not run",role:"x"},c:{state:"not run",role:"x"}},"killed");
+h.indexOf('class="spin')<0&&h.indexOf("3 of 3 done")<0''')
+    h = _page_html('wave({p:{label:"attack",n:3,end:null},i:0,list:["a","b","c"],'
+                   'key:"k"},{id:"r"},{a:{state:"done",role:"x"},'
+                   'b:{state:"not run",role:"x"},c:{state:"not run",role:"x"}},'
+                   '"running")')
+    assert "1 of 3 done" in h and "2 did not run" in h     # only done and cached count
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_unit_done_not_ok_folds_ok_false():
+    """Finding 5: a unit_done with ok:false is a unit that ended BADLY: the fold keeps
+    the verdict, and the row shows a red mark and the word failed, not a green check."""
+    lines = [ev("run_start", workflow="swarm", goal="g"),
+             ev("phase_start", label="build", n=2, seats=1,
+                units=[{"name": "a", "role": "r"}, {"name": "b", "role": "r"}]),
+             ev("unit_done", unit="a", role="r", ok=False, seconds=19 * 60 + 58,
+                why="patch did not apply"),
+             ev("unit_done", unit="b", role="r", ok=True, seconds=5.0)]
+    f = watch.fold_events(lines)
+    assert f["units"]["a"]["state"] == "done"               # it did finish its turn...
+    assert f["units"]["a"]["ok"] is False                   # ...but the emitter said no
+    assert f["units"]["b"]["ok"] is True
+    assert _page_true('var h=rowHtml("a",{state:"done",ok:false,role:"r",seconds:5});'
+                      '/mark bad/.test(h)&&/failed/.test(h)')
+    h = _page_html('wave({p:{label:"implement",n:2,end:9},i:0,list:["a","b"],key:"k"},'
+                   '{id:"r"},{a:{state:"done",ok:false,role:"r"},'
+                   'b:{state:"done",ok:true,role:"r"}},"failed")')
+    assert "1 failed" in h                                  # and the phase says so too
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_the_run_page_lists_what_needs_you():
+    """Finding 6: the overview counts attention items, so the run page must show them:
+    a Needs you block under the hero, latest first, every item."""
+    assert _page_true('/needs a login/.test(detail({id:"r",kind:"swarm",'
+                      'state:"running",title:"t",elapsed:5,units:{},recent:[],'
+                      'attention:[{item:"x",reason:"needs a login",t:1}]}))')
+    h = _page_html('detail({id:"r",kind:"swarm",state:"running",title:"t",elapsed:5,'
+                   'units:{},recent:[],attention:[{item:"x",reason:"first one",t:1},'
+                   '{item:"y",reason:"newest one",t:2}]})')
+    assert "<h2>Needs you <small>2</small></h2>" in h
+    assert 'class="attn"' in h                              # the feed's attention style
+    assert h.index("newest one") < h.index("first one")     # latest first
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_a_silent_run_says_so():
+    """Finding 7: a run whose every number froze 9 hours ago must not read healthy:
+    the flag names the silence, on the card and in the hero, and an over-budget unit
+    says it is over its limit."""
+    quiet = ('var n=Date.now()/1000;var r={id:"r",kind:"swarm",state:"running",'
+             'title:"t",elapsed:9*3600,start:n-9*3600,units:{a:{state:"running",'
+             'role:"reviewer",started:n-9*3600,timeout:1800}},'
+             'phase:{label:"review",n:1,units:["a"]},'
+             'phases:[{label:"review",n:1,end:null,units:["a"]}],'
+             'recent:[{kind:"unit_start",unit:"a",t:n-9*3600}]};')
+    assert _page_true(quiet + '/No update for 9h 0m/.test(detail(r))')
+    assert _page_true(quiet + '/No update for/.test(overview([r]))')
+    assert _page_true('var h=tileHtml("a",{state:"running",role:"r",'
+                      'started:Date.now()/1000-7200,timeout:1800},"r");'
+                      '/over its 30m limit/.test(h)&&/class="over"/.test(h)')
+    text = page_text()
+    assert ".tile .meta .over{color:var(--warn-ink)" in text    # in the warn ink
+
+
+def test_list_runs_carries_last_t(tmp_path, monkeypatch):
+    """Finding 7, server side: every /api/runs entry carries last_t -- the freshest
+    moment the run spoke (its start when it has no events) -- the number the card's
+    "No update for" flag measures its silence against."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    run = tmp_path / "run"
+    now = time.time()
+    quiet = now - 9 * 3600
+    write_events(run, [
+        ev_at("run_start", quiet, workflow="swarm", goal="g"),
+        ev_at("phase_start", quiet, label="build", n=1, seats=1,
+              units=[{"name": "a", "role": "r"}]),
+        ev_at("unit_start", quiet, unit="a", role="r"),
+    ])
+    rid = watch.register("swarm", "quiet run", run_path=str(run), start_server=False)
+    p = read_pointer(rid)
+    p["start"] = quiet                                       # it started 9 h ago too
+    with open(os.path.join(watch.watch_dir(), "%s.json" % rid), "w",
+              encoding="utf-8") as fh:
+        json.dump(p, fh)
+    entry = {r["id"]: r for r in watch.list_runs(now)}[rid]
+    assert entry["last_t"] == pytest.approx(quiet, abs=2)
+    fresh = watch.register("swarm", "busy run", run_path=str(tmp_path / "r2"),
+                           start_server=False)
+    entry = {r["id"]: r for r in watch.list_runs(now)}[fresh]
+    assert entry["last_t"] == pytest.approx(now, abs=2)      # its start is the stamp
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_a_pause_motion_button_stops_everything():
+    """Finding 9 (WCAG 2.2.2): endless motion needs an in-page pause. The button is a
+    real toggle (aria-pressed), its state is the tab's choice kept in localStorage, it
+    is applied before the first render, and one CSS rule freezes every animation."""
+    text = page_text()
+    assert "aria-pressed" in text
+    top = _page_fn("topbar")
+    assert '<button type="button" class="still-btn" data-fk="still" aria-pressed="' in top
+    assert "Pause motion" in top and "Play motion" in top
+    assert "qwen-watch-still" in text                        # the stored choice
+    assert "try{" in _page_fn("getStill") and "try{" in _page_fn("setStill")
+    assert ".still *,.still *::before,.still *::after{animation-play-state:paused!important}" in text
+    assert ".still .robot .zzz text{opacity:1}" in text
+    assert "applyStill();\nrender(); setInterval" in text     # applied before the first frame
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_no_button_sits_inside_a_link_or_an_h2():
+    """Finding 10: a button inside an <a> is invalid HTML and untouchable, and a
+    heading is no container for controls: the rows are <li>s with sibling link and
+    button, and Clear finished is a sibling of its h2."""
+    assert _page_true('''var h=overview([{id:"bbbbbbbbbbbb",kind:"agent",state:"ended",
+exit:0,title:"u",elapsed:5,end:1}]);
+!/<a [^>]*class="row"(?:(?!<\\/a>)[\\s\\S])*<button/.test(h)&&
+!/<h2>(?:(?!<\\/h2>)[\\s\\S])*<button/.test(h)''')
+    text = page_text()
+    assert '<ul class="done-list">' in text and '<li class="row">' in text
+    assert '<a class="row-link" href=' in text               # the grid moved to the link
+    assert '<div class="sec-head"><h2>Finished <small>' in text
+    assert ".sec-head{display:flex;align-items:baseline;justify-content:space-between}" in text
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_marks_spinners_and_bars_carry_names():
+    """Finding 17: an aria-label on a role-less span is ignored -- the glyph gets read
+    instead. Status marks and spinners become role="img" with a name, and every bar
+    gets a label and a valuetext that says what the fill means."""
+    assert _page_true('/aria-label="/.test(bar(0.5))&&'
+                      '/role="img"/.test(rowHtml("a",{state:"done",role:"r"}))')
+    assert _page_true('/aria-label="finished"/.test(rowHtml("a",{state:"done",role:"r"}))&&'
+                      '/aria-label="failed"/.test(rowHtml("a",{state:"done",ok:false,'
+                      'role:"r"}))&&/aria-label="did not run"/.test(rowHtml("a",'
+                      '{state:"not run",role:"r"}))')
+    assert _page_true('''var h=wave({p:{label:"read",n:1,end:null},i:0,list:["a"],
+key:"k"},{id:"r"},{a:{state:"running",role:"r",started:Date.now()/1000}},"running");
+/role="img" aria-label="running"/.test(h)''')
+    assert _page_true('/aria-valuetext="probe: 2 of 40 agents done"/.test(bar(0.5,"",'
+                      '"Run progress","probe: 2 of 40 agents done"))')
+    h = _page_html('overview([{id:"bbbbbbbbbbbb",kind:"swarm",state:"killed",title:"u",'
+                   'elapsed:5}])')
+    assert 'role="img" aria-label="Stopped"' in h            # the gone row's cross is named
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_a_failed_run_bar_shows_its_real_progress():
+    """Finding 18: a run killed at 1 of 3 must not read as a full 100 % bar --
+    card and hero show the progress the API reported, whatever the outcome."""
+    assert _page_true('/aria-valuenow="33"/.test(cardMeter({state:"killed",'
+                      'progress:0.33,kind:"swarm"}))')
+    assert _page_true('/aria-valuenow="33"/.test(cardMeter({state:"failed",'
+                      'progress:0.33,exit:2,kind:"swarm"}))')
+    assert _page_true('/class="bar bad"[^>]*aria-valuenow="33"/.test(detail({id:"r",'
+                      'kind:"swarm",state:"killed",title:"t",elapsed:5,progress:0.33,'
+                      'units:{},recent:[]}))')
+
+
+def test_dark_status_marks_use_a_dark_glyph():
+    """Finding 19: a white glyph on the dark status colours is 2.2-3.0:1 -- below the
+    non-text minimum. --mark-ink darkens the glyph in dark themes only."""
+    text = page_text()
+    assert text.count("--mark-ink:") == 3
+    assert text.count("--mark-ink:#0F141A") == 2             # both dark selectors
+    assert "color:var(--mark-ink)" in text                   # the marks draw with it
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_copy_uses_one_set_of_verbs():
+    """Finding 20: one vocabulary across the page -- Running, Finished, Failed,
+    Stopped -- correct plurals, no raw exit codes as decoration."""
+    assert _page_true('''var ps=evText({kind:"phase_start",label:"a",n:2,seats:1});
+var ok0=evText({kind:"run_end",exit:0}),bad=evText({kind:"run_end",exit:2});
+var ov=overview([{id:"bbbbbbbbbbbb",kind:"swarm",state:"killed",title:"u",elapsed:5}]);
+var w1=wave({p:{label:"a",n:1,end:5,usage:1},i:0,list:[],key:"k"},{id:"r"},{},"ended");
+var wq=wave({p:{label:"a",n:1,end:5,usage:0.75},i:0,list:[],key:"k"},{id:"r"},{},"ended");
+var rn=rowHtml("a",{state:"not run",role:"r"});
+/on 1 seat$/.test(ps)&&!/1 seats/.test(ps)&&
+ok0==="Run finished"&&/Run failed with exit code 2/.test(bad)&&
+!/killed/.test(ov)&&/kept all seats busy/.test(w1)&&
+/seats busy 75% of the time/.test(wq)&&/did not run/.test(rn)''')
+    assert _page_true('!/"1 seats"/.test(evText({kind:"phase_start",label:"a",n:1,'
+                      'seats:1}))')
+    text = page_text()
+    pill = text[text.index('var pillWord={'):]                # the pill keeps its form
+    assert 'Failed (exit "+esc(String(r.exit))+")' in pill
+
+
+# --------------------------------------- the audit's fixes, second half (11-16, 21-26)
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_an_unchanged_poll_rebuilds_only_what_changed():
+    """Finding 11: a poll that changed nothing must rebuild nothing. Live durations
+    are tick spans the 1 s ticker fills, so a run that said nothing between two
+    polls produces a byte-identical page; the swap then skips entirely, or replaces
+    only the data-sec sections whose HTML changed (hero, each wave, the feed, the
+    run lists), keeping the crew strip's scroll."""
+    assert _page_true('var n=Date.now()/1000,r={id:"r",kind:"agent",state:"running",'
+                      'title:"t",start:n-60,elapsed:60,units:{},recent:[],'
+                      'activity:{state:"thinking",since:n-30}};var a=detail(r);'
+                      'var D=Date.now;Date.now=function(){return D()+5000};'
+                      'r.elapsed=65;var b=detail(r);Date.now=D;a===b')
+    text = page_text()
+    assert '<span class="tick" data-since=' in _page_fn("tickSpan")
+    assert "setInterval(tickAll,1000)" in text                # the 1 s ticker
+    assert "tickSpan(a.since" in _page_fn("actLine")          # "Asking the model, 30s" ticks
+    assert 'data-sec="hero"' in text and 'data-sec="feed"' in text
+    assert 'data-sec="runs"' in _page_fn("overview")          # the overview run list
+    assert 'data-sec="wave:' in _page_fn("wave")              # every wave section, keyed
+    swap = _page_fn("swap")
+    assert "html===lastHtml" in swap                          # identical page: no swap at all
+    assert "scrollLeft" in swap                               # the crew strip keeps its place
+    assert "refocus(fk)" in text                              # and finding 2 still restores focus
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_a_two_hundred_agent_phase_shows_twelve_tiles_and_a_button():
+    """Finding 12: the walls of robots are capped -- twelve working tiles then a
+    button (the choice kept like the feed's), twenty-four sleepers then a count,
+    sixteen crew robots then a chip."""
+    assert _page_true('var us={},L=[];for(var i=0;i<200;i++){us["u"+i]={state:"running",'
+                      'role:"reader",started:1,timeout:60};L.push("u"+i)}'
+                      'var h=wave({p:{label:"read",n:200,end:null},i:0,list:L,key:"k"},'
+                      '{id:"r"},us,"running");'
+                      '(h.match(/class="tile[" ]/g)||[]).length<=12&&/Show all 200/.test(h)')
+    assert _page_true('var us={},L=[];for(var i=0;i<30;i++){us["u"+i]={state:"queued",'
+                      'role:"r"};L.push("u"+i)}'
+                      'var h=wave({p:{label:"read",n:30,end:null},i:0,list:L,key:"k"},'
+                      '{id:"r"},us,"running");'
+                      '(h.match(/<li title=/g)||[]).length<=24&&/and 6 more/.test(h)')
+    assert _page_true('var us={};for(var i=0;i<200;i++)us["a"+i]={state:"running",'
+                      'role:"reader"};'
+                      'var h=overview([{id:"aaaaaaaaaaaa",kind:"swarm",state:"running",'
+                      'title:"t",elapsed:5,units:us}]);'
+                      '(h.match(/class="mate" href/g)||[]).length<=16&&/\\+184</.test(h)')
+    assert 'data-more="tiles:' in _page_fn("wave")            # toggled like feedAll's
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_a_long_goal_clamps_to_three_lines_under_its_status():
+    """Finding 13: the stat row sits above the goal, the goal clamps at three lines
+    on a phone, and Show full goal / Show less opens it (a button with a focus key,
+    so the poll does not eat it)."""
+    text = page_text()
+    assert re.search(r"\.hero h1\{[^}]*line-clamp", text)
+    assert ".hero.full h1{" in text
+    long_goal = "x" * 300
+    h = _page_html('detail({id:"r",kind:"swarm",state:"running",title:"t",goal:"%s",'
+                   'elapsed:5,units:{},recent:[]})' % long_goal)
+    assert "Show full goal" in h and 'data-fk="goal"' in h
+    assert h.index('class="stat"') < h.index("<h1>")          # status before the wall of text
+    short = _page_html('detail({id:"r",kind:"swarm",state:"running",title:"t",'
+                       'elapsed:5,units:{},recent:[]})')
+    assert "Show full goal" not in short                      # a short goal needs no button
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_crew_robots_are_not_tab_stops():
+    """Finding 14: the crew strip repeats a link the cards below already carry, so
+    it leaves the tab order -- twenty robots are decoration, not twenty tab stops."""
+    assert _page_true('/class="mate"[^>]*tabindex="-1"/.test(overview([{id:"aaaaaaaaaaaa",'
+                      'kind:"agent",state:"running",title:"t",elapsed:5,units:{}}]))')
+
+
+def test_the_small_tap_targets_grew():
+    """Finding 15: x, Clear finished, the tool-call toggle -- every one clears a
+    comfortable minimum, in rules that carry the size on their own line."""
+    text = page_text()
+    assert re.search(r"\.x-btn\{[^}]*width:44px", text)
+    assert re.search(r"\.clear\{[^}]*min-height:44px", text)
+    assert re.search(r"\.back\{[^}]*padding:10px 12px 10px 0", text)
+    assert re.search(r"\.calls summary\{[^}]*min-height:(3[2-9]|4[0-9])px", text)
+
+
+def test_run_detail_exposes_skipped(tmp_path, monkeypatch):
+    """Finding 16 (the API): a phase_start marks the outline entries it passed over
+    and run_detail carries them as `skipped`, in outline order -- the page cannot
+    show what the outline knew but the run dropped."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    run = tmp_path / "run"
+    write_events(run, [ev_at("run_start", 0, workflow="w", goal="g"),
+                       _plan(("probe", 3), ("review", None), ("report", 1)),
+                       _phase("probe", 1, "a"), _phase("report", 2, "b")])
+    rid = watch.register("swarm", "t", run_path=str(run), start_server=False)
+    st = watch.run_detail(rid, time.time())
+    assert st["skipped"] == [{"label": "review", "n": None}]
+    assert st["planned"] == []                                # nothing left to come
+    assert watch.skipped_phases(watch.fold_events(
+        [ev_at("run_start", 0, workflow="w", goal="g"),
+         _plan(("a", 1), ("b", 2))])) == []                   # no jump, nothing skipped
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_a_skipped_phase_shows_and_counts():
+    """Finding 16 (the page): the passed-over entries show as quiet .wave.planned
+    placeholders saying Skipped, and they count in "Phase N of M"."""
+    assert _page_true('/Skipped/.test(detail({id:"r",kind:"swarm",state:"running",'
+                      'title:"t",elapsed:5,units:{},recent:[],phases:[],planned:[],'
+                      'skipped:[{label:"search",n:12}]}))')
+    h = _page_html('detail({id:"r",kind:"swarm",state:"running",title:"t",elapsed:5,'
+                   'units:{a:{state:"running",role:"r"}},'
+                   'phase:{label:"plan",n:1,units:["a"]},'
+                   'phases:[{label:"plan",n:1,end:null,units:["a"]}],'
+                   'planned:[],skipped:[{label:"search",n:12}],recent:[]})')
+    assert 'class="wave planned"' in h                        # the placeholder's quiet shape
+    assert "12 agents, Skipped" in h                           # with its note
+    assert "Phase 1 of 2" in h                                 # counted among all the phases
+
+
+def test_the_testing_checklist_gives_its_room_on_a_phone():
+    """Finding 21: on a phone the checklist hands the status column's width back to
+    the text: two columns, the status word under the item on the second."""
+    text = page_text()
+    assert re.search(r"@media \(max-width:480px\)\{[^@]*"
+                     r"\.checks li\{grid-template-columns:20px 1fr", text)
+    assert ".checks .tm{grid-column:2}" in text
+
+
+def test_a_cut_checklist_line_says_so(tmp_path, monkeypatch):
+    """Finding 21 (the server): the checks line is trimmed to 100 characters -- and
+    a reader must see that the text went past the cut, not that it ended there."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    run = tmp_path / "run"
+    write_events(run, [ev_at("run_start", 0, workflow="w", goal="g"),
+                       ev_at("checks", 5, round=1, passed=1, failed=0, unverified=0,
+                             total=2, items=[{"text": "x" * 150, "status": "PASS"},
+                                             {"text": "short one", "status": "FAIL"}])])
+    rid = watch.register("until-done", "t", run_path=str(run), start_server=False)
+    st = watch.run_detail(rid, time.time())
+    assert st["checks"]["items"][0]["text"] == "x" * 100 + "…"    # the cut is visible
+    assert st["checks"]["items"][1]["text"] == "short one"        # an uncut line: no …
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_the_feed_keeps_fifty_and_says_show_earlier():
+    """Finding 22: the window holds fifty events, not fifteen; the page shows eight
+    and its button counts the EARLIER lines it will bring -- but when only two or
+    fewer lines would hide, all of them show with no button at all, and a full
+    window says where the rest went."""
+    lines = [json.dumps({"kind": "note_%d" % i, "t": i}) for i in range(60)]
+    f = watch.fold_events(lines)
+    assert len(f["recent"]) == 50
+    assert f["recent"][0]["t"] == 10                           # the oldest ten are gone
+    assert _page_true('function R(k){return detail({id:"r",kind:"swarm",state:"running",'
+                      'title:"t",elapsed:5,units:{},recent:Array.from({length:k},'
+                      'function(_,i){return{kind:"run_start",t:i}})})}'
+                      '!/data-more/.test(R(10))&&/Show 12 earlier/.test(R(20))')
+    text = page_text()
+    assert "RECENT_KEEP=50" in text
+    assert "Older events are not kept here." in text
+    assert "Show N more" not in text                           # the old lie, gone
+
+
+def test_the_focus_ring_on_finished_rows_is_not_clipped():
+    """Finding 23: the list clips its corners -- the ring must sit inside the row."""
+    assert re.search(r"\.row(-link)?:focus-visible\{[^}]*outline-offset:-2px", page_text())
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_the_tab_title_follows_the_run():
+    """Finding 24: the tab strip says what the page says -- the live count on the
+    overview, the outcome (one set of verbs) and a needs-you on a run."""
+    text = page_text()
+    render = text[text.index("function render()"):text.index("window.addEventListener")]
+    assert "document.title=" in render
+    assert '" running, ' in render and '"qwen watch"' in render
+    assert _page_true('titleFor({state:"killed",title:"x"})==="Stopped: x - qwen watch"&&'
+                      'titleFor({state:"ended",exit:2,title:"y"})==="Failed: y - qwen watch"&&'
+                      'titleFor({state:"ended",exit:0,title:"y"})==='
+                      '"Finished: y - qwen watch"&&'
+                      'titleFor({state:"running",title:"z",attention:[{t:1}]})==='
+                      '"Needs you: Running: z - qwen watch"')
+
+
+def test_the_dead_css_is_gone():
+    """Finding 25: the rules no markup ever produced -- the old <details> finisher,
+    the table the page never renders, the quiet tile -- are out of the file."""
+    text = page_text()
+    for dead in (".fin ", ".fin{", ".fin[", "table{", "th,td{", "th:first-child",
+                 ".tablewrap", ".tile.quiet"):
+        assert dead not in text, dead                          # gone, every one
+    assert ".frows li{" in text                                # the live siblings stayed
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_the_phases_subtitle_only_says_how_far_the_outline_got():
+    """Finding 26: "Phases" keeps its name and the rail keeps its placeholders --
+    the subtitle is only "X of Y started"; the hero's now line already names who
+    is working and who is waiting."""
+    assert _page_true('var h=detail({id:"r",kind:"swarm",state:"running",title:"t",'
+                      'elapsed:5,units:{a:{state:"running",role:"r"}},'
+                      'phase:{label:"p",n:1,units:["a"]},'
+                      'phases:[{label:"p",n:1,end:null,units:["a"]}],'
+                      'planned:[{label:"q",n:1}],recent:[]});'
+                      '!/<h2>Phases <small>[^<]*working/.test(h)&&'
+                      '/<h2>Phases <small>1 of 2 started<\\/small>/.test(h)')
+    text = page_text()
+    assert "Did not run" in text                               # the placeholders it keeps
+    assert "not run\":\"did not run" in text                   # the same words in agent rows
+    assert "FEED_SHOW=8" in text                               # and eight feed lines

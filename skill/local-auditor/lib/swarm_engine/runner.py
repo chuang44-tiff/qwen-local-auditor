@@ -989,6 +989,20 @@ def _watch_finish(run_id, rc):
         watch._warn("the run could not be finished (%s)" % e)
 
 
+def plan_of(m, cfg):
+    """The manifest's "phases" outline with each n resolved: an int as given, a knob name
+    as that knob's value this run (None when it is not a usable count)."""
+    out = []
+    for ph in getattr(m, "phases", None) or []:
+        n = ph.get("n")
+        if isinstance(n, str):
+            n = cfg.get(n)
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            n = None
+        out.append({"label": ph["label"], "n": n})
+    return out
+
+
 def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
     """locked=True: the caller (--resume) already holds RUN/.lock; a fresh run takes it
     here, once the folder exists. Whoever took it, it is released on every exit, and
@@ -1025,6 +1039,7 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
         events.emit(run, "run_start", workflow=m.name, goal=cfg[prof["goal_key"]],
                     run=str(run), resumed=not new, depth=cfg["depth"],
                     knobs={k: cfg[k] for k in m.knobs})
+        events.emit_phase_plan(run, plan_of(m, cfg))
         started = True
         # the run's own pointer on the watch page, under the goal it was started with:
         # research by name, every other workflow as a swarm run
