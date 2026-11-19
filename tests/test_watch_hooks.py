@@ -1245,7 +1245,7 @@ def test_until_done_run_detail_and_api_expose_the_loop(env, monkeypatch):  # noq
     runs = {r["id"]: r for r in watch.list_runs(now)}
     assert runs[p["id"]]["round"] == {"n": 2, "timeout": 120,
                                       "started": st["round"]["started"]}
-    # the overview's Active agents row measures the loop's round against its budget
+    # the coder row inside the run's overview card measures the round against its budget
     assert runs[p["id"]]["checks"] == {"passed": 1, "total": 1}
     assert runs[p["id"]]["activity"]["state"] == "tool"
     assert set(runs[p["id"]]["activity"]) == set(watch.ACTIVITY_SMALL)

@@ -1375,16 +1375,19 @@ def test_page_tolerates_junk_event_stamps():
 
 
 def test_page_shows_the_one_session_its_activity_on_its_card():
-    """The agent's and the coder loop's own activity reaches BOTH places the page shows
-    them: the run view's solo tile, and the overview card, which has no tiles of its own
-    to carry a status line. Each draws it from the run's own fold (r.activity) with the
-    same two helpers the unit tiles use, so one agent reads the same on both screens."""
+    """The single agent's and the coder loop's own activity reaches BOTH places the
+    page shows them: the run view's solo tile, and the agent row inside the overview
+    card (the card itself says progress and time only -- no second status line, no
+    second context meter, those facts live in the row). The row is built by agentRows
+    from the run's own fold (r.activity) with the same actPose mapping and mood words
+    the unit tiles use, so one agent reads the same on both screens."""
     text = page_text()
     overview = text[text.index("function overview(runs)"):text.index("function detail(r)")]
-    assert 'actLine({state:"running",activity:a})' in overview      # the status line
-    assert "ctxHtml(a)" in overview                                  # and the context meter
-    assert 'actPose({state:"running",activity:a})' in overview      # and the robot's pose
-    assert "r.activity" in overview                                  # from the run's own fold
+    assert "agentRows([r])" in overview                    # the run's own rows, in its card
+    assert "actLine" not in overview and "ctxHtml" not in overview   # not twice: the row says it
+    rows = text[text.index("function agentRows(live)"):text.index("function agentRowHtml")]
+    assert 'actPose({state:"running",activity:a2})' in rows          # the session's own pose
+    assert "moodWords(a2)" in rows and "r.activity" in rows          # its words, its own fold
     solo = text[text.index("function soloHtml(r,o)"):text.index("function evText(e)")]
     assert "actLine(fake)" in solo and "ctxHtml(a)" in solo          # the run view, likewise
 
@@ -1428,8 +1431,11 @@ def test_page_shows_the_coder_loop_step_on_its_tile():
     assert '"passed last round"' in solo and '"unverified last round"' in solo
     assert "Check '+i+' of '" in solo                           # round 1 counts out the slots
     ov = text[text.index("function overview(runs)"):text.index("function detail(r)")]
-    assert '"Between rounds"' in ov and 'class="k test"' in ov   # the card's line too
-    assert "FAM.tester" in ov and "FAM.checker" in ov            # and the card's robots
+    assert "agentRows([r])" in ov                                  # the loop's row, in its card
+    assert '"Between rounds"' not in ov and 'class="k test"' not in ov  # the line lives in the row
+    loop = text[text.index("function loopMood(r)"):text.index("function agentRows(live)")]
+    assert "FAM.tester" in loop and "FAM.checker" in loop          # robots of the hour
+    assert '"waiting between rounds"' in loop                      # the step's one word
 
 
 def test_page_feed_sort_is_stable_within_one_stamp():
@@ -2839,7 +2845,7 @@ def test_every_control_keeps_focus_across_the_poll():
             'title:"t",elapsed:5,units:{},recent:[],activity:{state:"thinking",since:1,'
             'calls:[{tool:"Read",target:"x",seconds:1}]}});')
     assert _page_true(both + shared +
-                      '&&/data-fk="mate:/.test(h)&&/data-fk="run:/.test(h)&&'
+                      '&&/data-fk="agent:/.test(h)&&/data-fk="run:/.test(h)&&'
                       '/data-fk="clear"/.test(h)&&/data-fk="row:/.test(h)&&'
                       '/data-fk="hide:/.test(h)&&/data-fk="back"/.test(h)&&'
                       '/data-fk="calls:/.test(h)')
@@ -3113,8 +3119,8 @@ def test_an_unchanged_poll_rebuilds_only_what_changed():
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
 def test_a_two_hundred_agent_phase_shows_twelve_tiles_and_a_button():
     """Finding 12: the walls of robots are capped -- twelve working tiles then a
-    button (the choice kept like the feed's), twenty-four sleepers then a count,
-    sixteen crew robots then a chip."""
+    button (the choice kept like the feed's), twenty-four sleepers then a count.
+    (The overview's walls are capped too: see the test_card_agents_caps test.)"""
     assert _page_true('var us={},L=[];for(var i=0;i<200;i++){us["u"+i]={state:"running",'
                       'role:"reader",started:1,timeout:60};L.push("u"+i)}'
                       'var h=wave({p:{label:"read",n:200,end:null},i:0,list:L,key:"k"},'
@@ -3125,11 +3131,6 @@ def test_a_two_hundred_agent_phase_shows_twelve_tiles_and_a_button():
                       'var h=wave({p:{label:"read",n:30,end:null},i:0,list:L,key:"k"},'
                       '{id:"r"},us,"running");'
                       '(h.match(/<li title=/g)||[]).length<=24&&/and 6 more/.test(h)')
-    assert _page_true('var us={};for(var i=0;i<200;i++)us["a"+i]={state:"running",'
-                      'role:"reader"};'
-                      'var h=overview([{id:"aaaaaaaaaaaa",kind:"swarm",state:"running",'
-                      'title:"t",elapsed:5,units:us}]);'
-                      '(h.match(/class="mate" href/g)||[]).length<=16&&/\\+184</.test(h)')
     assert 'data-more="tiles:' in _page_fn("wave")            # toggled like feedAll's
 
 
@@ -3149,14 +3150,6 @@ def test_a_long_goal_clamps_to_three_lines_under_its_status():
     short = _page_html('detail({id:"r",kind:"swarm",state:"running",title:"t",'
                        'elapsed:5,units:{},recent:[]})')
     assert "Show full goal" not in short                      # a short goal needs no button
-
-
-@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
-def test_crew_robots_are_not_tab_stops():
-    """Finding 14: the crew strip repeats a link the cards below already carry, so
-    it leaves the tab order -- twenty robots are decoration, not twenty tab stops."""
-    assert _page_true('/class="mate"[^>]*tabindex="-1"/.test(overview([{id:"aaaaaaaaaaaa",'
-                      'kind:"agent",state:"running",title:"t",elapsed:5,units:{}}]))')
 
 
 def test_the_small_tap_targets_grew():
@@ -3494,13 +3487,13 @@ def test_a_skipped_phase_renders_in_outline_order_before_the_phase_it_jumped_to(
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
-def test_overview_crew_robots_show_the_agent_mood():
-    """The crew strip no longer paints every robot mid-stride: each poses with
-    actPose -- the very mapping the run page's tiles use -- on its mood entry, and
-    its title and visible label say the mood in words: "a, thinking, 1m 30s",
-    "b, waiting on a tool, 1m 51s". A unit with no mood entry keeps the plain
-    running pose, and a run past the "No update for" threshold shows its whole
-    crew in the waiting pose however it last felt."""
+def test_card_agents_rows_pose_with_the_unit_mood():
+    """The row robot does not paint every unit mid-stride: each poses with actPose
+    -- the very mapping the run page's tiles use -- on its mood entry, and says the
+    mood in words beside a ticking duration: "thinking", "waiting on a tool". A unit
+    with no mood entry keeps the plain running pose and the word "working", and a run
+    past the "No update for" threshold shows every row in the waiting pose however it
+    last felt. No crew: these rows are the only robots the overview draws."""
     h = _page_html('var n=Date.now()/1000;'
                    'overview([{id:"aaaaaaaaaaaa",kind:"swarm",state:"running",title:"t",'
                    'elapsed:100,start:n-100,'
@@ -3514,12 +3507,10 @@ def test_overview_crew_robots_show_the_agent_mood():
                    'ctx:null,win:null}}}])')
     assert 'class="robot thinking' in h                        # the checker is composing
     assert 'class="robot waiting' in h                         # the reader sleeps on the call
-    assert 'title="a, thinking"' in h                          # words in title AND label,
-    assert "<span>a, thinking, <span class=\"tick\"" in h       # the time a ticking span
-    assert 'title="b, waiting on a tool"' in h                  # (a baked one would swap
-    assert "<span>b, waiting on a tool, <span class=\"tick\"" in h  # the crew every poll)
-    assert "<span>c, working</span>" in h                       # no mood entry: plainly so
-    assert 'class="mate"' in h                                  # still the crew's own shape
+    assert 'class="mood">thinking <span class="tick"' in h     # words + a ticking span
+    assert 'class="mood">waiting on a tool <span class="tick"' in h
+    assert '<span class="mood">working</span>' in h            # no mood entry: plainly so
+    assert 'class="mate"' not in h                             # the crew strip is gone
     h2 = _page_html('var n=Date.now()/1000;'
                     'overview([{id:"aaaaaaaaaaaa",kind:"swarm",state:"running",title:"t",'
                     'elapsed:9*3600,start:n-9*3600,'
@@ -3530,12 +3521,15 @@ def test_overview_crew_robots_show_the_agent_mood():
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
-def test_active_agents_row_shows_a_thinking_unit():
-    """One compact row per running agent under the crew strip: the small robot in its
-    mood, the name and role, the run as a link (data-fk, short title only), the mood
-    in words with a live duration (a ticking span, never a baked number), the elapsed
-    against the timeout -- in the warn ink past it -- and the context use, in the
-    warn ink above 85 %. Needs-you rows first, then the longest in its state."""
+def test_card_agents_row_shows_a_thinking_unit():
+    """Each running card is a <section class="run"> (never a link: links cannot nest)
+    whose header link names the run (data-fk="run:<id>") and which holds one compact
+    row per running agent of THAT run in a <ul class="agents">: the small robot in
+    its mood, the NAME as the row's link (data-fk="agent:<run>:<unit>" -- the card
+    header already names the run), the role, the mood in words with a live duration
+    (a ticking span, never a baked number), the elapsed against the timeout -- in the
+    warn ink past it -- and the context use, in the warn ink above 85 %. Needs-you
+    rows first, then the longest in its state."""
     h = _page_html('var n=Date.now()/1000;'
                    'overview([{id:"ab12cd34ef56",kind:"swarm",state:"running",'
                    'title:"fix the parser",elapsed:213,start:n-213,'
@@ -3547,31 +3541,35 @@ def test_active_agents_row_shows_a_thinking_unit():
                    'b:{state:"thinking",cls:null,since:n-30,role:"checker",'
                    'started:n-700,timeout:600,ctx:460000,win:524288,tool:null,'
                    'target:null,needs_you:true}}}])')
-    assert '<div data-sec="agents">' in h                       # its own data-sec section
-    assert '<h2>Active agents <small>2</small></h2>' in h
-    assert '<ul class="agents">' in h and h.count("<ul") == 1  # the rows are ONE ul
+    assert '<section class="run">' in h                         # the card is a section
+    assert '<a class="run-head" href="#ab12cd34ef56" ' \
+           'data-fk="run:ab12cd34ef56">' in h                   # its header links to the run
+    assert '<div class="title">fix the parser</div>' in h       # the header names the run
+    assert '<ul class="agents">' in h and h.count("<ul") == 1  # the run's rows are ONE ul, inside it
     assert 'class="robot thinking p-check"' in h                # reviewer: the checker
-    assert ">a</b>" in h and ">reviewer</small>" in h           # name and role
+    assert ">a</b></a>" in h and ">reviewer</small>" in h       # the NAME is the row's link
     assert 'class="mood">thinking <span class="tick"' in h     # words + a ticking span
     assert 'data-fmt="dur"' in h
     assert "/ 10m" in h                                         # elapsed / the budget
     assert "105k / 512k" in h                                   # the context reading
-    assert 'data-fk="agent:ab12cd34ef56:a"' in h               # the run link, focus-keyed
-    assert 'class="arun"' in h and ">fix the parser</a>" in h
+    assert 'data-fk="agent:ab12cd34ef56:a"' in h               # the name link, focus-keyed
     assert 'data-fk="agent:ab12cd34ef56:b"' in h
     assert '<li class="attn">' in h                             # the needs-you row wears it
     assert h.index('agent:ab12cd34ef56:b') < h.index('agent:ab12cd34ef56:a')
     #                                                                     needs-you first
     assert 'class="atime over"' in h                            # 700s past a 600s budget
     assert 'class="actx hot"' in h                              # 460k of 512k: over 85 %
+    assert 'class="arun"' not in h                              # no run-title link in the row
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
-def test_active_agents_row_shows_a_coder_loop_testing():
-    """A coder loop's row follows its step like its tile on the run page: the tester
-    robot while testing with "running tests" and its live time, the checker while
-    reviewing, the builder in the waiting pose between rounds -- plus "round 3, 5 of
-    7 checks passing", its name and role, and the run link."""
+def test_card_agents_row_shows_a_coder_loop_testing():
+    """A coder loop's row inside its card follows the step like its tile on the run
+    page: the tester robot while testing with "running tests" and its live time, the
+    checker while reviewing, the builder in the waiting pose between rounds -- plus
+    its name (round and checks sit once, on the card). The card itself carries no
+    activity line and no context meter of its own: the row is the one place that
+    says what the loop is doing."""
     base = ('var n=Date.now()/1000;overview([{id:"cd12ef56ab12",kind:"until-done",'
             'state:"running",title:"add retry",elapsed:213,start:n-213,'
             'activity:{state:"done",cls:null,tool:null,target:null,since:n-1,'
@@ -3581,10 +3579,11 @@ def test_active_agents_row_shows_a_coder_loop_testing():
     h = _page_html(base % '{name:"testing",since:n-22}')
     assert 'class="robot running p-net"' in h                   # the tester's net
     assert 'class="mood">running tests <span class="tick"' in h
-    assert "round 3, 5 of 7 checks passing" in h
-    assert ">coder</b>" in h and ">coder loop</small>" in h   # the link carries the title
+    assert "checks passing" not in h                            # round + checks: once, on the card
+    assert ">coder</b></a>" in h and ">coder loop</small>" not in h  # the name is the link; no role repeat
     assert 'data-fk="agent:cd12ef56ab12:coder"' in h
     assert "/ 10m" in h and "105k / 512k" in h
+    assert 'class="act"' not in h                               # no activity line on the card
     h = _page_html(base % '{name:"reviewing",since:n-10}')
     assert 'class="robot running p-check"' in h                 # the checker's stamp
     assert "reviewing the diff" in h
@@ -3594,27 +3593,45 @@ def test_active_agents_row_shows_a_coder_loop_testing():
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
-def test_active_agents_caps_at_sixteen_and_links_the_busiest_run():
-    """Sixteen rows at most -- a two-hundred-agent swarm is not an information wall
-    on the landing page -- and the overflow is one "and N more" row linking to the
-    busiest live run."""
+def test_card_agents_caps_at_six_rows_and_links_the_run():
+    """Six rows at most inside one card -- nine working units are not an information
+    wall on the landing page -- and the overflow is one "and N more" row linking to
+    that run, focus-keyed like every other link."""
     h = _page_html('var us={},mo={},n=Date.now()/1000;'
-                   'for(var i=0;i<20;i++){us["u"+i]={state:"running",role:"reader",'
+                   'for(var i=0;i<9;i++){us["u"+i]={state:"running",role:"reader",'
                    'started:n-30,timeout:600};'
                    'mo["u"+i]={state:"thinking",since:n-30,role:"reader",started:n-30,'
                    'timeout:600}}'
                    'overview([{id:"aaaaaaaaaaaa",kind:"swarm",state:"running",'
                    'title:"t",elapsed:30,start:n-30,units:us,moods:mo}])')
-    assert h.count('<a class="arun"') == 16                      # sixteen rows, no more
-    assert "and 4 more" in h
-    assert 'data-fk="agent:aaaaaaaaaaaa:more"' in h
-    assert 'href="#aaaaaaaaaaaa"' in h                           # to the busiest run
+    assert h.count('class="a1"') == 6                            # six rows, no more
+    assert '<li class="am"><a href="#aaaaaaaaaaaa" ' \
+           'data-fk="agent:aaaaaaaaaaaa:more">and 3 more</a></li>' in h
+    assert "Active agents" not in h                              # the old roll is gone
 
 
-def test_active_agents_rows_are_two_lines_on_a_phone():
-    """Phones (<=480 px): each row is two lines -- robot, name and mood on the first,
-    run, time and context on the second -- and nothing scrolls sideways: the groups
-    shrink (min-width:0) and the mood text wraps on word boundaries."""
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_card_agents_no_running_unit_shows_no_list():
+    """A running swarm (or research run) whose units are all queued or done shows NO
+    list at all: nobody works, so the card says progress and time and nothing else
+    -- an empty <ul> would be a fact-shaped hole, not a fact."""
+    h = _page_html('var n=Date.now()/1000;'
+                   'overview([{id:"ab12cd34ef56",kind:"swarm",state:"running",'
+                   'title:"between phases",elapsed:213,start:n-213,'
+                   'units:{a:{state:"done",role:"reviewer",seconds:5},'
+                   'b:{state:"queued",role:"checker"}}}])')
+    assert '<section class="run">' in h                          # the card is still there
+    assert '<ul class="agents">' not in h                        # but no list, not an empty one
+    assert 'class="a1"' not in h
+    assert 'class="robot ' not in h                              # and no robot of its own either
+    assert "<h1>Between steps</h1>" in h                      # nothing counts, said once
+
+
+def test_card_agents_rows_are_two_lines_on_a_phone():
+    """Phones (<=480 px): each row inside the card is two lines -- robot, name and
+    mood on the first, time and context on the second -- and nothing scrolls
+    sideways: the groups shrink (min-width:0) and the mood text wraps on word
+    boundaries. The card's own padding carries the rows: they run full width."""
     text = page_text()
     assert re.search(r"@media \(max-width:480px\)\{[^@]*"
                      r"\.agents li\{display:block\}", text)   # the row stacks in two
@@ -3625,12 +3642,14 @@ def test_active_agents_rows_are_two_lines_on_a_phone():
     #                         ("anywhere" let the mood shrink to one letter per line)
     assert re.search(r"\.agents \.a1 \.mood\{[^}]*overflow-wrap:break-word", text)
     assert ".agents .atime,.agents .actx{white-space:nowrap}" in text  # "1h / 1h 0m" whole
+    assert ".run .agents{margin:10px -14px -14px" in text      # inside the card the rows
+    assert ".run .agents li{padding-left:14px" in text          # fill the card's full width
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
-def test_active_agents_row_links_all_carry_a_data_fk():
+def test_card_agents_row_links_all_carry_a_data_fk():
     """Every link the poll may replace carries a stable data-fk (finding 2) -- in the
-    agent rows that is every run link and the overflow link, no exceptions."""
+    card rows that is every name link and the overflow link, no exceptions."""
     h = _page_html('var us={},mo={},n=Date.now()/1000;'
                    'for(var i=0;i<18;i++){us["u"+i]={state:"running",role:"reader",'
                    'started:n-30,timeout:600};'
@@ -3643,9 +3662,82 @@ def test_active_agents_row_links_all_carry_a_data_fk():
                    '{id:"cccccccccccc",kind:"agent",state:"running",title:"solo",'
                    'elapsed:30,start:n-30,activity:{state:"thinking",since:n-7}}];'
                    'overview(R)')
-    block = h[h.index('<ul class="agents">'):h.index("</ul>")]
-    assert block.count("<a ") >= 16                              # rows and the overflow
-    assert block.count("<a ") == block.count('data-fk="')        # every link is keyed
+    blocks = re.findall(r'<ul class="agents">.*?</ul>', h, re.S)
+    assert len(blocks) == 3                                      # one ul per card
+    assert sum(b.count("<a ") for b in blocks) >= 6              # rows and the overflow
+    assert all(b.count("<a ") == b.count('data-fk="') for b in blocks)  # every link keyed
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_overview_has_no_overlap():
+    """The merged overview says each fact ONCE: one card per running run holding its
+    agents' rows -- so a running swarm's page has no crew strip of robots (no
+    class="crew", no class="mate" link), no standalone Active agents list and no
+    Claude usage panel with totals. The card's own line carries the run's calls."""
+    h = _page_html('var n=Date.now()/1000;'
+                   'overview([{id:"ab12cd34ef56",kind:"swarm",state:"running",'
+                   'title:"fix the parser",elapsed:213,start:n-213,'
+                   'units:{a:{state:"running",role:"reviewer",started:n-213,timeout:600},'
+                   'b:{state:"running",role:"checker",started:n-213,timeout:600}},'
+                   'moods:{a:{state:"thinking",since:n-87,needs_you:true},'
+                   'b:{state:"waiting",cls:"shell",since:n-30,tool:"Bash",'
+                   'target:"make test",needs_you:false}},'
+                   'claude:{n:2,cost_usd:0.12,unpriced:0}},'
+                   '{id:"bbbbbbbbbbbb",kind:"agent",state:"ended",exit:0,'
+                   'title:"u",elapsed:5,end:1}])')
+    assert '<section class="run">' in h                          # the one card is there
+    assert '<ul class="agents">' in h                            # and holds its rows
+    assert 'class="crew"' not in h                               # no crew strip for a run...
+    assert 'class="mate"' not in h                               # ...no robots, no +N chip
+    assert "Active agents" not in h                              # no standalone roll
+    assert "Claude usage" not in h                               # no panel of totals
+    assert "2 Claude calls, $0.12" in h                          # the run's own line
+    # the floor keeps its two lines of words: how many agents work, in how many runs
+    w = _page_html('var n=Date.now()/1000;'
+                   'overview([{id:"ab12cd34ef56",kind:"agent",state:"running",'
+                   'title:"a",elapsed:5,start:n-5},'
+                   '{id:"cd12ef56ab12",kind:"agent",state:"running",'
+                   'title:"b",elapsed:5,start:n-5}])')
+    assert "<h1>2 agents at work</h1>" in w                      # one row each, said once
+    assert "2 runs in progress" in w
+    assert '<section class="run">' in w and 'data-fk="agent:ab12cd34ef56:agent"' in w
+    o = _page_html('var n=Date.now()/1000;'
+                   'overview([{id:"ab12cd34ef56",kind:"agent",state:"running",'
+                   'title:"a",elapsed:5,start:n-5}])')
+    assert "<h1>1 agent at work</h1>" in o and "One run in progress" in o
+    # and with nothing running, the empty state stays exactly as it was
+    e = _page_html('overview([])')
+    assert "<h1>All quiet</h1>" in e
+    assert "Start a local agent and it appears here." in e
+    assert e.count('class="mate" aria-hidden="true"') == 3       # the quiet queued trio
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_overview_nested_link():
+    """The card is a section, never a wrapping link: its header link carries the
+    run's data-fk (data-fk="run:<id>") and no <a> sits inside another <a> anywhere
+    in the overview HTML -- rows link by name beside the header, not inside it."""
+    h = _page_html('var n=Date.now()/1000;'
+                   'var us={},mo={};for(var i=0;i<9;i++){us["u"+i]={state:"running",'
+                   'role:"reader",started:n-30,timeout:600};'
+                   'mo["u"+i]={state:"thinking",since:n-30}}'
+                   'overview([{id:"aaaaaaaaaaaa",kind:"swarm",state:"running",title:"t",'
+                   'elapsed:30,start:n-30,units:us,moods:mo,attention_count:2},'
+                   '{id:"bbbbbbbbbbbb",kind:"agent",state:"ended",exit:0,title:"u",'
+                   'elapsed:5,end:1}])')
+    assert '<a class="run-head" href="#aaaaaaaaaaaa" ' \
+           'data-fk="run:aaaaaaaaaaaa">' in h                    # the header link, keyed
+    open_a = re.compile(r"<a[\s>]")
+    i = 0
+    while True:
+        m = open_a.search(h, i)
+        if not m:
+            break
+        close = h.find("</a>", m.start())
+        assert close >= 0, "an <a> that never closes: " + h[m.start():m.start() + 80]
+        inner = open_a.search(h, m.start() + 1, close)
+        assert inner is None, "a link inside a link: " + h[m.start():inner.start()]
+        i = close + 4
 
 
 # ------------------------------------------------------- the claude usage ledger
@@ -3875,62 +3967,114 @@ def test_claude_summary_api_runs_and_run_carry_the_role_breakdown(tmp_path, monk
         thread.join(timeout=10)
 
 
+def test_claude_list_runs_per_run(tmp_path, monkeypatch):
+    """Additive API: every list_runs entry whose run made Claude calls carries its
+    own `claude`: {n, cost_usd, unpriced} -- the same calls claude_run_view counts
+    for that run (its id plus its CHILD ids: a pointer registered under the run's
+    own folder), over the run's WHOLE ledger. A run that made no calls carries no
+    `claude` key at all; nobody's calls (run null) belong to no entry. The map is
+    built once per ledger re-read, so a second poll reads the same counts for free."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    run = tmp_path / "run"
+    write_events(run, [ev("run_start", workflow="swarm", goal="g")])
+    rid = watch.register("swarm", "carded", run_path=str(run), start_server=False)
+    solo = tmp_path / "solo"
+    write_events(solo, [ev("run_start", goal="g")])
+    other = watch.register("agent", "quiet", run_path=str(solo), start_server=False)
+    child_id = "abcdef012345"                                 # nested under run/
+    watch._write_json(watch._pointer_path(child_id),
+                      pointer(id=child_id, run_path=str(run / "nested")))
+    now = time.time()
+    # register() stamped QWEN_WATCH_ID for its CHILDREN; these lines name their own
+    # runs, so the stamp goes (a plain pop: it must stay absent for the whole test)
+    os.environ.pop("QWEN_WATCH_ID", None)
+
+    def add(**over):
+        rec = {"kind": "advisor", "call": "ask", "role": "coder", "model": "opus",
+               "cost_usd": 0.06, "seconds": 2.0, "ok": True, "run": rid, "t": now}
+        rec.update(over)
+        assert watch.record_claude_call(rec)
+
+    add()                                                     # this run, priced
+    add()                                                     # ...twice: $0.12 in all
+    add(run=child_id, role="auditor", call="rescue", cost_usd=None)   # its child, no cost
+    add(run=None, call="plan")                                # nobody's: no entry has it
+    entries = {r["id"]: r for r in watch.list_runs(now)}
+    assert entries[rid]["claude"] == {"n": 3, "cost_usd": pytest.approx(0.12),
+                                      "unpriced": 1}          # own calls plus the child's
+    assert entries[child_id]["claude"] == {"n": 1, "cost_usd": 0.0, "unpriced": 1}
+    assert "claude" not in entries[other]                     # a quiet run: no key
+    again = {r["id"]: r for r in watch.list_runs(now)}        # the cached map, unchanged
+    assert again[rid]["claude"] == {"n": 3, "cost_usd": pytest.approx(0.12),
+                                    "unpriced": 1}
+
+
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
-def test_claude_usage_panel_has_the_role_sections_and_a_collapse_button():
-    """The overview's Claude usage panel: the heading and the one-line summary
-    ("3 calls today, $0.42 · 18 this week, $2.10"), one section per role with its
-    count, cost, models and calls broken down, and the whole thing behind a REAL
-    aria-expanded button with its own data-fk whose state survives the poll in
-    localStorage (wrapped) -- collapsed on phones with no stored choice, and quiet
-    on one line when there has never been a call. A cost above 0 that rounds to
-    zero reads "<$0.01", and the calls without one are counted."""
-    full = ('claudeData={today:{n:3,cost_usd:0.42,unpriced:0},'
-            'week:{n:18,cost_usd:2.10,unpriced:0},all:{n:18,cost_usd:2.10,unpriced:0},'
-            'roles:[{role:"coder",n:6,cost_usd:0.80,unpriced:0,'
-            'models:{opus:5,sonnet:1},calls:{ask:4,rescue:2}}],since:1};')
-    h = _page_html(full + 'overview([{id:"bbbbbbbbbbbb",kind:"agent",state:"running",'
-                          'title:"u",elapsed:5}])')
-    assert '<section class="claude" data-sec="claude">' in h   # one section, own data-sec
-    assert h.index('class="claude"') < h.index('class="floor"')  # at the TOP of the page
-    assert "<h2>Claude usage</h2>" in h
-    assert "3 calls today, $0.42" in h and "18 this week, $2.10" in h
-    assert "coder</b>: 6 calls, $0.80" in h                 # the role section
-    assert "opus 5" in h and "sonnet 1" in h                # models used, with counts
-    assert "(ask 4, rescue 2)" in h                         # and the calls inside it
-    assert 'aria-expanded="true"' in h and 'data-fk="claude"' in h
-    assert 'aria-controls="claude-body"' in h and 'id="claude-body"' in h
-    # every control still carries its focus key (the audit's balance, panel included)
-    assert _page_true(full + 'var h=overview([{id:"bbbbbbbbbbbb",kind:"agent",'
-                        'state:"ended",exit:0,title:"u",elapsed:5,end:1}]);'
-                      '(h.match(/<(a|button|summary)[\\s>]/g)||[]).length==='
-                      '(h.match(/data-fk="/g)||[]).length')
-    # zero calls ever: the one quiet line, and nothing to expand
-    h = _page_html('claudeData={today:{n:0,cost_usd:0,unpriced:0},week:{n:0,cost_usd:0,'
-                   'unpriced:0},all:{n:0,cost_usd:0,unpriced:0},roles:[],since:null};'
-                   'overview([])')
-    sec = h[h.index('<section class="claude"'):]
-    assert "No Claude calls yet. Advisor and claude-check calls show up here." in sec
-    assert "<button" not in sec
-    # rounding and the unpriced count
-    h = _page_html('claudeData={today:{n:1,cost_usd:0.004,unpriced:1},week:{n:1,'
-                   'cost_usd:0.004,unpriced:1},all:{n:1,cost_usd:0.004,unpriced:1},'
-                   'roles:[{role:"x",n:1,cost_usd:0.004,unpriced:1,models:{},calls:{}}],'
-                   'since:1};overview([])')
-    assert "<$0.01" in h and "(1 without a cost)" in h
-    assert _page_true('fmtCost(0)===\'$0.00\'&&fmtCost(0.004)===\'<$0.01\'&&'
-                      'fmtCost(0.42)===\'$0.42\'&&fmtCost(2.1)===\'$2.10\'&&'
-                      'fmtCost(null)===\'$0.00\'')
-    # the stored choice: localStorage wrapped, phones start collapsed (the ≤480 px
-    # of the page's own media query, read off the viewport width)
-    fn = _page_fn("claudeOpen")
-    assert "try{" in fn and "localStorage.getItem(CLAUDE_KEY)" in fn
-    assert "innerWidth" in fn and "480" in fn
-    assert "localStorage.setItem(CLAUDE_KEY" in _page_fn("setClaudeOpen")
-    assert '<section class="claude" data-sec="claude">' in page_text()  # the CSS card
-    # the run page: the same breakdown when the run made calls, silence when not
+def test_claude_run_page_section_keeps_the_role_sections():
+    """The run page's Claude calls section (the only Claude block the page has --
+    the overview shows each card's own line, never totals): one section with the
+    heading and the run's count and cost, one line per role with its count, cost,
+    models and calls broken down. A run that made no calls shows nothing at all.
+    A cost above 0 that rounds to zero reads "<$0.01", and the calls without one
+    are counted. (The overview panel and its collapse control are gone: the cards
+    carry the facts, see test_claude_card_*.)"""
     assert _page_true('claudeRunPanel(null)===""&&claudeRunPanel({n:0})===""')
     h = _page_html('claudeRunPanel({n:2,cost_usd:0.35,unpriced:0,roles:[{role:"coder",'
                    'n:2,cost_usd:0.35,unpriced:0,models:{opus:2},calls:{ask:2}}]})')
+    assert '<section class="claude" data-sec="claude">' in h   # one section, own data-sec
     assert "<h2>Claude calls <small>" in h and "2 calls, $0.35" in h
-    assert "coder</b>: 2 calls" in h and "(ask 2)" in h
-    assert "claudeRunPanel(r.claude)" in _page_fn("detail")
+    assert "coder</b>: 2 calls" in h and "(ask 2)" in h       # the role section
+    assert "opus 2" in h                                      # models used, with counts
+    h = _page_html('claudeRunPanel({n:1,cost_usd:0.004,unpriced:1,roles:[]})')
+    assert "<$0.01" in h and "(1 without a cost)" in h        # rounding, the unpriced count
+    assert _page_true('fmtCost(0)===\'$0.00\'&&fmtCost(0.004)===\'<$0.01\'&&'
+                      'fmtCost(0.42)===\'$0.42\'&&fmtCost(2.1)===\'$2.10\'&&'
+                      'fmtCost(null)===\'$0.00\'')
+    assert '<section class="claude" data-sec="claude">' in page_text()  # the CSS card
+    assert "claudeRunPanel(r.claude)" in _page_fn("detail")    # the run view hook
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_claude_card_sub_line_shows_the_run_calls():
+    """A running card whose run made Claude calls says so in ITS sub line, with the
+    run's own calls and cost only (the API hands the entry its `claude`): "2 Claude
+    calls, $0.12", singular when it is one, and the under-a-cent marker when the
+    cost is too small to round up."""
+    h = _page_html('var n=Date.now()/1000;'
+                   'overview([{id:"ab12cd34ef56",kind:"agent",state:"running",'
+                   'title:"t",elapsed:30,start:n-30,'
+                   'claude:{n:2,cost_usd:0.12,unpriced:0}}])')
+    assert '<section class="run">' in h                        # the card is there
+    assert "2 Claude calls, $0.12" in h
+    h = _page_html('var n=Date.now()/1000;'
+                   'overview([{id:"ab12cd34ef56",kind:"agent",state:"running",'
+                   'title:"t",elapsed:30,start:n-30,'
+                   'claude:{n:1,cost_usd:0.004,unpriced:0}}])')
+    assert "1 Claude call, <$0.01" in h                        # singular, under a cent
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_claude_card_notes_calls_without_a_cost():
+    """A call that reported no cost is counted in the open: the card's line adds
+    "(N without a cost)" beside the sum, in the warn ink."""
+    h = _page_html('var n=Date.now()/1000;'
+                   'overview([{id:"ab12cd34ef56",kind:"agent",state:"running",'
+                   'title:"t",elapsed:30,start:n-30,'
+                   'claude:{n:3,cost_usd:0.12,unpriced:1}}])')
+    assert "3 Claude calls, $0.12" in h and "(1 without a cost)" in h
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_claude_card_says_nothing_for_a_run_without_calls():
+    """No calls: the sub line says nothing about Claude -- and a finished row never
+    shows the field whatever its entry carries."""
+    h = _page_html('var n=Date.now()/1000;'
+                   'overview([{id:"ab12cd34ef56",kind:"agent",state:"running",'
+                   'title:"t",elapsed:30,start:n-30,'
+                   'claude:{n:0,cost_usd:0,unpriced:0}}])')
+    assert '<section class="run">' in h                        # the card is there
+    assert "Claude" not in h                                   # ...and Claude is not (n:0 too)
+    h = _page_html('overview([{id:"bbbbbbbbbbbb",kind:"agent",state:"ended",exit:0,'
+                   'title:"u",elapsed:5,end:1,claude:{n:4,cost_usd:0.5,unpriced:0}}])')
+    assert '<li class="row">' in h                             # the finished row
+    assert "Claude" not in h                                   # never carries the line

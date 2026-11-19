@@ -47,43 +47,48 @@ button{font:inherit;color:inherit}
 @keyframes ping{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--run) 55%,transparent)}
   70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
 
-/* the crew floor: the one bold element */
+/* the floor: the one bold element. Its two lines of words are the whole story while
+   runs work -- the robots live inside the cards below; only the empty state still
+   shows its three queued ones */
 .floor{position:relative;background:var(--panel);border-radius:var(--r-lg);padding:14px 14px 0;
   margin-bottom:22px;overflow:hidden}
 .floor h1{font-size:22px;line-height:1.25;margin:0 0 2px;font-weight:650;letter-spacing:-.01em}
 .floor p{margin:0;color:var(--muted);font-size:14px}
+.floor p:last-child{padding-bottom:14px}   /* no queued robots under it: it closes itself */
+/* the empty state's quiet trio: aria-hidden decoration, never links */
 .crew{display:flex;gap:4px;align-items:flex-end;overflow-x:auto;padding:14px 2px 0;
   min-height:104px;scrollbar-width:none;border-bottom:3px solid var(--floor)}
 .crew::-webkit-scrollbar{display:none}
 .mate{flex:0 0 auto;width:64px;text-align:center;font-size:11px;color:var(--muted);
-  text-decoration:none;padding-bottom:4px}
+  padding-bottom:4px}
 .mate svg{width:58px;height:58px;display:block;margin:0 auto}
-.mate span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* the crew strip shows 16 robots at most: the rest count into this chip */
-.mate.chip{padding-bottom:18px;font-size:13px}
-.crew .empty{color:var(--muted);font-size:14px;padding:0 0 18px}
 
-/* the Active agents roll under the crew strip: one compact row per running agent,
-   sixteen at most, then a link to the busiest run. One line on the desktop; on a
-   phone each row is two -- robot, name and mood, then run, time and context -- and
+/* the agent rows of one run, inside that run's card: one compact row per running
+   unit, six at most, then a link to the whole run. One line on the desktop; on a
+   phone each row is two -- robot, name and mood, then time and context -- and
    nothing scrolls sideways (the mood text wraps on word boundaries) */
 .agents{list-style:none;margin:0 0 10px;padding:0;background:var(--panel);
   border-radius:var(--r-sm)}
-.agents li{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 12px;
+.agents li{display:flex;flex-wrap:wrap;align-items:center;gap:2px 12px;
   padding:8px 12px;border-top:1px solid var(--line);font-size:13px;min-width:0}
 .agents li:first-child{border-top:0}
 .agents li.attn{background:var(--warn-bg);box-shadow:inset 3px 0 var(--warn)}
 .agents .a1{display:flex;flex-wrap:wrap;align-items:center;gap:2px 6px;min-width:0;flex:1 1 auto}
 .agents .a1 svg{width:26px;height:26px;flex:0 0 auto}
-.agents .a1 b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.agents .a1 .role,.agents .a1 .rnd{color:var(--muted);font-size:12px;flex:0 0 auto}
+.agents .a1 .anm{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  text-decoration:none}
+.agents .a1 .role{color:var(--muted);font-size:12px;flex:0 0 auto}
 .agents .a1 .mood{color:var(--muted);min-width:0;overflow-wrap:break-word}
 .agents .atime,.agents .actx{white-space:nowrap}
 .agents .a2{display:flex;align-items:baseline;gap:10px;margin-left:auto;color:var(--muted);min-width:0;max-width:100%}
-.agents .arun{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .agents .atime.over{color:var(--warn-ink);font-weight:600}
 .agents .actx.hot{color:var(--warn-ink);font-weight:600}
 .agents .am{color:var(--muted)}
+/* inside the card the rows run the full width: the card's own padding carries their
+   inset and the hairlines reach both edges, edge to edge like the finished list's */
+.run .agents{margin:10px -14px -14px;border-top:1px solid var(--line);overflow:hidden;
+  border-bottom-left-radius:var(--r-lg);border-bottom-right-radius:var(--r-lg)}
+.run .agents li{padding-left:14px;padding-right:14px}
 
 /* sections */
 h2{font-size:15px;font-weight:650;margin:26px 0 10px;display:flex;gap:8px;align-items:baseline}
@@ -92,15 +97,17 @@ h2 small{font-weight:400;color:var(--muted);font-size:13px}
    never inside it (an interactive element inside a heading is no heading link) */
 .sec-head{display:flex;align-items:baseline;justify-content:space-between}
 
-/* running run cards */
-.run{display:grid;grid-template-columns:52px 1fr;gap:4px 12px;background:var(--panel);
-  border-radius:var(--r-lg);padding:14px;margin-bottom:10px;text-decoration:none;
+/* running run cards: ONE card per running run -- a header link that names it, its
+   progress and time, and inside it the rows of that run's agents (every agent fact
+   lives in those rows, nowhere else on the page). A section, never a link: the rows
+   link by name, and a link cannot sit inside a link */
+.run{background:var(--panel);border-radius:var(--r-lg);padding:14px;margin-bottom:10px;
   border:1px solid transparent;transition:border-color .15s}
 .run:hover{border-color:var(--line)}
-.run svg{width:52px;height:52px;grid-row:span 3}
+.run-head{display:block;text-decoration:none}
 .run .title{font-weight:600;line-height:1.3;overflow-wrap:break-word}
 .run .sub{font-size:13px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 12px}
-.run .meter{grid-column:2}
+.run .sub .noprice{color:var(--warn-ink)}   /* a Claude cost with gaps: the warn ink */
 .kind{font-size:12px;font-weight:600;color:var(--muted)}
 .flag{color:var(--warn-ink);font-weight:600}
 
@@ -175,8 +182,6 @@ h2 small{font-weight:400;color:var(--muted);font-size:13px}
   .feed li{grid-template-columns:56px 1fr;gap:8px}
   .agents li{display:block}                          /* two lines, never a sideways scroll */
   .agents .a2{margin:2px 0 0 32px;justify-content:flex-start}
-  .agents .arun{flex:1 1 auto}
-  .agents .a1 .rnd{flex-basis:100%;padding-left:32px}   /* a loop's round: its own line */
 }
 .tile{background:var(--panel);border-radius:var(--r-sm);padding:22px 12px 8px;display:grid;
   grid-template-columns:62px 1fr;gap:0 12px;align-items:center;align-content:start;min-width:0}
@@ -320,23 +325,20 @@ p.offline{background:var(--warn-bg);color:var(--ink);box-shadow:inset 3px 0 var(
 .offline .pill.running{color:var(--muted)}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.dot.live{box-shadow:none}.spin{border-top-color:var(--run);border-right-color:var(--run)}.robot .zzz text{opacity:1}svg.robot.waiting .body{transform:rotate(-6deg) translateY(2px)}}
 /* Claude usage */
-/* The panel that counts the real claude -p calls (advisor and claude-checks). One
-   card, its role sections under a hairline; the summary line and the call breakdown
-   sit in the muted tone, the "without a cost" note in the warn ink (it says a number
-   is incomplete), and the collapse control is text in the run ink -- every status
-   colour on this panel is an --*-ink token, so it holds 4.5:1 in both themes like the
+/* The run page's section counting the real claude -p calls (advisor and
+   claude-checks); the overview's cards say their own run's calls in their sub line,
+   never a panel of totals. One card, its role sections under a hairline; the
+   summary line and the call breakdown sit in the muted tone and the "without a
+   cost" note in the warn ink (it says a number is incomplete) -- every status
+   colour here is an --*-ink token, so it holds 4.5:1 in both themes like the
    rest of the page. */
 .claude{background:var(--panel);border-radius:var(--r-lg);padding:10px 14px 14px;margin:14px 0 22px}
 .claude h2{margin:4px 0 0}
-.claude .csum{margin:2px 0 0;color:var(--muted);font-size:14px}
-.claude-t{background:transparent;border:0;color:var(--run-ink);font-size:13px;cursor:pointer;
-  padding:6px 8px;border-radius:6px}
-.claude-t:hover{background:var(--sunk);color:var(--ink)}
 .croles{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
 .crole{font-size:14px;margin:3px 0}
 .crole b{font-weight:650}
 .crole .brk{color:var(--muted);font-size:13px}
-.crole .noprice,.claude .csum .noprice{color:var(--warn-ink);font-size:13px}
+.crole .noprice{color:var(--warn-ink);font-size:13px}
 </style>
 </head>
 <body>
@@ -426,7 +428,7 @@ function etaText(r){return r.eta!=null&&outcome(r)==="running"?("About "+dur(r.e
    1 s ticker from its own data-since. A run that said nothing in the last 2.5 s then
    produces a byte-identical page, and render() can skip the rebuild (or rebuild only
    the sections whose HTML changed) instead of tearing down the robots, the selection
-   and the crew strip every poll. */
+   and the rows every poll. */
 function tickSpan(since,fmt){return typeof since==="number"&&isFinite(since)
   ?'<span class="tick" data-since="'+since+'" data-fmt="'+fmt+'"></span>':"";}
 function elapsedHtml(r){return outcome(r)==="running"&&typeof r.start==="number"&&isFinite(r.start)
@@ -443,12 +445,12 @@ function progA11y(r){
   if(outcome(r)==="running"&&r.kind==="agent")
     return r.timeout?"Running against a "+dur(r.timeout)+" limit":"Running";
   return progressText(r);}
-/* The overview reads the same moods the run page's tiles pose with: actPose stays the
-   ONE pose mapping (the crew robots and the Active agents rows pass their mood entry
-   to it exactly as a unit does), moodWords gives that same state its WORDS ("thinking",
-   "waiting on a tool", "Read src/x.py") and loopMood the coder loop's step its robot,
-   pose and words -- the tester while testing, the checker while reviewing, the builder
-   asleep between rounds. Nobody draws a second copy of any of it. */
+/* The card rows read the same moods the run page's tiles pose with: actPose stays the
+   ONE pose mapping (the agent rows pass their mood entry to it exactly as a unit
+   does), moodWords gives that same state its WORDS ("thinking", "waiting on a tool",
+   "Read src/x.py") and loopMood the coder loop's step its robot, pose and words --
+   the tester while testing, the checker while reviewing, the builder asleep between
+   rounds. Nobody draws a second copy of any of it. */
 function moodWords(a){
   if(!a||a.state==="done")return "working";              // no line yet: plainly running
   if(a.state==="thinking")return "thinking";
@@ -474,11 +476,10 @@ function loopMood(r){var st=r.step,a=r.activity;
   return {f:FAM.builder,pose:actPose({state:"running",activity:a}),word:moodWords(a),
     timed:moodTimed(a),since:a&&typeof a.since==="number"?a.since:null};
 }
-function shortTitle(t){t=String(t==null?"":t);return t.length>40?t.slice(0,39)+"…":t;}
-/* One row per running agent across all live runs, ready to render: needs-you first,
-   then the longest in its current state. A run past the "No update for" threshold
-   shows its robots in the waiting pose -- a live pid that stopped speaking is not a
-   working robot, whatever its last activity line said. */
+/* The rows for the runs given: one per running agent, ready to render into that
+   run's card -- needs-you first, then the longest in its current state. A run past
+   the "No update for" threshold shows its rows in the waiting pose -- a live pid
+   that stopped speaking is not a working robot, whatever its last activity line said. */
 function agentRows(live){var rows=[];
   live.forEach(function(r){
     var quiet=quietFor(r)>900;
@@ -494,14 +495,14 @@ function agentRows(live){var rows=[];
           timeout:e&&e.timeout!=null?e.timeout:u.timeout,
           ctx:e&&e.ctx,win:e&&e.win,needs:!!(e&&e.needs_you)});});
     }else if(r.kind==="until-done"){var lm=loopMood(r),a=r.activity||null;
-      rows.push({r:r,unit:"coder",name:"coder",role:"coder loop",f:lm.f,
+      rows.push({r:r,unit:"coder",name:"coder",role:"",f:lm.f,
         pose:quiet?"waiting":lm.pose,word:lm.word,timed:lm.timed,since:lm.since,
         started:r.round&&r.round.started!=null?r.round.started:r.start,
         timeout:r.round&&r.round.timeout!=null?r.round.timeout:r.timeout,
         ctx:a&&a.ctx,win:a&&a.win,needs:(r.attention_count||0)>0,
         loop:true,round:r.round,checks:r.checks});
     }else{var a2=r.activity||null;
-      rows.push({r:r,unit:"agent",name:"agent",role:"single agent",f:FAM.checker,
+      rows.push({r:r,unit:"agent",name:"agent",role:"",f:FAM.checker,
         pose:quiet?"waiting":actPose({state:"running",activity:a2}),
         word:moodWords(a2),timed:moodTimed(a2),
         since:a2&&typeof a2.since==="number"?a2.since:null,
@@ -512,105 +513,75 @@ function agentRows(live){var rows=[];
     var xs=x.since==null?Infinity:x.since,ys=y.since==null?Infinity:y.since;
     return xs<ys?-1:xs>ys?1:0;});   // needs-you first, then longest in its state --
   return rows;}                     // a row with no stamp joins last, never a NaN sort
-function agentsHtml(live){var rows=agentRows(live);if(!rows.length)return "";
-  var best=null,bestN=0;  // the overflow link goes to the run with the most working agents
-  live.forEach(function(r){var us=r.units||{},
-    n=Object.keys(us).filter(function(k){return us[k].state==="running";}).length||1;
-    if(n>bestN){bestN=n;best=r;}});
-  var shown=rows.slice(0,AGENTS_SHOW),now=Date.now()/1000;
-  var h='<div data-sec="agents"><h2>Active agents <small>'+rows.length+'</small></h2><ul class="agents">';
-  h+=shown.map(function(x){
-    var mood=esc(x.word)+(x.timed&&x.since!=null?' '+tickSpan(x.since,"dur"):"");
-    var rnd="";
-    if(x.loop){
-      if(x.round&&x.round.n!=null)rnd="round "+x.round.n;
-      if(x.checks&&x.checks.total!=null)rnd+=(rnd?", ":"")+
-        (x.checks.passed!=null?x.checks.passed:"?")+" of "+x.checks.total+" checks passing";}
-    var tt="";
-    if(typeof x.started==="number"&&isFinite(x.started)){
-      var over=x.timeout!=null&&now-x.started>x.timeout;
-      tt='<span class="atime'+(over?" over":"")+'">'+tickSpan(x.started,"dur")+
-        (x.timeout!=null?' / '+esc(dur(x.timeout)):"")+'</span>';}
-    var cc=x.ctx&&x.win?'<span class="actx'+(x.ctx/x.win>0.85?" hot":"")+'">'+
-      kTok(x.ctx)+' / '+kTok(x.win)+'</span>':"";
-    return '<li'+(x.needs?' class="attn"':"")+'><span class="a1">'+robot(x.f,x.pose)+
-      '<b>'+esc(x.name)+'</b>'+(x.role?'<small class="role">'+esc(x.role)+'</small>':"")+
-      '<span class="mood">'+mood+'</span>'+
-      (rnd?'<small class="rnd">'+esc(rnd)+'</small>':"")+'</span>'+
-      '<span class="a2"><a class="arun" href="#'+esc(x.r.id)+'" data-fk="agent:'+
-        esc(x.r.id)+':'+esc(x.unit)+'" title="'+esc(x.r.title||"")+'">'+
-        esc(shortTitle(x.r.title))+'</a>'+tt+cc+'</span></li>';}).join("");
-  if(rows.length>shown.length&&best)
-    h+='<li class="am"><a href="#'+esc(best.id)+'" data-fk="agent:'+esc(best.id)+
-      ':more">and '+(rows.length-shown.length)+' more</a></li>';
-  return h+'</ul></div>';}
+/* One agent row of a card: the small robot in its mood, the NAME as the row's link
+   (the card header already names the run), the role, the mood in words with a live
+   duration (a coder loop's round and checks sit once, on its card), the elapsed against the timeout -- in
+   the warn ink past it -- and the context use, in the warn ink above 85 %. */
+function agentRowHtml(x){var now=Date.now()/1000;
+  var mood=esc(x.word)+(x.timed&&x.since!=null?' '+tickSpan(x.since,"dur"):"");
+var tt="";
+  if(typeof x.started==="number"&&isFinite(x.started)){
+    var over=x.timeout!=null&&now-x.started>x.timeout;
+    tt='<span class="atime'+(over?" over":"")+'">'+tickSpan(x.started,"dur")+
+      (x.timeout!=null?' / '+esc(dur(x.timeout)):"")+'</span>';}
+  var cc=x.ctx&&x.win?'<span class="actx'+(x.ctx/x.win>0.85?" hot":"")+'">'+
+    kTok(x.ctx)+' / '+kTok(x.win)+'</span>':"";
+  return '<li'+(x.needs?' class="attn"':"")+'><span class="a1">'+robot(x.f,x.pose)+
+    '<a class="anm" href="#'+esc(x.r.id)+'" data-fk="agent:'+esc(x.r.id)+':'+esc(x.unit)+'">'+
+    '<b>'+esc(x.name)+'</b></a>'+
+    (x.role?'<small class="role">'+esc(x.role)+'</small>':"")+
+    '<span class="mood">'+mood+'</span>'+
+    '</span>'+
+    '<span class="a2">'+tt+cc+'</span></li>';}
 
 function overview(runs){
   var live=runs.filter(function(r){return outcome(r)==="running";});
   var hid=hidden();var fin=runs.filter(function(r){return outcome(r)!=="running"&&!hid[r.id];});
-  var mates=[];
-  live.forEach(function(r){
-    var us=r.units||{},names=Object.keys(us).filter(function(n){return us[n].state==="running";});
-    // past the "No update for" threshold a live pid has stopped speaking: the whole
-    // crew of that run shows the waiting pose, whatever its last activity line said
-    var quiet=quietFor(r)>900;
-    if(names.length){var moods=r.moods||{};
-      names.forEach(function(n){var e=moods[n]||null;
-        mates.push({f:famOf(us[n].role),label:n,id:r.id,
-          pose:quiet?"waiting":actPose({state:"running",activity:e}),
-          word:moodWords(e),since:e&&typeof e.since==="number"?e.since:null});});}
-    else if(r.kind==="until-done"){var lm=loopMood(r);   // the loop's robot follows its
-      mates.push({f:lm.f,label:"coder",id:r.id,          // step, as the run page reads it
-        pose:quiet?"waiting":lm.pose,word:lm.word,since:lm.since});}
-    else mates.push({f:FAM[KIND_FAM[r.kind]]||FAM.plain,label:{agent:"agent","until-done":"coder",swarm:"swarm",research:"research"}[r.kind]||r.kind,id:r.id,
-      pose:quiet?"waiting":actPose({state:"running",activity:r.activity}),
-      word:moodWords(r.activity),
-      since:r.activity&&typeof r.activity.since==="number"?r.activity.since:null});
-  });
-  var head=live.length?(mates.length+(mates.length===1?" agent":" agents")+" at work"):"All quiet";
+  // One card per running run, and ONE row per working agent inside its card: the
+  // floor says how many, the card says progress and time, the rows say mood, time
+  // and context. No fact is said twice -- no crew strip, no separate roll, no panel
+  // of totals. The rows are built once per run and used twice: counted into the
+  // headline, rendered into the card.
+  var rowsLive=live.map(function(r){return agentRows([r]);});
+  var atWork=0;rowsLive.forEach(function(x){atWork+=x.length;});
+  var head=!live.length?"All quiet":atWork?(atWork+(atWork===1?" agent":" agents")+" at work"):"Between steps";
   var sub=live.length?(live.length===1?"One run in progress":live.length+" runs in progress"):"Start a local agent and it appears here.";
-  var h='<div data-sec="floor"><section class="floor"><h1>'+head+'</h1><p>'+sub+'</p><div class="crew">';
-  h=claudePanel(claudeData)+h;   // the Claude usage panel rides at the page's top
-  // sixteen robots at most: a two-hundred-agent run is a wall of identical loops, and
-  // every one of them is a tab stop and an animation for nothing -- the rest count in
-  // the chip. They are decoration beside the cards below, so they leave the tab order.
-  // Each poses in its mood (actPose, the very mapping the run page's tiles use) and
-  // says it in words, in its title and its label: "check-06, waiting on a tool, 1m 51s".
-  // The duration is a ticking span, never a baked number: a baked one would change the
-  // section's HTML every poll, swap it, and restart every robot's animation.
-  h+=mates.length?mates.slice(0,CREW_SHOW).map(function(m){var t=m.label+", "+m.word;
-    var tk=m.since==null?"":tickSpan(m.since,"dur");
-    return '<a class="mate" href="#'+esc(m.id)+'" data-fk="mate:'+esc(m.id)+':'+esc(m.label)+'" title="'+esc(t)+'" tabindex="-1" aria-hidden="true">'+robot(m.f,m.pose)+'<span>'+esc(t)+(tk?", "+tk:"")+'</span></a>';}).join("")+(mates.length>CREW_SHOW?'<span class="mate chip" aria-hidden="true">+'+(mates.length-CREW_SHOW)+'</span>':""):['planner','builder','checker'].map(function(k){return '<span class="mate" aria-hidden="true">'+robot(FAM[k],'queued')+'</span>';}).join('');
-  h+='</div></section></div>';
-  h+=agentsHtml(live);   // who is doing what, right now, under the crew strip
+  var h='<div data-sec="floor"><section class="floor"><h1>'+head+'</h1><p>'+sub+'</p>';
+  if(!live.length)
+    // nothing running: the empty state keeps its quiet trio -- three queued robots
+    // as decoration beside the words (aria-hidden, spans, never links or tab stops)
+    h+='<div class="crew">'+['planner','builder','checker'].map(function(k){
+      return '<span class="mate" aria-hidden="true">'+robot(FAM[k],'queued')+'</span>';}).join('')+'</div>';
+  h+='</section></div>';
   if(live.length){
     h+='<div data-sec="runs"><h2>Running <small>'+live.length+'</small></h2>';
-    h+=live.map(function(r){
-      var f=FAM[KIND_FAM[r.kind]]||FAM.plain,att=r.attention_count||0;
-      // A single-shot session or a coder loop has no tiles of its own, so the card itself
-      // carries what that one agent is doing: the same status line the run view shows,
-      // read off the run's own activity (the fold's, not a second source).
-      var a=(r.kind==="agent"||r.kind==="until-done")&&r.activity?r.activity:null;
-      var pose=a?actPose({state:"running",activity:a}):"running";
-      var extra=a?actLine({state:"running",activity:a})+ctxHtml(a):"";
-      // a coder loop's own step outranks its activity between the rounds: while the
-      // harness runs the checks it is the tester at work, while the deviation audit
-      // reads the diff the checker, and in between the builder thinks.
-      var st=r.kind==="until-done"?r.step:null;
+    h+=live.map(function(r,ri){
+      var att=r.attention_count||0;
       var quiet=quietFor(r);  // a live pid saying nothing for 15 minutes is not live
-      if(st&&st.name!=="coding"){
-        f=st.name==="testing"?FAM.tester:st.name==="reviewing"?FAM.checker:FAM.builder;
-        pose=st.name==="between"?"thinking":"running";
-        extra='<div class="act"><span class="k test">'+
-          (st.name==="testing"?"Testing":st.name==="reviewing"?"Reviewing":"Between rounds")+
-          '</span></div>'+(a?ctxHtml(a):"");
-      }
-      return '<a class="run" href="#'+esc(r.id)+'" data-fk="run:'+esc(r.id)+'">'+robot(f,pose)+
-        '<div><div class="kind">'+esc(KIND_NAME[r.kind]||r.kind)+'</div><div class="title">'+esc(r.title)+'</div></div>'+
-        '<div class="sub"><span>'+progHtml(r)+'</span>'+(att?'<span class="flag">'+att+(att===1?" item needs":" items need")+' you</span>':"")+
-          (quiet>900?'<span class="flag">No update for '+dur(quiet)+'</span>':"")+'</div>'+
+      // this run's OWN real Claude calls (its id plus its children's, over its whole
+      // ledger, counted server-side): one line in the sub, never page-wide totals
+      var cl="";
+      if(r.claude&&r.claude.n)
+        cl='<span>'+cnt(r.claude.n,"Claude call")+", "+fmtCost(r.claude.cost_usd)+
+          claudeNoprice(r.claude)+"</span>";
+      // the run's agents inside the card: needs-you first, then the longest in its
+      // state (the one sort agentRows makes), six at most then a link to the run
+      var rws=rowsLive[ri],shown=rws.slice(0,CARD_AGENTS_SHOW),ul="";
+      if(shown.length){
+        ul='<ul class="agents">'+shown.map(agentRowHtml).join("");
+        if(rws.length>shown.length)
+          ul+='<li class="am"><a href="#'+esc(r.id)+'" data-fk="agent:'+esc(r.id)+
+            ':more">and '+(rws.length-shown.length)+' more</a></li>';
+        ul+='</ul>';}
+      // the card is a SECTION, never a link: its header links to the run and every
+      // row links by name, and a link cannot sit inside a link
+      return '<section class="run"><a class="run-head" href="#'+esc(r.id)+'" data-fk="run:'+esc(r.id)+'">'+
+        '<div class="kind">'+esc(KIND_NAME[r.kind]||r.kind)+'</div><div class="title">'+esc(r.title)+'</div></a>'+
+        '<div class="sub"><span>'+progHtml(r)+'</span>'+
+          (att?'<span class="flag">'+att+(att===1?" item needs":" items need")+' you</span>':"")+
+          (quiet>900?'<span class="flag">No update for '+dur(quiet)+'</span>':"")+cl+'</div>'+
         '<div class="meter">'+cardMeter(r)+'<div class="meta"><span>'+elapsedHtml(r)+' elapsed</span><span>'+esc(etaText(r))+'</span></div></div>'+
-        extra+'</a>';
+        ul+'</section>';
     }).join("");
     h+='</div>';
   }
@@ -955,7 +926,7 @@ function htmlClass(cls,on){var h=document.documentElement;
 
 /* what each tab shows, per run: the feed's older lines, a phase's full wall of tiles,
    a hero's whole goal -- all toggled the same way, all local to the tab */
-var openFin={},feedAll={},goalFull={},FEED_SHOW=8,RECENT_KEEP=50,TILE_SHOW=12,QUEUE_SHOW=24,CREW_SHOW=16,AGENTS_SHOW=16;
+var openFin={},feedAll={},goalFull={},FEED_SHOW=8,RECENT_KEEP=50,TILE_SHOW=12,QUEUE_SHOW=24,CARD_AGENTS_SHOW=6;
 document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button[data-more]");if(!b)return;
   var k=b.getAttribute("data-more");feedAll[k]=!feedAll[k];render();});
 document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button[data-goal]");if(!b)return;
@@ -991,35 +962,17 @@ function setStill(on){stillMem=on;try{localStorage.setItem(STILL_KEY,on?"1":"0")
 function applyStill(){htmlClass("still",getStill());}
 document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button.still-btn");if(!b)return;
   setStill(!getStill());applyStill();render();});
-/* Claude usage: the panel counting the REAL Claude calls -- the `claude -p` runs of
-   the advisor (ask/plan/rescue) and the swarm claude-checks, the ones that cost
-   Claude usage on the person's own claude account. Local Qwen sessions are not in
-   it. The numbers arrive folded server-side from the durable ledger (lib/watch.py)
-   and only as counts and words -- call names, roles and models; no text the person
-   typed, sent or got back is ever carried here.
-   Self-contained (every original line of the file stays where it was): the overview
-   panel reads `claudeData`, and the ONLY writer of that global is the version check
-   below -- it stashes the summary from every overview answer as it already arrives,
-   so the block adds no request, no timer and no global of its own beyond this one
-   variable; the run page takes its block from the run's own answer. Each panel is
-   one self-contained claude section, so a partial-swap render can drop or keep the
-   whole thing as a unit; the builders are plain hoisted declarations, and the two
-   hooks that call them are one line each in the overview and the run view. */
-var claudeData=null,CLAUDE_MEM=null,CLAUDE_KEY="qwen-watch-claude";
-/* The collapse is the user's, kept in localStorage (wrapped, like every other storage
-   access, with an in-memory fallback); with no stored choice the panel starts
-   COLLAPSED on phones (at or below the 480 px of the page's own media query) and open anywhere
-   wider -- usage stats are context, not the reason the page was opened. */
-function claudeOpen(){
-  if(CLAUDE_MEM!==null)return CLAUDE_MEM;
-  try{var v=localStorage.getItem(CLAUDE_KEY);if(v==="1")return true;if(v==="0")return false;}catch(e){}
-  try{if(window.innerWidth&&window.innerWidth<=480)return false;}catch(e){}
-  return true;
-}
-function setClaudeOpen(open){CLAUDE_MEM=open;try{localStorage.setItem(CLAUDE_KEY,open?"1":"0");}catch(e){}}
-document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button[data-claude]");if(!b)return;
-  var open=b.getAttribute("aria-expanded")!=="true",body=document.getElementById(b.getAttribute("aria-controls"));
-  setClaudeOpen(open);b.setAttribute("aria-expanded",String(open));if(body)body.hidden=!open;});
+/* Claude usage: the run page's section counting the REAL Claude calls -- the
+   `claude -p` runs of the advisor (ask/plan/rescue) and the swarm claude-checks, the
+   ones that cost Claude usage on the person's own claude account. Local Qwen sessions
+   are not in it. The numbers arrive folded server-side from the durable ledger
+   (lib/watch.py) and only as counts and words -- call names, roles and models; no
+   text the person typed, sent or got back is ever carried here. There is no page-wide
+   panel and no totals: each running card says its own run's calls and cost in its
+   sub line (from the run's `claude` field, list_runs), and the run page takes its
+   section from the run's own answer -- one self-contained block, so a partial-swap
+   render can drop or keep the whole thing as a unit. The shared helpers (cost
+   formatting, role rows) are plain hoisted declarations. */
 function fmtCost(x){if(typeof x!=="number"||!isFinite(x)||x<=0)return "$0.00";
   return x<0.005?"<$0.01":"$"+x.toFixed(2);}  /* two decimals; a positive cost too
                                                  small to round up shows the under-a-cent marker */
@@ -1033,30 +986,12 @@ function claudeRoleHtml(g){
     (cs.length?' <span class="brk">('+cs.map(function(k){return esc(k)+" "+esc(g.calls[k]);}).join(", ")+')</span>':"")+
     "</div>";
 }
-function claudeToggle(){
-  var open=claudeOpen();
-  return '<button type="button" class="claude-t" data-claude="1" data-fk="claude" aria-expanded="'+open+
-    '" aria-controls="claude-body">'+(open?"Hide details":"Show details")+"</button>";
-}
-function claudeRoles(c){
-  return '<div id="claude-body"'+(claudeOpen()?"":" hidden")+'><div class="croles">'+
-    (Array.isArray(c.roles)?c.roles:[]).map(claudeRoleHtml).join("")+"</div></div>";
-}
-function claudePanel(c){
-  if(!c)return "";                                   // the summary has not arrived yet
-  if(!c.all||!c.all.n)return '<section class="claude" data-sec="claude"><h2>Claude usage</h2>'+
-    '<p class="note">No Claude calls yet. Advisor and claude-check calls show up here.</p></section>';
-  var t=c.today||{},w=c.week||{};
-  return '<section class="claude" data-sec="claude"><div class="sec-head"><h2>Claude usage</h2>'+claudeToggle()+"</div>"+
-    '<p class="csum">'+cnt(t.n,"call")+" today, "+fmtCost(t.cost_usd)+claudeNoprice(t)+" · "+
-    esc(w.n)+" this week, "+fmtCost(w.cost_usd)+claudeNoprice(w)+"</p>"+
-    claudeRoles(c)+"</section>";
-}
 function claudeRunPanel(c){
   if(!c||!c.n)return "";                               // a run without calls shows no section
   return '<section class="claude" data-sec="claude"><div class="sec-head"><h2>Claude calls <small>'+
-    cnt(c.n,"call")+", "+fmtCost(c.cost_usd)+claudeNoprice(c)+"</small></h2>"+claudeToggle()+"</div>"+
-    claudeRoles(c)+"</section>";
+    cnt(c.n,"call")+", "+fmtCost(c.cost_usd)+claudeNoprice(c)+"</small></h2></div>"+
+    '<div class="croles">'+(Array.isArray(c.roles)?c.roles:[]).map(claudeRoleHtml).join("")+
+    "</div></section>";
 }
 var app=document.getElementById("app"),lastOk=0;
 var failSince=0,fails=0;  /* since when the viewer has not answered, and how many times
@@ -1073,10 +1008,6 @@ function checkPageVersion(d){
   // remembers the last version we reloaded for and when: the same server version never
   // reloads the tab twice within 60 s -- that is the guard against a reload loop (a
   // middle layer forever handing back the old page, say).
-  // The Claude usage panel's only data path: every overview answer carries the ledger
-  // folded (`claude`'s bucket shape), so it is stashed right here as it arrives -- a
-  // run answer's own block is a different shape and never lands in the panel's global
-  if(d&&d.claude&&d.claude.all&&d.claude.today)claudeData=d.claude;
   if(!d||!isVersion(d.page)||!isVersion(PAGE_VERSION)||d.page===PAGE_VERSION)return;
   var now=Date.now(),g=null;
   // read and write SEPARATELY: unreadable or junk in the stored value must not keep

@@ -829,7 +829,8 @@ def test_totals_keep_their_keys_without_claude_calls(tmp_path):
 def test_record_appends_a_watch_ledger_line_for_every_check_call(tmp_path, fake_cc,
                                                                   monkeypatch):
     """Every call record() writes also lands in lib/watch.py's durable usage ledger
-    (the watch page's Claude usage panel): kind claude-check, the check's NAME as its
+    (what the watch page counts on each run's card and the run page): kind
+    claude-check, the check's NAME as its
     call, role claude-check, the model, the cost and seconds, ok only for a call that
     came back ok -- and the run id of the registered run from the environment
     (QWEN_WATCH_ID). The prompt, the item id and the answer are never in it."""

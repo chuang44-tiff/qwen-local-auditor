@@ -60,11 +60,16 @@ swarm unit -- inherit it), else null. The file is created 0600 on posix and open
 APPEND; any error is swallowed -- a ledger problem never fails or slows a Claude call.
 /api/runs carries the ledger folded as its top-level `claude` field ({today, week, all}
 count/cost buckets over local midnight and the last 7 days, `roles` -- the last 7 days
-grouped by role, newest-count first -- and `since`, the oldest stamp), and /api/run/<id>
+grouped by role, newest-count first -- and `since`, the oldest stamp; the page stopped
+rendering the totals, but the field stays: additive-only API), and /api/run/<id>
 carries `claude` for the calls whose run is that id or one of its CHILD ids (pointers
 registered under the run's own run_path); a bucket whose calls have no cost reports the
-known sum with `unpriced`. The file is re-read only when its size or mtime changes, a
-line that does not parse is skipped, and a missing file reads as zero counts/since null.
+known sum with `unpriced`. Each list_runs entry whose run (child ids included) made
+calls carries that run's own `claude` -- {n, cost_usd, unpriced} over its whole ledger,
+the same calls /api/run/<id> counts -- from the once-per-re-read map _claude_run_counts
+builds; a run without calls carries no key. The file is re-read only when its size or
+mtime changes, a line that does not parse is skipped, and a missing file reads as zero
+counts/since null.
 
 ACTIVITY: a hook (lib/watch_hook.py) running inside the session appends one line per tool
 call to the file QWEN_WATCH_ACTIVITY names -- RUN/activity/<unit>.jsonl for a swarm unit,
@@ -76,8 +81,8 @@ _fold_for, so the viewer folds only the lines the hook wrote since the last read
 200-agent swarm is 200 stat()s and reads for the movers, every 2.5 s, for BOTH callers).
 For a RUNNING swarm or research run list_runs also carries `moods` -- per running unit
 (the fold's order, MOODS_SHOW at most) the fold reduced to state/cls/since plus the
-role, started, timeout, ctx, win, tool and target the overview's crew robots and Active
-agents rows show; an ended run carries no moods.
+role, started, timeout, ctx, win, tool and target the overview's agent rows (inside
+each running card) show; an ended run carries no moods.
 
 WHAT THE PAGE MAY SHOW: names, roles, states, timings, goal or title, exit, event
 why/attention text, and -- from the activity lines -- the tool name with the trimmed INPUT
@@ -647,6 +652,98 @@ def claude_run_view(st):
         _claude_add(bucket, rec)
     return {"n": bucket["n"], "cost_usd": bucket["cost_usd"],
             "unpriced": bucket["unpriced"], "roles": _claude_roles(mine)}
+
+
+# The per-run counts the overview's cards show beside their agent rows: each entry's
+# `claude` is the SAME calls claude_run_view counts for that run (its id plus its
+# child ids), over the run's whole ledger. Built once per ledger re-read -- the very
+# (path, size, mtime) signature _claude_records caches by -- and NOT once per run
+# per poll. The fold also follows the registry: a pointer's folder mtime rides in
+# the signature, so the run that registers (or dismisses) a child rebuilds the map
+# on the next poll even when the ledger did not move -- the card then says what
+# claude_run_view, which resolves _claude_child_ids live, says, never yesterday's
+# parentage. A rebuild is O(pointers read once) on the rare poll that changed one.
+_claude_counts_cache = {"sig": None, "map": None}
+
+
+def _claude_run_counts():
+    """{run id: {n, cost_usd, unpriced}} for every run the ledger names, a child
+    pointer's calls folded into its parent's entry (the same run_path-inside-run_path
+    rule _claude_child_ids applies one run at a time -- a nested run's calls belong
+    to the card that started it). Runs with nothing to count are absent, so an entry
+    that lands on a list_runs run always says n > 0. CONTRACT: the buckets are the
+    cache's own -- callers read them, they do not edit them (list_runs copies)."""
+    path = claude_ledger_path()
+    try:
+        fst = os.stat(path)
+        ledger = (path, fst.st_size, fst.st_mtime_ns)
+    except OSError:
+        ledger = None                             # no file: zero counts, whatever path
+    try:                                          # the registry's own stamp: register()
+        folder = os.stat(watch_dir()).st_mtime_ns # writes and dismiss/prune unlinks
+    except OSError:                               # a pointer, all of which move this
+        folder = None                             # directory's mtime
+    sig = (ledger, folder)
+    with _claude_lock:
+        if _claude_counts_cache["sig"] == sig and _claude_counts_cache["map"] is not None:
+            return _claude_counts_cache["map"]
+    own = {}
+    for rec in _claude_records():
+        if rec["run"] is None:
+            continue
+        bucket = own.get(rec["run"])
+        if bucket is None:
+            bucket = own[rec["run"]] = _claude_bucket()
+        _claude_add(bucket, rec)
+    counts = {}
+    if own:
+        # every pointer's folder, realpath'd once: the nesting test below is the one
+        # _claude_child_ids makes, run the other way round (which parents adopt this
+        # run's calls) over the handful of ids the ledger actually names
+        roots = {}
+        try:
+            names = os.listdir(watch_dir())
+        except OSError:
+            names = []
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            other = _read_json(os.path.join(watch_dir(), name))
+            if not isinstance(other, dict):
+                continue
+            rid = other.get("id")
+            base = other.get("run_path")
+            if not isinstance(rid, str) or not ID_RE.fullmatch(rid) \
+                    or not isinstance(base, str) or not base:
+                continue
+            try:
+                roots[rid] = os.path.realpath(base)
+            except (OSError, ValueError):         # a path no call accepts (a NUL)
+                continue
+        for pid in sorted(set(own) | set(roots)):
+            proot = roots.get(pid)
+            total = None
+            for rid in sorted(own):
+                if rid != pid:
+                    rroot = roots.get(rid)
+                    if rroot is None or proot is None or rroot == proot:
+                        continue                  # not a pointer, or not inside this one
+                    try:
+                        if os.path.commonpath([rroot, proot]) != proot:
+                            continue
+                    except ValueError:            # another drive on Windows
+                        continue
+                entry = own[rid]
+                if total is None:
+                    total = _claude_bucket()
+                total["n"] += entry["n"]
+                total["cost_usd"] += entry["cost_usd"]
+                total["unpriced"] += entry["unpriced"]
+            if total is not None:
+                counts[pid] = total
+    with _claude_lock:
+        _claude_counts_cache["sig"], _claude_counts_cache["map"] = sig, counts
+    return counts
 
 
 # ---------------------------------------------------------------- the events fold
@@ -1649,18 +1746,30 @@ def list_runs(now):
     since, ctx, win) and, for a coder loop, round.n/timeout/started and the checks'
     passed/total. A RUNNING swarm or research entry carries `moods`: per running unit
     (in the fold's order, the order the page shows them, MOODS_SHOW at most) the
-    activity fold's state, cls and since -- what the crew robots pose on -- plus
-    role, started, timeout, ctx, win, tool, target (cut to MOOD_TARGET characters)
-    and needs_you for the Active agents rows; an ended run carries no moods at all.
+    activity fold's state, cls and since -- what the agent rows inside the run's
+    card pose on -- plus role, started, timeout, ctx, win, tool, target (cut to
+    MOOD_TARGET characters) and needs_you for those rows; an ended run carries no
+    moods at all.
     The unit and run activity files are read INCREMENTALLY, by byte offset the way
     _fold_for caches events (_activity_fold_for), so a big swarm costs the poll the
     lines its units wrote since the last read, nothing more.
     Every entry also carries `last_t`: the moment of the run's freshest event (its start
-    when it has none) -- what an overview card measures its silence against."""
+    when it has none) -- what an overview card measures its silence against. And every
+    entry whose run (or child pointer) made real Claude calls carries `claude`:
+    {n, cost_usd, unpriced} -- the same calls claude_run_view counts for that run, over
+    the run's whole ledger, from the once-per-ledger-re-read map _claude_run_counts
+    builds; an entry with no calls carries no `claude` key at all."""
     try:
         names = os.listdir(watch_dir())
     except OSError:
         return []
+    try:
+        # once for the poll, not once per run; the ledger never kills the viewer:
+        # a fold that cannot happen at all (the _json guard used to cover every
+        # ledger read) reads as no Claude line on every card, nothing more
+        claude_counts = _claude_run_counts()
+    except Exception:
+        claude_counts = {}
     runs = []
     for name in names:
         if not name.endswith(".json"):
@@ -1689,8 +1798,9 @@ def list_runs(now):
         if st.get("kind") == "until-done":
             # the overview's "Round N of M" and the stop reason: /api/runs carries what
             # run_detail computes, so the page reads r.rounds/r.report_stop from here.
-            # The round's timeout and start join its n: the Active agents row measures
-            # the loop's current round against its budget, as the run page does.
+            # The round's timeout and start join its n: the coder row inside the
+            # run's card measures the loop's current round against its budget, as
+            # the run page does.
             st["rounds"] = _rounds(st.get("run_path"))
             st["report_stop"] = _report_stop(st.get("run_path"))
             round_, checks, step = _loop_view(st.get("run_path"))
@@ -1709,7 +1819,7 @@ def list_runs(now):
             st["activity"] = _small_activity(_activity_fold_for(run_file, now))
         if st.get("kind") in ("swarm", "research") and st["state"] == "running" \
                 and st.get("run_path"):
-            # the crew strip's moods: the SAME per-unit activity fold run_detail uses,
+            # the agent rows' moods: the SAME per-unit activity fold run_detail uses,
             # reduced (see _mood_view) -- one entry per RUNNING unit, in the fold's
             # order (the order the page shows them), MOODS_SHOW at most. Each unit's
             # file is read incrementally, so a 200-agent swarm costs the poll a
@@ -1732,6 +1842,12 @@ def list_runs(now):
             st["moods"] = moods
         # the card's "No update for" flag reads this: the freshest moment the run spoke
         st["last_t"] = _last_activity(pointer)
+        # the card's own Claude line: the run's calls plus its children's, over the
+        # whole ledger -- a copy of the map's bucket (the map is shared), and no key
+        # at all for a run that made none (the page then says nothing about Claude)
+        entry = claude_counts.get(st["id"])
+        if entry:
+            st["claude"] = dict(entry)
         runs.append(st)
     runs.sort(key=lambda st: st.get("start") if isinstance(st.get("start"),
                                                             (int, float)) else 0,
@@ -1796,9 +1912,10 @@ class _Handler(BaseHTTPRequestHandler):
     its own 501). Quiet by default: a watcher that shouts at every request is a
     watcher the user closes."""
     # Both /api answers also carry a `claude` field: the usage ledger folded for the
-    # page's Claude panels -- folded in _json below, the one place an answer is
-    # written, so the routes keep the exact shape they were first written in (see
-    # the ledger section).
+    # page's Claude blocks (the top-level summary rides along for API compatibility;
+    # the page stopped rendering it) -- folded in _json below, the one place an
+    # answer is written, so the routes keep the exact shape they were first written
+    # in (see the ledger section).
 
     def log_message(self, fmt, *args):
         pass
@@ -1816,9 +1933,9 @@ class _Handler(BaseHTTPRequestHandler):
         # Claude usage: the two data routes answer with the ledger folded onto the
         # dict in flight -- folded here, at the one place an answer is written, so
         # the routes above keep the exact shape they were first written in. A fold
-        # that cannot happen (a ledger that cannot be read) reads as no panel: a
-        # null claude the page skips, never a dead viewer. The /health answer is a
-        # different dict on a different path and is left alone.
+        # that cannot happen (a ledger that cannot be read) reads as no Claude
+        # block: a null claude the page skips, never a dead viewer. The /health
+        # answer is a different dict on a different path and is left alone.
         if isinstance(obj, dict):
             try:
                 here = urllib.parse.urlsplit(self.path).path
