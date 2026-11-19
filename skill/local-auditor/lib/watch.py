@@ -52,6 +52,13 @@ call to the file QWEN_WATCH_ACTIVITY names -- RUN/activity/<unit>.jsonl for a sw
 RUN/activity.jsonl for a coder loop, <watch_dir>/<id>.activity.jsonl for a single-shot
 session. activity_fold turns those lines into each agent's current tool and trimmed input,
 how long it has been on it, its last ten finished calls and the thinking/tools split.
+_activity_fold_for is its cached twin: per file the same identity/byte-offset cache as
+_fold_for, so the viewer folds only the lines the hook wrote since the last read (a
+200-agent swarm is 200 stat()s and reads for the movers, every 2.5 s, for BOTH callers).
+For a RUNNING swarm or research run list_runs also carries `moods` -- per running unit
+(the fold's order, MOODS_SHOW at most) the fold reduced to state/cls/since plus the
+role, started, timeout, ctx, win, tool and target the overview's crew robots and Active
+agents rows show; an ended run carries no moods.
 
 WHAT THE PAGE MAY SHOW: names, roles, states, timings, goal or title, exit, event
 why/attention text, and -- from the activity lines -- the tool name with the trimmed INPUT
@@ -106,6 +113,12 @@ UNIT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")   # lib/swarm.py's own n
                                               # outside RUN/activity/
 CHECK_STATES = ("PASS", "FAIL", "UNVERIFIED")
 ACTIVITY_SMALL = ("state", "cls", "tool", "target", "since", "ctx", "win")
+MOODS_SHOW = 16                             # units one overview poll folds moods for
+MOOD_KEYS = ("state", "cls", "since")       # the mood the crew robots pose on
+MOOD_TARGET = 120                           # characters of a mood entry's target
+ACT_CACHE_MAX = 2048                        # activity files remembered at once -- a
+                                            # 200-unit swarm needs one per unit, and an
+                                            # evicted entry only costs a re-read from 0
 
 
 # ---------------------------------------------------------------- the small places
@@ -420,8 +433,9 @@ def fold_events(lines):
      units: {name: {role, state, seconds, why, started, ended, finished_t, timeout, ok}},
      attention: [...], recent: [...], ended, exit, plan: [{label, n, state}]}.
     phases is one entry per phase_start -- {label, n, seats, start, end, wall, busy,
-    usage, tail, units} -- with the seat-usage numbers filled in for the phases that
-    finished (_finish_phases); end is None while a phase is still running.
+    usage, tail, units, pos} -- with the seat-usage numbers filled in for the phases
+    that finished (_finish_phases); end is None while a phase is still running and
+    pos is the outline entry it took (None when the outline never named it).
     A line that does not parse (a truncated last line, garbage) is skipped, never
     raised. A second run_start (a --resume) resets the fold: only events after the
     last one count. recent holds the last RECENT_KEEP (50) events: the page shows
@@ -460,7 +474,7 @@ def _fold_into(fold, lines):
         if kind == "phase_plan":
             fold["plan"] = _plan_entries(rec.get("phases"))
         elif kind == "phase_start":
-            _consume_plan(fold, rec.get("label"))
+            taken = _consume_plan(fold, rec.get("label"))
             names = []
             items = rec.get("units")
             if not isinstance(items, (list, tuple)):
@@ -486,7 +500,8 @@ def _fold_into(fold, lines):
             fold["phases"].append({"label": rec.get("label"), "n": n, "seats": seats,
                                    "start": _num(rec.get("t")), "end": None, "wall": None,
                                    "busy": None, "usage": None, "tail": None,
-                                   "units": list(names)})
+                                   "units": list(names),
+                                   "pos": taken})   # outline position it took, if any
         elif kind == "unit_start":
             unit = _touch_unit(fold, rec.get("unit"), rec.get("role"))
             if unit is not None:
@@ -556,7 +571,10 @@ def _consume_plan(fold, label):
     outline lists twice is taken once per phase_start). The pending entries before the
     taken one are passed over -- the workflow went past them (a review with nothing to
     review) -- and stop being placeholders. A label the outline does not list (a phase
-    added at run time) takes nothing: it shows as a phase all the same."""
+    added at run time) takes nothing: it shows as a phase all the same. Returns the
+    taken entry's outline position (None when nothing was taken): the phase records
+    it, so the page can slot the entries the run passed over where the outline had
+    them."""
     plan = fold.get("plan") or []
     for j, entry in enumerate(plan):
         if entry["state"] == "pending" and entry["label"] == label:
@@ -564,24 +582,41 @@ def _consume_plan(fold, label):
                 if earlier["state"] == "pending":
                     earlier["state"] = "skipped"
             entry["state"] = "started"
-            return
+            return j
+    return None
 
 
-def planned_phases(fold):
+def _outline_entries(fold, state, with_pos):
+    """The outline's entries in one state, in outline order, as {label, n} (+ the
+    entry's outline position as `pos` when asked): one walk of the plan for both
+    of the page's placeholder kinds."""
+    out = []
+    for j, e in enumerate(fold.get("plan") or []):
+        if e["state"] != state:
+            continue
+        entry = {"label": e["label"], "n": e["n"]}
+        if with_pos:
+            entry["pos"] = j
+        out.append(entry)
+    return out
+
+
+def planned_phases(fold, with_pos=False):
     """The outline entries no phase_start has taken yet, in outline order, as {label, n}:
     the page's placeholders for the phases still to come (or, once the run has ended,
     the ones it never reached). [] for a run whose workflow declared no outline -- every
-    events file written before phase_plan existed among them."""
-    return [{"label": e["label"], "n": e["n"]} for e in fold.get("plan") or []
-            if e["state"] == "pending"]
+    events file written before phase_plan existed among them. `with_pos` adds each
+    entry's outline position, as run_detail hands it to the page."""
+    return _outline_entries(fold, "pending", with_pos)
 
 
-def skipped_phases(fold):
+def skipped_phases(fold, with_pos=False):
     """The outline entries a phase_start passed over (the workflow jumped from plan to
     read), in outline order, as {label, n}: the page's "Skipped" placeholders -- a phase
-    that vanished from the run's shape read "Phase 2 of 3" on a five-phase outline."""
-    return [{"label": e["label"], "n": e["n"]} for e in fold.get("plan") or []
-            if e["state"] == "skipped"]
+    that vanished from the run's shape read "Phase 2 of 3" on a five-phase outline.
+    `with_pos` adds each entry's outline position, so the page can render a skipped
+    phase before the phase the run jumped to, not after every later placeholder."""
+    return _outline_entries(fold, "skipped", with_pos)
 
 
 def _finish_phases(fold):
@@ -827,15 +862,10 @@ def _report_stop(run_path):
 # What lib/watch_hook.py wrote, folded into what one agent's card shows. A hook records
 # the tool's name and its trimmed INPUT and nothing else, so nothing else can come here.
 
-def _read_json_lines(path):
-    """Every JSON object of a lines file, oldest first. A line that does not parse -- a
-    half-written tail most of all, since the hook appends while the reader reads -- is
-    skipped, never raised, and a file that cannot be read is no lines at all."""
-    try:
-        with open(path, "rb") as fh:
-            data = fh.read()
-    except OSError:
-        return []
+def _act_records(data):
+    """Every JSON object of a bytes block's lines, oldest first. A line that does not
+    parse -- a half-written tail most of all, since the hook appends while the reader
+    reads -- is skipped, never raised."""
     out = []
     for raw in data.decode("utf-8", "replace").splitlines():
         raw = raw.strip()
@@ -848,6 +878,18 @@ def _read_json_lines(path):
         if isinstance(rec, dict):
             out.append(rec)
     return out
+
+
+def _read_json_lines(path):
+    """Every JSON object of a lines file, oldest first. A line that does not parse -- a
+    half-written tail most of all, since the hook appends while the reader reads -- is
+    skipped, never raised, and a file that cannot be read is no lines at all."""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return []
+    return _act_records(data)
 
 
 def _tool_class(tool, target):
@@ -906,11 +948,40 @@ def activity_fold(path, now):
     its post or the stop -- and a `stop` line closes every call still open, subagent
     calls included, their round being over.
     """
-    events = []
-    ctx = win = None
+    st = _act_state()
     if not path:
         return None                                 # no file named: nothing to fold, no error
-    for rec in _read_json_lines(path):
+    _act_into(st, _read_json_lines(path))
+    return _act_derive(st, now)
+
+
+def _act_state():
+    """The raw fold state of one agent's activity lines: what _act_into accumulates
+    and _act_derive reads. The incremental reader keeps it between polls so only the
+    bytes written since the last read ever need folding -- the _fold_for design."""
+    return {"seq": 0,                       # how many events were folded: the pairing
+                                           # and abandon rules compare these stamps
+            "first_t": None,                # the first event's t (the thinking split)
+            "last_ev": None, "last_t": None,   # the newest event folded
+            "open": [],                     # calls still awaiting their post
+            "last_post": None,              # seq of the newest post folded
+            "calls": [], "abandoned_at": {},
+            "tools_s": 0.0, "ctx": None, "win": None}
+
+
+def _act_abandon(st, oc):                   # a call that never got its answer
+    st["calls"].append({"tool": oc["tool"], "target": oc["target"], "seconds": None,
+                        "ok": False, "abandoned": True, "pre_t": oc["t"],
+                        "cls": _tool_class(oc["tool"], oc["target"])})
+    st["abandoned_at"].setdefault((oc["tool"], oc["target"]), []) \
+        .append(len(st["calls"]) - 1)
+
+
+def _act_into(st, recs):
+    """Fold activity records ON TOP of a state: what activity_fold does over one
+    whole file, and what the incremental reader does with only the new lines, so
+    the two can never drift apart (the _fold_into design for the activity files)."""
+    for rec in recs:
         ev = rec.get("ev")
         if ev not in ("pre", "post", "stop"):
             continue
@@ -920,55 +991,37 @@ def activity_fold(path, now):
         for name in ("ctx", "win"):                 # the LAST line that carried one wins
             value = rec.get(name)
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                if name == "ctx":
-                    ctx = value
-                else:
-                    win = value
+                st[name] = value
         tool, target = rec.get("tool"), rec.get("target")
-        events.append({"ev": ev, "t": t,
-                       "tool": tool if isinstance(tool, str) and tool else None,
-                       "target": target if isinstance(target, str) and target else None,
-                       "ok": rec.get("ok") is not False})
-    if not events:
-        return None
-    open_calls, calls, tools_s = [], [], 0.0
-    last_post = None                                # event index of the newest post seen
-    abandoned_at = {}                               # (tool, target) -> indexes into calls
-                                                    # of its ABANDONED entries, oldest
-                                                    # first: the index of the newest is
-                                                    # the LAST -- the reclaim below is a
-                                                    # lookup, not a scan of `calls` (the
-                                                    # fold re-runs whole on every poll)
-
-    def abandon(oc):                                # a call that never got its answer
-        calls.append({"tool": oc["tool"], "target": oc["target"], "seconds": None,
-                      "ok": False, "abandoned": True, "pre_t": oc["t"],
-                      "cls": _tool_class(oc["tool"], oc["target"])})
-        abandoned_at.setdefault((oc["tool"], oc["target"]), []).append(len(calls) - 1)
-
-    for seq, e in enumerate(events):
-        if e["ev"] == "pre":
+        e = {"ev": ev, "t": t,
+             "tool": tool if isinstance(tool, str) and tool else None,
+             "target": target if isinstance(target, str) and target else None,
+             "ok": rec.get("ok") is not False}
+        st["seq"] += 1
+        e["seq"] = st["seq"]
+        st["last_ev"], st["last_t"] = ev, t
+        if st["first_t"] is None:
+            st["first_t"] = t
+        if ev == "pre":
             # The agent moved on: a call still open from BEFORE the last answer got no
             # reply -- hook missed, tool denied, crash -- and is closed as abandoned. A
             # subagent call is exempt: the calls running inside it open new pres while
             # it is itself still open. Two pres back to back abandon nothing (nothing
             # was answered between them), so parallel calls keep their own durations.
-            if last_post is not None:
-                for oc in [c for c in open_calls
-                           if c["seq"] < last_post and c["tool"] not in ("Task", "Agent")]:
-                    open_calls.remove(oc)
-                    abandon(oc)
-            e["seq"] = seq
-            open_calls.append(e)                    # open until its post closes it
+            if st["last_post"] is not None:
+                for oc in [c for c in st["open"]
+                           if c["seq"] < st["last_post"]
+                           and c["tool"] not in ("Task", "Agent")]:
+                    st["open"].remove(oc)
+                    _act_abandon(st, oc)
+            st["open"].append(e)                    # open until its post closes it
             continue
-        if e["ev"] == "stop":
-            for oc in open_calls:                   # the round is over: every still-open
-                abandon(oc)                         # call is closed, subagent calls in
-            open_calls = []                         # included -- nothing runs any more
+        if ev == "stop":
+            for oc in st["open"]:                   # the round is over: every still-open
+                _act_abandon(st, oc)                # call is closed, subagent calls in
+            st["open"] = []                         # included -- nothing runs any more
             continue
-        if e["ev"] != "post":
-            continue
-        last_post = seq
+        st["last_post"] = e["seq"]
         # Pair an answer with its own ask: the most recent open pre of the SAME tool
         # and the SAME target first (two parallel Reads of different files keep their
         # own durations). When no OPEN pre carries the answer's tool AND target, its
@@ -978,19 +1031,20 @@ def activity_fold(path, now):
         # unrelated open pre. Only then the most recent open pre of the same tool (an
         # answer that came back under another target is still that tool's), else -- as
         # today -- the most recent open pre of any tool at all.
+        open_calls = st["open"]
         i = next((j for j in range(len(open_calls) - 1, -1, -1)
                   if open_calls[j]["tool"] == e["tool"]
                   and open_calls[j]["target"] == e["target"]), None)
         if i is None:
-            stack = abandoned_at.get((e["tool"], e["target"]))
+            stack = st["abandoned_at"].get((e["tool"], e["target"]))
             if stack:                               # the most recent abandoned entry
                 k = stack.pop()                     # of this tool and target (popped:
                 if not stack:                       # a second late post must not
-                    del abandoned_at[(e["tool"], e["target"])]   # reclaim it twice)
-                oc = calls[k]                       # re-open the call this answer is for
+                    del st["abandoned_at"][(e["tool"], e["target"])]  # reclaim it twice)
+                oc = st["calls"][k]                 # re-open the call this answer is for
                 span = e["t"] - oc["pre_t"]
                 if span >= 0 and math.isfinite(span):
-                    oc["seconds"], tools_s = span, tools_s + span
+                    oc["seconds"], st["tools_s"] = span, st["tools_s"] + span
                 oc["ok"] = e["ok"]
                 del oc["abandoned"]
                 continue
@@ -1003,28 +1057,108 @@ def activity_fold(path, now):
         if pre is not None:
             span = e["t"] - pre["t"]
             if span >= 0 and math.isfinite(span):
-                seconds, tools_s = span, tools_s + span
+                seconds, st["tools_s"] = span, st["tools_s"] + span
             tool = e["tool"] or pre["tool"]
             target = e["target"] or pre["target"]
         else:
             tool, target = e["tool"], e["target"]
-        calls.append({"tool": tool, "target": target, "seconds": seconds,
-                      "ok": e["ok"], "cls": _tool_class(tool, target)})
-    last, live = events[-1], (open_calls[-1] if open_calls else None)
-    if last["ev"] == "stop":
-        state, since, tool, target = "done", last["t"], None, None
+        st["calls"].append({"tool": tool, "target": target, "seconds": seconds,
+                            "ok": e["ok"], "cls": _tool_class(tool, target)})
+
+
+def _act_derive(st, now):
+    """The card data off a folded state (what activity_fold returns), or None when
+    no event was ever folded. The live state, its since and the thinking split read
+    the caller's `now`, so one cached state restates itself every poll untouched."""
+    if st["last_ev"] is None:
+        return None                                 # no readable line: nothing to fold
+    live = st["open"][-1] if st["open"] else None
+    if st["last_ev"] == "stop":
+        state, since, tool, target = "done", st["last_t"], None, None
     elif live is not None:
         state = "tool" if now - live["t"] < WAIT_AFTER else "waiting"
         since, tool, target = live["t"], live["tool"], live["target"]
     else:
-        state, since, tool, target = "thinking", last["t"], None, None
+        state, since, tool, target = "thinking", st["last_t"], None, None
     return {"state": state,
             "cls": _tool_class(tool, target) if state in ("tool", "waiting") else None,
             "tool": tool, "target": target, "since": since,
-            "calls": calls[-ACTIVITY_KEEP:],
-            "thinking_s": max(0.0, (now if state == "thinking" else last["t"])
-                              - events[0]["t"] - tools_s),
-            "tools_s": tools_s, "ctx": ctx, "win": win}
+            "calls": copy.deepcopy(st["calls"][-ACTIVITY_KEEP:]),
+            "thinking_s": max(0.0, (now if state == "thinking" else st["last_t"])
+                              - st["first_t"] - st["tools_s"]),
+            "tools_s": st["tools_s"], "ctx": st["ctx"], "win": st["win"]}
+
+
+_act_cache = {}                                     # activity path -> {ino, dev, off, st}
+_act_lock = threading.Lock()
+
+
+def _activity_fold_for(path, now):
+    """activity_fold's cached twin: the SAME fold, read INCREMENTALLY the way
+    _fold_for reads events.jsonl. The cache keeps, per file, its identity (st_ino,
+    st_dev), the bytes folded so far and the raw fold state; each call folds only
+    what the hook wrote since the last read -- a 200-agent swarm costs the overview
+    a stat() per unit and a read for the movers, not a re-read of every file every
+    2.5 s. Only complete lines fold (up to the last newline); an identity change, a
+    shortening or no entry re-reads from 0; a file that cannot be stat'ed or opened
+    folds as nothing and drops its entry. The cache is bounded: past ACT_CACHE_MAX
+    files the oldest entry leaves first (an eviction only costs a re-read from 0).
+    Derivation hands out copies, so a caller never corrupts the cached state."""
+    if not path:
+        return None
+    try:
+        stat = os.stat(path)
+    except OSError:                                 # gone (or never there): no fold,
+        with _act_lock:                             # and the entry goes with it
+            _act_cache.pop(path, None)
+        return None
+    with _act_lock:
+        entry = _act_cache.get(path)
+        if (entry is None or entry["ino"] != stat.st_ino or entry["dev"] != stat.st_dev
+                or stat.st_size < entry["off"]):
+            _act_cache.pop(path, None)              # re-read from 0, fresh spot at the
+            entry = {"ino": stat.st_ino, "dev": stat.st_dev,   # cache's fresh end
+                     "off": 0, "st": _act_state()}
+            _act_cache[path] = entry
+            while len(_act_cache) > ACT_CACHE_MAX:
+                _act_cache.pop(next(iter(_act_cache)))
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(entry["off"])
+                data = fh.read()
+        except OSError:
+            _act_cache.pop(path, None)
+            return None
+        cut = data.rfind(b"\n")                     # fold the complete lines only; what
+        if cut < 0:                                 # follows the last newline is half
+            data = b""                              # a line: it stays past the offset
+        else:
+            entry["off"] += cut + 1
+            data = data[:cut + 1]
+        _act_into(entry["st"], _act_records(data))
+        # derived under the lock: _act_derive only reads the state and copies the
+        # calls it hands out, so no caller can corrupt the cache -- and a poll never
+        # deep-copies a unit's whole call history
+        return _act_derive(entry["st"], now)
+
+
+def _mood_view(unit, folded):
+    """One running unit's `moods` entry for the overview, or None when it wrote no
+    activity yet: the same per-unit activity fold run_detail uses, reduced to the
+    three keys the crew robot poses on (state, cls, since) plus what the Active
+    agents row shows beside them -- the unit's role, started and timeout from the
+    events fold, and ctx, win, tool and target from the activity, the target cut
+    to MOOD_TARGET characters. needs_you is the caller's to add."""
+    if folded is None:
+        return None
+    view = {key: folded[key] for key in MOOD_KEYS}
+    target = folded.get("target")
+    view.update({"role": unit.get("role"), "started": unit.get("started"),
+                 "timeout": unit.get("timeout"), "ctx": folded.get("ctx"),
+                 "win": folded.get("win"), "tool": folded.get("tool"),
+                 "target": (target[:MOOD_TARGET]
+                            if isinstance(target, str) else target)})
+    return view
 
 
 def _finished_activity(folded):
@@ -1182,7 +1316,9 @@ def run_detail(run_id, now):
     """One run's page data: run_state plus the fold (workflow, goal, phase, phases,
     attention, recent, ended), `planned` (the declared phases not started yet:
     planned_phases) and `skipped` (the declared phases a phase_start passed over:
-    skipped_phases), a per-unit `progress` for the agent rows' bars
+    skipped_phases) -- each carrying its outline `pos`, and every phase entry its
+    own `pos` (the entry it took), so the page renders a skipped phase in outline
+    order, before the phase the run jumped to -- a per-unit `progress` for the agent rows' bars
     (_unit_progress), and, for an until-done run, the rounds count and report.md's
     stop: line. Besides those: `activity` on the run itself for a single-shot session or
     a coder loop, `activity` on each unit whose hook file exists for a swarm or research
@@ -1198,8 +1334,8 @@ def run_detail(run_id, now):
     fold = _fold_for(pointer)
     for key in ("workflow", "goal", "phase", "phases", "attention", "recent", "ended"):
         st[key] = fold[key]
-    st["planned"] = planned_phases(fold)
-    st["skipped"] = skipped_phases(fold)   # the outline entries the run jumped over
+    st["planned"] = planned_phases(fold, True)    # with `pos`: the page places them
+    st["skipped"] = skipped_phases(fold, True)    # in outline order, among the started
     for unit in st["units"].values():
         unit["progress"] = _unit_progress(unit, now)
     if st.get("exit") is None:
@@ -1215,13 +1351,15 @@ def run_detail(run_id, now):
         st["step"] = None if st["state"] == "ended" else step
     run_file = _activity_file(st)
     if run_file:
-        # what the single-shot session or the coder loop is doing right now
-        st["activity"] = activity_fold(run_file, now)
+        # what the single-shot session or the coder loop is doing right now (the same
+        # cached incremental fold the overview reads, so neither re-reads what the
+        # other already folded)
+        st["activity"] = _activity_fold_for(run_file, now)
     elif st.get("kind") in ("swarm", "research") and st.get("run_path"):
         # likewise each unit that has a file: live while it runs, its calls once it is done
         for name, unit in st["units"].items():
             path = _unit_activity_file(st["run_path"], name)
-            folded = activity_fold(path, now) if path else None
+            folded = _activity_fold_for(path, now) if path else None
             if folded is not None:
                 unit["activity"] = (folded if unit["state"] == "running"
                                     else _finished_activity(folded))
@@ -1247,7 +1385,15 @@ def list_runs(now):
     last activity) is more than PRUNE_AFTER s ago is deleted here -- its activity file
     with it, so the registry holds nothing a gone run left behind. For the overview's
     agent and coder-loop cards it carries the small `activity` (state, cls, tool, target,
-    since, ctx, win) and, for a coder loop, round.n and the checks' passed/total.
+    since, ctx, win) and, for a coder loop, round.n/timeout/started and the checks'
+    passed/total. A RUNNING swarm or research entry carries `moods`: per running unit
+    (in the fold's order, the order the page shows them, MOODS_SHOW at most) the
+    activity fold's state, cls and since -- what the crew robots pose on -- plus
+    role, started, timeout, ctx, win, tool, target (cut to MOOD_TARGET characters)
+    and needs_you for the Active agents rows; an ended run carries no moods at all.
+    The unit and run activity files are read INCREMENTALLY, by byte offset the way
+    _fold_for caches events (_activity_fold_for), so a big swarm costs the poll the
+    lines its units wrote since the last read, nothing more.
     Every entry also carries `last_t`: the moment of the run's freshest event (its start
     when it has none) -- what an overview card measures its silence against."""
     try:
@@ -1281,11 +1427,15 @@ def list_runs(now):
             continue
         if st.get("kind") == "until-done":
             # the overview's "Round N of M" and the stop reason: /api/runs carries what
-            # run_detail computes, so the page reads r.rounds/r.report_stop from here
+            # run_detail computes, so the page reads r.rounds/r.report_stop from here.
+            # The round's timeout and start join its n: the Active agents row measures
+            # the loop's current round against its budget, as the run page does.
             st["rounds"] = _rounds(st.get("run_path"))
             st["report_stop"] = _report_stop(st.get("run_path"))
             round_, checks, step = _loop_view(st.get("run_path"))
-            st["round"] = None if round_ is None else {"n": round_["n"]}
+            st["round"] = (None if round_ is None
+                           else {"n": round_["n"], "timeout": round_["timeout"],
+                                 "started": round_["started"]})
             st["checks"] = (None if checks is None
                             else {"passed": checks["passed"], "total": checks["total"]})
             # the card's between-rounds status line: name and stamp only, no total --
@@ -1295,7 +1445,30 @@ def list_runs(now):
         run_file = _activity_file(st)
         if run_file:
             # one status line and the context meter per agent or coder loop, no call list
-            st["activity"] = _small_activity(activity_fold(run_file, now))
+            st["activity"] = _small_activity(_activity_fold_for(run_file, now))
+        if st.get("kind") in ("swarm", "research") and st["state"] == "running" \
+                and st.get("run_path"):
+            # the crew strip's moods: the SAME per-unit activity fold run_detail uses,
+            # reduced (see _mood_view) -- one entry per RUNNING unit, in the fold's
+            # order (the order the page shows them), MOODS_SHOW at most. Each unit's
+            # file is read incrementally, so a 200-agent swarm costs the poll a
+            # stat() per unit and a read only for the units that wrote. An ended
+            # run gets no moods at all: nobody is in a mood any more.
+            need = {a["item"] for a in _fold_for(st)["attention"]
+                    if isinstance(a.get("item"), str)}
+            moods = {}
+            for name, unit in st["units"].items():
+                if unit.get("state") != "running":
+                    continue
+                if len(moods) >= MOODS_SHOW:
+                    break
+                path = _unit_activity_file(st["run_path"], name)
+                view = _mood_view(unit, _activity_fold_for(path, now) if path else None)
+                if view is None:
+                    continue
+                view["needs_you"] = name in need
+                moods[name] = view
+            st["moods"] = moods
         # the card's "No update for" flag reads this: the freshest moment the run spoke
         st["last_t"] = _last_activity(pointer)
         runs.append(st)

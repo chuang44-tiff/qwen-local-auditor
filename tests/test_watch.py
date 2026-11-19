@@ -2596,7 +2596,12 @@ def test_outline_entries_are_taken_in_order_and_leave_phases_alone():
     plain = watch.fold_events([start] + body)
     outlined = watch.fold_events([start, _plan(("classify", 2), ("check", 1),
                                                ("report", 1))] + body)
-    assert outlined["phases"] == plain["phases"]                  # byte for byte
+    assert [{k: v for k, v in p.items() if k != "pos"}            # byte for byte,
+            for p in outlined["phases"]] \
+        == [{k: v for k, v in p.items() if k != "pos"}            # except the outline
+            for p in plain["phases"]]                              # position it carries
+    assert [p["pos"] for p in outlined["phases"]] == [0, 1]        # the entries it took
+    assert [p["pos"] for p in plain["phases"]] == [None, None]     # no outline: no pos
     assert outlined["phases"][0]["usage"] == pytest.approx(30 / 40)
     assert watch.planned_phases(outlined) == [{"label": "report", "n": 1}]
     before = watch.fold_events([start, _plan(("classify", 2), ("check", 1))])
@@ -2651,7 +2656,7 @@ def test_run_detail_exposes_planned(tmp_path, monkeypatch):
     monkeypatch.delenv("QWEN_WATCH", raising=False)
     rid = watch.register("swarm", "t", run_path=str(run), start_server=False)
     st = watch.run_detail(rid, time.time())
-    assert st["planned"] == [{"label": "check", "n": None}]
+    assert st["planned"] == [{"label": "check", "n": None, "pos": 1}]   # pos: outline order
     assert [p["label"] for p in st["phases"]] == ["classify"]
     write_events(run, [ev_at("run_start", 0, workflow="w", goal="g")])
     assert watch.run_detail(rid, time.time())["planned"] == []
@@ -3168,7 +3173,7 @@ def test_run_detail_exposes_skipped(tmp_path, monkeypatch):
                        _phase("probe", 1, "a"), _phase("report", 2, "b")])
     rid = watch.register("swarm", "t", run_path=str(run), start_server=False)
     st = watch.run_detail(rid, time.time())
-    assert st["skipped"] == [{"label": "review", "n": None}]
+    assert st["skipped"] == [{"label": "review", "n": None, "pos": 1}]   # pos: outline order
     assert st["planned"] == []                                # nothing left to come
     assert watch.skipped_phases(watch.fold_events(
         [ev_at("run_start", 0, workflow="w", goal="g"),
@@ -3283,3 +3288,351 @@ def test_the_phases_subtitle_only_says_how_far_the_outline_got():
     assert "Did not run" in text                               # the placeholders it keeps
     assert "not run\":\"did not run" in text                   # the same words in agent rows
     assert "FEED_SHOW=8" in text                               # and eight feed lines
+
+
+# ------------------------------------------------- the overview's moods and agent rows
+
+def _swarm_events(run, names, now, attention_item=None, done=(), queued=()):
+    """One phase over named units, all started at the same moment (the moods tests
+    hand out activity files themselves; `done` marks units as finished, `queued`
+    leaves them waiting for a seat): the events a moods test needs and nothing else."""
+    lines = [ev_at("run_start", now - 300, workflow="w", goal="g"),
+             ev_at("phase_start", now - 300, label="build", n=len(names), seats=len(names),
+                   units=[{"name": n, "role": "reviewer"} for n in names])]
+    lines += [ev_at("unit_start", now - 300, unit=n, role="reviewer", timeout=600)
+              for n in names if n not in done and n not in queued]
+    lines += [ev_at("unit_done", now - 200, unit=n, role="reviewer", ok=True,
+                    cached=False, seconds=100) for n in done]
+    if attention_item:
+        lines.append(ev_at("attention", now - 100, item=attention_item,
+                           reason="needs a login", detail=None))
+    write_events(run, lines)
+
+
+def test_list_runs_carries_capped_moods_for_a_running_swarm(tmp_path, monkeypatch):
+    """A RUNNING swarm's /api/runs entry carries `moods`: one entry per running unit,
+    in the fold's order (the order the page shows them), at most 16 -- the queued and
+    finished units have no mood to show (a finished unit keeps its activity file all
+    the same and still gets no entry), and a unit whose file folds to nothing is
+    skipped so the units after it still get one. Each entry is the same per-unit
+    activity fold run_detail uses, reduced to state/cls/since, plus role, started,
+    timeout, ctx, win, tool and target (cut to 120 characters) and needs_you for the
+    unit an attention item names."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    run = tmp_path / "run"
+    now = time.time()
+    names = ["a1"] + ["n%02d" % i for i in range(1, 18)] + ["x18", "q1", "d1"]
+    _swarm_events(run, names, now, attention_item="n02", done=("d1",), queued=("q1",))
+    long_target = "y" * 200
+    for i in range(1, 18):                                     # a1 and x18 write nothing
+        act_lines(run / watch.ACTIVITY_DIR / ("n%02d.jsonl" % i),
+                  [act("pre", now - 5, tool="Read", target=long_target,
+                       ctx=107520, win=524288)])
+    act_lines(run / watch.ACTIVITY_DIR / "d1.jsonl",
+              [act("pre", now - 5, tool="Read", target="src/done.py")])  # done: no mood
+    rid = watch.register("swarm", "t", run_path=str(run), start_server=False)
+    entry = {r["id"]: r for r in watch.list_runs(now)}[rid]
+    assert list(entry["moods"]) == ["n%02d" % i for i in range(1, 17)]   # running order,
+    #                                                                     16 at most: the
+    #                                                                     no-file unit is
+    #                                                                     skipped over
+    assert "a1" not in entry["moods"] and "x18" not in entry["moods"]
+    assert "q1" not in entry["moods"] and "d1" not in entry["moods"]
+    m = entry["moods"]["n01"]
+    assert set(m) == {"state", "cls", "since", "role", "started", "timeout",
+                      "ctx", "win", "tool", "target", "needs_you"}
+    assert (m["state"], m["cls"], m["tool"]) == ("tool", "read", "Read")
+    assert m["target"] == "y" * 120                            # cut to 120 characters
+    assert m["since"] == pytest.approx(now - 5, abs=1)
+    assert m["role"] == "reviewer" and m["started"] == pytest.approx(now - 300, abs=1)
+    assert m["timeout"] == 600 and m["ctx"] == 107520 and m["win"] == 524288
+    assert m["needs_you"] is False
+    assert entry["moods"]["n02"]["needs_you"] is True          # the attention names it
+    # the three pose keys are the fold's own, reduced (one source, no drift)
+    folded = watch.activity_fold(str(run / watch.ACTIVITY_DIR / "n01.jsonl"), now)
+    assert (m["state"], m["cls"], m["since"]) == (folded["state"], folded["cls"],
+                                                  folded["since"])
+
+
+def test_list_runs_has_no_moods_on_an_ended_run(tmp_path, monkeypatch):
+    """An ended run carries no moods at all -- nobody is in a mood once the run is
+    over, and the page must not keep a thinking robot grinning on a finished swarm."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    run = tmp_path / "run"
+    now = time.time()
+    _swarm_events(run, ["a1"], now)
+    act_lines(run / watch.ACTIVITY_DIR / "a1.jsonl",
+              [act("pre", now - 5, tool="Read", target="src/x.py")])
+    rid = watch.register("swarm", "t", run_path=str(run), start_server=False)
+    entry = {r["id"]: r for r in watch.list_runs(now)}[rid]
+    assert "moods" in entry and "a1" in entry["moods"]
+    watch.finish(rid, 0)
+    entry = {r["id"]: r for r in watch.list_runs(now)}[rid]
+    assert entry["state"] == "ended" and "moods" not in entry
+
+
+def test_the_overview_moods_fold_unit_activity_incrementally(tmp_path, monkeypatch):
+    """The second list_runs call reads only the new bytes of each unit's activity
+    file -- the way _fold_for caches events.jsonl by byte offset -- so a 200-agent
+    swarm does not re-read every file every 2.5 s. An idle poll reads nothing; the
+    poll after the hook appends reads exactly the new line; the fold of the cached
+    state equals the plain fold of the same file; and wrecking the returned entry
+    must not leave a trace in the cache."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    run = tmp_path / "run"
+    now = time.time()
+    _swarm_events(run, ["a", "b"], now)
+    path = os.path.join(str(run), watch.ACTIVITY_DIR, "a.jsonl")
+    act_lines(path, [act("pre", now - 5, tool="Read", target="src/x.py")])
+    committed = os.path.getsize(path)
+    rid = watch.register("swarm", "t", run_path=str(run), start_server=False)
+    log = []
+    real_open = open
+
+    class _Spied:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def seek(self, n):
+            log.append(("seek", n))
+            return self._inner.seek(n)
+
+        def read(self, *a):
+            data = self._inner.read(*a)
+            log.append(("read", len(data)))
+            return data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._inner.close()
+            return False
+
+    def spy(file, *a, **kw):
+        fh = real_open(file, *a, **kw)
+        return _Spied(fh) if str(file) == path else fh
+
+    monkeypatch.setattr("builtins.open", spy)
+
+    def poll():
+        del log[:]
+        return {r["id"]: r for r in watch.list_runs(now)}[rid]
+
+    entry = poll()
+    assert log == [("seek", 0), ("read", committed)]           # first poll: all of it
+    entry = poll()
+    assert log == [("seek", committed), ("read", 0)]           # nothing new: zero bytes
+    entry["moods"]["a"]["state"] = "hacked"                    # wreck the returned copy
+    entry["moods"]["a"]["target"] = "hacked"
+    line = json.dumps(act("post", now - 4, tool="Read", target="src/x.py"))
+    with real_open(path, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(line + "\n")
+    entry = poll()
+    assert log == [("seek", committed), ("read", len(line) + 1)]   # only the new bytes
+    m = entry["moods"]["a"]
+    assert m["state"] == "thinking"                            # the post came in
+    assert m["target"] is None                                 # not "hacked": the cache
+    #                                                              stayed untouched
+    committed += len(line) + 1
+    folded = watch.activity_fold(path, now)                    # cached fold == plain fold
+    assert (m["state"], m["cls"], m["since"]) == (folded["state"], folded["cls"],
+                                                  folded["since"])
+
+
+def test_skipped_and_planned_entries_carry_their_outline_order_position(tmp_path,
+                                                                        monkeypatch):
+    """run_detail hands the page the outline POSITION of every placeholder entry (and
+    of every started phase that took one): a skipped phase must render before the
+    phase the run jumped to, among the started ones, and only the page can put it
+    there once it knows where the outline had each entry."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    run = tmp_path / "run"
+    write_events(run, [ev_at("run_start", 0, workflow="w", goal="g"),
+                       _plan(("probe", 3), ("review", None), ("report", 1), ("ship", 1)),
+                       _phase("probe", 1, "a"), _phase("report", 2, "b")])
+    rid = watch.register("swarm", "t", run_path=str(run), start_server=False)
+    st = watch.run_detail(rid, time.time())
+    assert st["skipped"] == [{"label": "review", "n": None, "pos": 1}]
+    assert st["planned"] == [{"label": "ship", "n": 1, "pos": 3}]
+    assert [p["pos"] for p in st["phases"]] == [0, 2]          # where the outline had
+    #                                                            the phases that ran
+    f = watch.fold_events([ev_at("run_start", 0, workflow="w"),
+                           ev_at("phase_start", 1, label="x", n=1, seats=1, units=["a"])])
+    assert f["phases"][0]["pos"] is None                       # no outline: no position
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_a_skipped_phase_renders_in_outline_order_before_the_phase_it_jumped_to():
+    """The passed-over placeholder must sit among the started phases at its outline
+    position -- the run jumped from probe to report, so the reader sees the review it
+    skipped BETWEEN them, not after the phases still to come (and a planned entry
+    keeps its place behind the last started phase)."""
+    h = _page_html('detail({id:"r",kind:"swarm",state:"running",title:"t",elapsed:5,'
+                   'units:{a:{state:"done",role:"r",seconds:5},b:{state:"running",role:"r"}},'
+                   'phase:{label:"report",n:1,units:["b"]},'
+                   'phases:[{label:"probe",n:1,end:9,units:["a"],pos:0},'
+                   '{label:"report",n:1,end:null,units:["b"],pos:2}],'
+                   'planned:[{label:"ship",n:1,pos:3}],'
+                   'skipped:[{label:"review",n:2,pos:1}],recent:[]})')
+    i_probe = h.index('<span class="wl">probe</span>')
+    i_skip = h.index('<span class="wl">review</span>')
+    i_report = h.index('<span class="wl">report</span>')
+    i_ship = h.index('<span class="wl">ship</span>')
+    assert i_probe < i_skip < i_report < i_ship                # outline order, and the
+    #                                                            placeholder stays quiet
+    assert 'class="wave planned"' in h                         # skipped: a placeholder
+    assert "2 agents, Skipped" in h                            # that says so
+    assert h.count('<span class="wl">review</span>') == 1      # exactly once, in place
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_overview_crew_robots_show_the_agent_mood():
+    """The crew strip no longer paints every robot mid-stride: each poses with
+    actPose -- the very mapping the run page's tiles use -- on its mood entry, and
+    its title and visible label say the mood in words: "a, thinking, 1m 30s",
+    "b, waiting on a tool, 1m 51s". A unit with no mood entry keeps the plain
+    running pose, and a run past the "No update for" threshold shows its whole
+    crew in the waiting pose however it last felt."""
+    h = _page_html('var n=Date.now()/1000;'
+                   'overview([{id:"aaaaaaaaaaaa",kind:"swarm",state:"running",title:"t",'
+                   'elapsed:100,start:n-100,'
+                   'units:{a:{state:"running",role:"checker",started:n-100,timeout:600},'
+                   'b:{state:"running",role:"reader",started:n-100,timeout:600},'
+                   'c:{state:"running",role:"tester",started:n-100,timeout:600}},'
+                   'moods:{a:{state:"thinking",cls:null,since:n-90,role:"checker",'
+                   'started:n-100,timeout:600,ctx:null,win:null,tool:null,target:null},'
+                   'b:{state:"waiting",cls:"read",since:n-111,tool:"Read",'
+                   'target:"src/x.py",role:"reader",started:n-100,timeout:600,'
+                   'ctx:null,win:null}}}])')
+    assert 'class="robot thinking' in h                        # the checker is composing
+    assert 'class="robot waiting' in h                         # the reader sleeps on the call
+    assert 'title="a, thinking"' in h                          # words in title AND label,
+    assert "<span>a, thinking, <span class=\"tick\"" in h       # the time a ticking span
+    assert 'title="b, waiting on a tool"' in h                  # (a baked one would swap
+    assert "<span>b, waiting on a tool, <span class=\"tick\"" in h  # the crew every poll)
+    assert "<span>c, working</span>" in h                       # no mood entry: plainly so
+    assert 'class="mate"' in h                                  # still the crew's own shape
+    h2 = _page_html('var n=Date.now()/1000;'
+                    'overview([{id:"aaaaaaaaaaaa",kind:"swarm",state:"running",title:"t",'
+                    'elapsed:9*3600,start:n-9*3600,'
+                    'units:{a:{state:"running",role:"checker",started:n-9*3600,'
+                    'timeout:600}},moods:{a:{state:"thinking",since:n-9*3600}}}])')
+    assert 'class="robot waiting' in h2                        # silent run: asleep
+    assert 'class="robot thinking' not in h2                   # whatever it last said
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_active_agents_row_shows_a_thinking_unit():
+    """One compact row per running agent under the crew strip: the small robot in its
+    mood, the name and role, the run as a link (data-fk, short title only), the mood
+    in words with a live duration (a ticking span, never a baked number), the elapsed
+    against the timeout -- in the warn ink past it -- and the context use, in the
+    warn ink above 85 %. Needs-you rows first, then the longest in its state."""
+    h = _page_html('var n=Date.now()/1000;'
+                   'overview([{id:"ab12cd34ef56",kind:"swarm",state:"running",'
+                   'title:"fix the parser",elapsed:213,start:n-213,'
+                   'units:{a:{state:"running",role:"reviewer",started:n-213,timeout:600},'
+                   'b:{state:"running",role:"checker",started:n-700,timeout:600}},'
+                   'moods:{a:{state:"thinking",cls:null,since:n-87,role:"reviewer",'
+                   'started:n-213,timeout:600,ctx:107520,win:524288,tool:null,'
+                   'target:null,needs_you:false},'
+                   'b:{state:"thinking",cls:null,since:n-30,role:"checker",'
+                   'started:n-700,timeout:600,ctx:460000,win:524288,tool:null,'
+                   'target:null,needs_you:true}}}])')
+    assert '<div data-sec="agents">' in h                       # its own data-sec section
+    assert '<h2>Active agents <small>2</small></h2>' in h
+    assert '<ul class="agents">' in h and h.count("<ul") == 1  # the rows are ONE ul
+    assert 'class="robot thinking p-check"' in h                # reviewer: the checker
+    assert ">a</b>" in h and ">reviewer</small>" in h           # name and role
+    assert 'class="mood">thinking <span class="tick"' in h     # words + a ticking span
+    assert 'data-fmt="dur"' in h
+    assert "/ 10m" in h                                         # elapsed / the budget
+    assert "105k / 512k" in h                                   # the context reading
+    assert 'data-fk="agent:ab12cd34ef56:a"' in h               # the run link, focus-keyed
+    assert 'class="arun"' in h and ">fix the parser</a>" in h
+    assert 'data-fk="agent:ab12cd34ef56:b"' in h
+    assert '<li class="attn">' in h                             # the needs-you row wears it
+    assert h.index('agent:ab12cd34ef56:b') < h.index('agent:ab12cd34ef56:a')
+    #                                                                     needs-you first
+    assert 'class="atime over"' in h                            # 700s past a 600s budget
+    assert 'class="actx hot"' in h                              # 460k of 512k: over 85 %
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_active_agents_row_shows_a_coder_loop_testing():
+    """A coder loop's row follows its step like its tile on the run page: the tester
+    robot while testing with "running tests" and its live time, the checker while
+    reviewing, the builder in the waiting pose between rounds -- plus "round 3, 5 of
+    7 checks passing", its name and role, and the run link."""
+    base = ('var n=Date.now()/1000;overview([{id:"cd12ef56ab12",kind:"until-done",'
+            'state:"running",title:"add retry",elapsed:213,start:n-213,'
+            'activity:{state:"done",cls:null,tool:null,target:null,since:n-1,'
+            'ctx:107520,win:524288},'
+            'round:{n:3,timeout:600,started:n-213},checks:{passed:5,total:7},'
+            'step:%s}])')
+    h = _page_html(base % '{name:"testing",since:n-22}')
+    assert 'class="robot running p-net"' in h                   # the tester's net
+    assert 'class="mood">running tests <span class="tick"' in h
+    assert "round 3, 5 of 7 checks passing" in h
+    assert ">add retry</b>" in h and ">coder</small>" in h
+    assert 'data-fk="agent:cd12ef56ab12:coder"' in h
+    assert "/ 10m" in h and "105k / 512k" in h
+    h = _page_html(base % '{name:"reviewing",since:n-10}')
+    assert 'class="robot running p-check"' in h                 # the checker's stamp
+    assert "reviewing the diff" in h
+    h = _page_html(base % '{name:"between",since:n-2}')
+    assert 'class="robot waiting p-wrench"' in h                # asleep between rounds
+    assert "waiting between rounds" in h
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_active_agents_caps_at_sixteen_and_links_the_busiest_run():
+    """Sixteen rows at most -- a two-hundred-agent swarm is not an information wall
+    on the landing page -- and the overflow is one "and N more" row linking to the
+    busiest live run."""
+    h = _page_html('var us={},mo={},n=Date.now()/1000;'
+                   'for(var i=0;i<20;i++){us["u"+i]={state:"running",role:"reader",'
+                   'started:n-30,timeout:600};'
+                   'mo["u"+i]={state:"thinking",since:n-30,role:"reader",started:n-30,'
+                   'timeout:600}}'
+                   'overview([{id:"aaaaaaaaaaaa",kind:"swarm",state:"running",'
+                   'title:"t",elapsed:30,start:n-30,units:us,moods:mo}])')
+    assert h.count('<a class="arun"') == 16                      # sixteen rows, no more
+    assert "and 4 more" in h
+    assert 'data-fk="agent:aaaaaaaaaaaa:more"' in h
+    assert 'href="#aaaaaaaaaaaa"' in h                           # to the busiest run
+
+
+def test_active_agents_rows_are_two_lines_on_a_phone():
+    """Phones (<=480 px): each row is two lines -- robot, name and mood on the first,
+    run, time and context on the second -- and nothing scrolls sideways: the groups
+    shrink (min-width:0) and the mood text wraps on word boundaries."""
+    text = page_text()
+    assert re.search(r"@media \(max-width:480px\)\{[^@]*"
+                     r"\.agents li\{display:block\}", text)   # the row stacks in two
+    assert ".agents .a2{margin-left:0" in text                # the second line, no more
+    #                                                           right-aligned drift
+    assert re.search(r"\.agents \.a1\{[^}]*min-width:0", text)      # shrink, never spill
+    assert re.search(r"\.agents \.a1 \.mood\{[^}]*overflow-wrap:anywhere", text)
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_active_agents_row_links_all_carry_a_data_fk():
+    """Every link the poll may replace carries a stable data-fk (finding 2) -- in the
+    agent rows that is every run link and the overflow link, no exceptions."""
+    h = _page_html('var us={},mo={},n=Date.now()/1000;'
+                   'for(var i=0;i<18;i++){us["u"+i]={state:"running",role:"reader",'
+                   'started:n-30,timeout:600};'
+                   'mo["u"+i]={state:"thinking",since:n-30,role:"reader",started:n-30,'
+                   'timeout:600}}'
+                   'var R=[{id:"aaaaaaaaaaaa",kind:"swarm",state:"running",title:"t",'
+                   'elapsed:30,start:n-30,units:us,moods:mo},'
+                   '{id:"bbbbbbbbbbbb",kind:"until-done",state:"running",title:"loop",'
+                   'elapsed:30,start:n-30,step:{name:"testing",since:n-5}},'
+                   '{id:"cccccccccccc",kind:"agent",state:"running",title:"solo",'
+                   'elapsed:30,start:n-30,activity:{state:"thinking",since:n-7}}];'
+                   'overview(R)')
+    block = h[h.index('<ul class="agents">'):h.index("</ul>")]
+    assert block.count("<a ") >= 16                              # rows and the overflow
+    assert block.count("<a ") == block.count('data-fk="')        # every link is keyed

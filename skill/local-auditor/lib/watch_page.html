@@ -63,6 +63,27 @@ button{font:inherit;color:inherit}
 .mate.chip{padding-bottom:18px;font-size:13px}
 .crew .empty{color:var(--muted);font-size:14px;padding:0 0 18px}
 
+/* the Active agents roll under the crew strip: one compact row per running agent,
+   sixteen at most, then a link to the busiest run. One line on the desktop; on a
+   phone each row is two -- robot, name and mood, then run, time and context -- and
+   nothing scrolls sideways (the mood text wraps on word boundaries) */
+.agents{list-style:none;margin:0 0 10px;padding:0;background:var(--panel);
+  border-radius:var(--r-sm)}
+.agents li{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 12px;
+  padding:8px 12px;border-top:1px solid var(--line);font-size:13px;min-width:0}
+.agents li:first-child{border-top:0}
+.agents li.attn{background:var(--warn-bg);box-shadow:inset 3px 0 var(--warn)}
+.agents .a1{display:flex;align-items:center;gap:6px;min-width:0;flex:1 1 auto}
+.agents .a1 svg{width:26px;height:26px;flex:0 0 auto}
+.agents .a1 b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agents .a1 .role,.agents .a1 .rnd{color:var(--muted);font-size:12px;flex:0 0 auto}
+.agents .a1 .mood{color:var(--muted);min-width:0;overflow-wrap:anywhere}
+.agents .a2{display:flex;align-items:baseline;gap:10px;margin-left:auto;color:var(--muted);min-width:0}
+.agents .arun{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agents .atime.over{color:var(--warn-ink);font-weight:600}
+.agents .actx.hot{color:var(--warn-ink);font-weight:600}
+.agents .am{color:var(--muted)}
+
 /* sections */
 h2{font-size:15px;font-weight:650;margin:26px 0 10px;display:flex;gap:8px;align-items:baseline}
 h2 small{font-weight:400;color:var(--muted);font-size:13px}
@@ -151,6 +172,8 @@ h2 small{font-weight:400;color:var(--muted);font-size:13px}
   .tile{padding:16px 12px 8px;grid-template-columns:50px 1fr}
   .tile svg{width:48px;height:48px}
   .feed li{grid-template-columns:56px 1fr;gap:8px}
+  .agents li{display:block}                          /* two lines, never a sideways scroll */
+  .agents .a2{margin-left:0;justify-content:space-between}
 }
 .tile{background:var(--panel);border-radius:var(--r-sm);padding:22px 12px 8px;display:grid;
   grid-template-columns:62px 1fr;gap:0 12px;align-items:center;align-content:start;min-width:0}
@@ -399,6 +422,107 @@ function progA11y(r){
   if(outcome(r)==="running"&&r.kind==="agent")
     return r.timeout?"Running against a "+dur(r.timeout)+" limit":"Running";
   return progressText(r);}
+/* The overview reads the same moods the run page's tiles pose with: actPose stays the
+   ONE pose mapping (the crew robots and the Active agents rows pass their mood entry
+   to it exactly as a unit does), moodWords gives that same state its WORDS ("thinking",
+   "waiting on a tool", "Read src/x.py") and loopMood the coder loop's step its robot,
+   pose and words -- the tester while testing, the checker while reviewing, the builder
+   asleep between rounds. Nobody draws a second copy of any of it. */
+function moodWords(a){
+  if(!a||a.state==="done")return "working";              // no line yet: plainly running
+  if(a.state==="thinking")return "thinking";
+  if(a.state==="waiting")return "waiting on a tool";
+  var t=a.target||"";
+  if(a.cls==="python")return /pytest/.test(t)?"running tests":"running Python";
+  if(a.cls==="read"||a.cls==="edit")return (a.tool||"Working on")+(t?" "+t:"");
+  if(a.cls==="shell")return "running a command"+(t?": "+t:"");
+  if(a.cls==="web")return "on the web";
+  if(a.cls==="delegate")return "delegating";
+  return "using "+(a.tool||"a tool");
+}
+function moodTimed(a){return !!a&&(a.state==="thinking"||a.state==="waiting"||
+  (a.state==="tool"&&a.cls==="python"));}  // these moods carry "for 1m 51s"; a tool
+                                           // state words itself through its target
+function loopMood(r){var st=r.step,a=r.activity;
+  if(st&&st.name==="testing")return {f:FAM.tester,pose:"running",word:"running tests",
+    timed:true,since:typeof st.since==="number"?st.since:null};
+  if(st&&st.name==="reviewing")return {f:FAM.checker,pose:"running",word:"reviewing the diff",
+    timed:true,since:typeof st.since==="number"?st.since:null};
+  if(st&&st.name==="between")return {f:FAM.builder,pose:"waiting",word:"waiting between rounds",
+    timed:true,since:typeof st.since==="number"?st.since:null};
+  return {f:FAM.builder,pose:actPose({state:"running",activity:a}),word:moodWords(a),
+    timed:moodTimed(a),since:a&&typeof a.since==="number"?a.since:null};
+}
+function shortTitle(t){t=String(t==null?"":t);return t.length>40?t.slice(0,39)+"…":t;}
+/* One row per running agent across all live runs, ready to render: needs-you first,
+   then the longest in its current state. A run past the "No update for" threshold
+   shows its robots in the waiting pose -- a live pid that stopped speaking is not a
+   working robot, whatever its last activity line said. */
+function agentRows(live){var rows=[];
+  live.forEach(function(r){
+    var quiet=quietFor(r)>900;
+    if(r.kind==="swarm"||r.kind==="research"){
+      var us=r.units||{},moods=r.moods||{};
+      Object.keys(us).forEach(function(n){var u=us[n];if(u.state!=="running")return;
+        var e=moods[n]||null;
+        rows.push({r:r,unit:n,name:n,role:u.role||"",f:famOf(u.role),
+          pose:quiet?"waiting":actPose({state:"running",activity:e}),
+          word:moodWords(e),timed:moodTimed(e),
+          since:e&&typeof e.since==="number"?e.since:null,
+          started:e&&e.started!=null?e.started:u.started,
+          timeout:e&&e.timeout!=null?e.timeout:u.timeout,
+          ctx:e&&e.ctx,win:e&&e.win,needs:!!(e&&e.needs_you)});});
+    }else if(r.kind==="until-done"){var lm=loopMood(r),a=r.activity||null;
+      rows.push({r:r,unit:"coder",name:r.title||"",role:"coder",f:lm.f,
+        pose:quiet?"waiting":lm.pose,word:lm.word,timed:lm.timed,since:lm.since,
+        started:r.round&&r.round.started!=null?r.round.started:r.start,
+        timeout:r.round&&r.round.timeout!=null?r.round.timeout:r.timeout,
+        ctx:a&&a.ctx,win:a&&a.win,needs:(r.attention_count||0)>0,
+        loop:true,round:r.round,checks:r.checks});
+    }else{var a2=r.activity||null;
+      rows.push({r:r,unit:"agent",name:r.title||"",role:"agent",f:FAM.checker,
+        pose:quiet?"waiting":actPose({state:"running",activity:a2}),
+        word:moodWords(a2),timed:moodTimed(a2),
+        since:a2&&typeof a2.since==="number"?a2.since:null,
+        started:r.start,timeout:r.timeout,ctx:a2&&a2.ctx,win:a2&&a2.win,
+        needs:(r.attention_count||0)>0});}
+  });
+  rows.sort(function(x,y){var d=(y.needs?1:0)-(x.needs?1:0);if(d)return d;
+    var xs=x.since==null?Infinity:x.since,ys=y.since==null?Infinity:y.since;
+    return xs<ys?-1:xs>ys?1:0;});   // needs-you first, then longest in its state --
+  return rows;}                     // a row with no stamp joins last, never a NaN sort
+function agentsHtml(live){var rows=agentRows(live);if(!rows.length)return "";
+  var best=null,bestN=0;  // the overflow link goes to the run with the most working agents
+  live.forEach(function(r){var us=r.units||{},
+    n=Object.keys(us).filter(function(k){return us[k].state==="running";}).length||1;
+    if(n>bestN){bestN=n;best=r;}});
+  var shown=rows.slice(0,AGENTS_SHOW),now=Date.now()/1000;
+  var h='<div data-sec="agents"><h2>Active agents <small>'+rows.length+'</small></h2><ul class="agents">';
+  h+=shown.map(function(x){
+    var mood=esc(x.word)+(x.timed&&x.since!=null?' '+tickSpan(x.since,"dur"):"");
+    var rnd="";
+    if(x.loop){
+      if(x.round&&x.round.n!=null)rnd="round "+x.round.n;
+      if(x.checks&&x.checks.total!=null)rnd+=(rnd?", ":"")+
+        (x.checks.passed!=null?x.checks.passed:"?")+" of "+x.checks.total+" checks passing";}
+    var tt="";
+    if(typeof x.started==="number"&&isFinite(x.started)){
+      var over=x.timeout!=null&&now-x.started>x.timeout;
+      tt='<span class="atime'+(over?" over":"")+'">'+tickSpan(x.started,"dur")+
+        (x.timeout!=null?' / '+esc(dur(x.timeout)):"")+'</span>';}
+    var cc=x.ctx&&x.win?'<span class="actx'+(x.ctx/x.win>0.85?" hot":"")+'">'+
+      kTok(x.ctx)+' / '+kTok(x.win)+'</span>':"";
+    return '<li'+(x.needs?' class="attn"':"")+'><span class="a1">'+robot(x.f,x.pose)+
+      '<b>'+esc(x.name)+'</b>'+(x.role?'<small class="role">'+esc(x.role)+'</small>':"")+
+      '<span class="mood">'+mood+'</span>'+
+      (rnd?'<small class="rnd">'+esc(rnd)+'</small>':"")+'</span>'+
+      '<span class="a2"><a class="arun" href="#'+esc(x.r.id)+'" data-fk="agent:'+
+        esc(x.r.id)+':'+esc(x.unit)+'" title="'+esc(x.r.title||"")+'">'+
+        esc(shortTitle(x.r.title))+'</a>'+tt+cc+'</span></li>';}).join("");
+  if(rows.length>shown.length&&best)
+    h+='<li class="am"><a href="#'+esc(best.id)+'" data-fk="agent:'+esc(best.id)+
+      ':more">and '+(rows.length-shown.length)+' more</a></li>';
+  return h+'</ul></div>';}
 
 function overview(runs){
   var live=runs.filter(function(r){return outcome(r)==="running";});
@@ -406,8 +530,21 @@ function overview(runs){
   var mates=[];
   live.forEach(function(r){
     var us=r.units||{},names=Object.keys(us).filter(function(n){return us[n].state==="running";});
-    if(names.length) names.forEach(function(n){mates.push({f:famOf(us[n].role),label:n,id:r.id});});
-    else mates.push({f:FAM[KIND_FAM[r.kind]]||FAM.plain,label:{agent:"agent","until-done":"coder",swarm:"swarm",research:"research"}[r.kind]||r.kind,id:r.id});
+    // past the "No update for" threshold a live pid has stopped speaking: the whole
+    // crew of that run shows the waiting pose, whatever its last activity line said
+    var quiet=quietFor(r)>900;
+    if(names.length){var moods=r.moods||{};
+      names.forEach(function(n){var e=moods[n]||null;
+        mates.push({f:famOf(us[n].role),label:n,id:r.id,
+          pose:quiet?"waiting":actPose({state:"running",activity:e}),
+          word:moodWords(e),since:e&&typeof e.since==="number"?e.since:null});});}
+    else if(r.kind==="until-done"){var lm=loopMood(r);   // the loop's robot follows its
+      mates.push({f:lm.f,label:"coder",id:r.id,          // step, as the run page reads it
+        pose:quiet?"waiting":lm.pose,word:lm.word,since:lm.since});}
+    else mates.push({f:FAM[KIND_FAM[r.kind]]||FAM.plain,label:{agent:"agent","until-done":"coder",swarm:"swarm",research:"research"}[r.kind]||r.kind,id:r.id,
+      pose:quiet?"waiting":actPose({state:"running",activity:r.activity}),
+      word:moodWords(r.activity),
+      since:r.activity&&typeof r.activity.since==="number"?r.activity.since:null});
   });
   var head=live.length?(mates.length+(mates.length===1?" agent":" agents")+" at work"):"All quiet";
   var sub=live.length?(live.length===1?"One run in progress":live.length+" runs in progress"):"Start a local agent and it appears here.";
@@ -415,8 +552,15 @@ function overview(runs){
   // sixteen robots at most: a two-hundred-agent run is a wall of identical loops, and
   // every one of them is a tab stop and an animation for nothing -- the rest count in
   // the chip. They are decoration beside the cards below, so they leave the tab order.
-  h+=mates.length?mates.slice(0,CREW_SHOW).map(function(m){return '<a class="mate" href="#'+esc(m.id)+'" data-fk="mate:'+esc(m.id)+':'+esc(m.label)+'" title="'+esc(m.label)+'" tabindex="-1" aria-hidden="true">'+robot(m.f,"running")+'<span>'+esc(m.label)+'</span></a>';}).join("")+(mates.length>CREW_SHOW?'<span class="mate chip" aria-hidden="true">+'+(mates.length-CREW_SHOW)+'</span>':""):['planner','builder','checker'].map(function(k){return '<span class="mate" aria-hidden="true">'+robot(FAM[k],'queued')+'</span>';}).join('');
+  // Each poses in its mood (actPose, the very mapping the run page's tiles use) and
+  // says it in words, in its title and its label: "check-06, waiting on a tool, 1m 51s".
+  // The duration is a ticking span, never a baked number: a baked one would change the
+  // section's HTML every poll, swap it, and restart every robot's animation.
+  h+=mates.length?mates.slice(0,CREW_SHOW).map(function(m){var t=m.label+", "+m.word;
+    var tk=m.since==null?"":tickSpan(m.since,"dur");
+    return '<a class="mate" href="#'+esc(m.id)+'" data-fk="mate:'+esc(m.id)+':'+esc(m.label)+'" title="'+esc(t)+'" tabindex="-1" aria-hidden="true">'+robot(m.f,m.pose)+'<span>'+esc(t)+(tk?", "+tk:"")+'</span></a>';}).join("")+(mates.length>CREW_SHOW?'<span class="mate chip" aria-hidden="true">+'+(mates.length-CREW_SHOW)+'</span>':""):['planner','builder','checker'].map(function(k){return '<span class="mate" aria-hidden="true">'+robot(FAM[k],'queued')+'</span>';}).join('');
   h+='</div></section></div>';
+  h+=agentsHtml(live);   // who is doing what, right now, under the crew strip
   if(live.length){
     h+='<div data-sec="runs"><h2>Running <small>'+live.length+'</small></h2>';
     h+=live.map(function(r){
@@ -522,7 +666,14 @@ function detail(r){
     // the declared phases no phase_start has taken yet: quiet placeholders after the
     // started ones, so the whole run shows from its first second
     planned.forEach(function(p){waves.push({p:p,i:waves.length,list:[],planned:true,key:pkey(p.label)});});
-    skips.forEach(function(p){waves.push({p:p,i:waves.length,list:[],planned:true,skipped:true,key:pkey(p.label)});});
+    // a passed-over phase sits in OUTLINE order, not after every later placeholder: it
+    // was there when the workflow jumped past it, so it renders among the started
+    // phases -- before the phase the run jumped to, by the outline position the fold
+    // carries (a phase that took nothing from the outline has no pos to compare)
+    skips.forEach(function(p){var at=waves.length;
+      if(typeof p.pos==="number")for(var wi=0;wi<waves.length;wi++){var wv=waves[wi],wp=wv.p&&wv.p.pos;
+        if(!wv.planned&&!wv.loose&&typeof wp==="number"&&wp>p.pos){at=wi;break;}}
+      waves.splice(at,0,{p:p,i:at,list:[],planned:true,skipped:true,key:pkey(p.label)});});
     var started=waves.filter(function(w){return !w.planned&&!w.loose;}).length;
     // the subtitle only says how far the run got into its outline: the hero's "now"
     // line already names who is working and who is waiting, in the live phase
@@ -781,7 +932,7 @@ function htmlClass(cls,on){var h=document.documentElement;
 
 /* what each tab shows, per run: the feed's older lines, a phase's full wall of tiles,
    a hero's whole goal -- all toggled the same way, all local to the tab */
-var openFin={},feedAll={},goalFull={},FEED_SHOW=8,RECENT_KEEP=50,TILE_SHOW=12,QUEUE_SHOW=24,CREW_SHOW=16;
+var openFin={},feedAll={},goalFull={},FEED_SHOW=8,RECENT_KEEP=50,TILE_SHOW=12,QUEUE_SHOW=24,CREW_SHOW=16,AGENTS_SHOW=16;
 document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button[data-more]");if(!b)return;
   var k=b.getAttribute("data-more");feedAll[k]=!feedAll[k];render();});
 document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button[data-goal]");if(!b)return;
