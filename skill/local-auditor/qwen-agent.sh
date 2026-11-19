@@ -1692,6 +1692,15 @@ if [ "$DEEP" -eq 1 ] && [ "$PROBE_HERE" -eq 1 ] && [ "$PROBE_EXPLICIT" -eq 0 ]; 
   PROBE=0
 fi
 
+# The role this session runs as, exported for the advisor: lib/advisor_mcp.py records
+# it with every real Claude call in the watch usage ledger (lib/watch.py). ROLE is
+# final at this point: the -r parse and --scenarios' implicit -r tester happened
+# above and nothing below writes it again -- so the claude start at the end hands it
+# to the MCP server and the plan hook, and the until-done exec below hands it to the
+# supervisor and its rescue call. No -r, no --role-file: empty, which the ledger
+# records as "no role" -- a fact it may show, never a guess.
+export QA_ROLE="$ROLE"
+
 # --------------------------------------------------------- until-done
 if [ -n "$UNTIL_DONE" ]; then
   _ud_refuse() { die "--until-done takes its prompt from TASK and owns -f/--resume/-o/--json per round; drop $1"; exit $QA_USAGE; }
@@ -3223,6 +3232,12 @@ PY
     # empty (the page off, or a python that could not run) there is no registered run
     # to be a child of, and nothing is set.
     [ -n "$WATCH_ID" ] && export QWEN_WATCH_CHILD=1 QWEN_WATCH_PARENT="$WATCH_PID"
+    # QWEN_WATCH_ID is the register() stamp the python sub-command set in its own
+    # (dead) environment, carried on here by the shell: an advisor call made by a
+    # descendant records THIS id into the watch usage ledger (lib/watch.py), which is
+    # how the page ties a Claude call to the run that made it. Exported as its own
+    # statement so the child switch line above reads exactly as it was first written.
+    [ -n "$WATCH_ID" ] && export QWEN_WATCH_ID="$WATCH_ID"
     # The activity hook's target, exported the same way: the agent inherits it, and every
     # hook Claude Code runs for it inherits it too -- which is how the hook knows WHICH
     # file to append to without one path being written into the settings file. A session

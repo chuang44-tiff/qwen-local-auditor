@@ -227,6 +227,15 @@ The page never shows tool output, prompts, transcripts or model reasoning. One v
 serves every run and keeps running between runs. `python lib/watch.py stop` ends it, and
 `python lib/watch.py dismiss <id>` clears a finished run's card.
 
+The page's Claude usage panel counts the REAL Claude calls — the `claude -p` runs on your own
+claude login (the advisor's ask/plan/rescue calls and swarm claude-checks), not local Qwen
+sessions. Each call appends one line to `$XDG_CACHE_HOME/qwen-agent/claude-calls.jsonl`
+(falls back to `~/.cache`) holding only the when, the kind, the call name, the qla role, the
+model, the reported cost and seconds, whether it succeeded, and the run's watch id. It holds
+no prompt, question, answer, item text or file path. Run history would otherwise disappear
+with the pruned run folders; the ledger keeps the counts. Delete the file and the counts
+start from zero — nothing else reads or needs it.
+
 | variable | default | meaning |
 |---|---|---|
 | `QWEN_WATCH` | `1` | `0` switches the page off: no registration, no activity hook, no viewer |

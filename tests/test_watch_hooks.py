@@ -46,17 +46,23 @@ from swarm_fixtures import FAKE
 @pytest.fixture(autouse=True)
 def _watch_home(tmp_path, monkeypatch):
     """The registry and the config file under this test's tmp_path, no real config file
-    able to move the host or port, and no inherited child switch or owner stamp:
-    register() writes QWEN_WATCH_CHILD and QWEN_WATCH_PARENT straight into os.environ,
-    and a previous test's run set them."""
+    able to move the host or port, and no inherited child switch, owner stamp or run-id
+    stamp: register() writes QWEN_WATCH_CHILD, QWEN_WATCH_PARENT and QWEN_WATCH_ID
+    straight into os.environ, and a previous test's run set them."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     monkeypatch.setenv("QWEN_CONFIG", str(tmp_path / "no-such-config"))
     monkeypatch.delenv("QWEN_WATCH_CHILD", raising=False)
     monkeypatch.delenv("QWEN_WATCH_PARENT", raising=False)
+    monkeypatch.delenv("QWEN_WATCH_ID", raising=False)
     # the link lines these tests compare against are built from host and port: a
     # developer's own QWEN_WATCH_* setting must not move them (lib/watch.py reads env first)
     monkeypatch.delenv("QWEN_WATCH_HOST", raising=False)
     monkeypatch.delenv("QWEN_WATCH_PORT", raising=False)
+    yield
+    # ... and after: a delenv of an unset variable records nothing to restore, so what
+    # THIS test's register() wrote would leak into the next test file
+    for name in ("QWEN_WATCH_CHILD", "QWEN_WATCH_PARENT", "QWEN_WATCH_ID"):
+        os.environ.pop(name, None)
 
 
 @pytest.fixture(autouse=True)

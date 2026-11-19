@@ -55,16 +55,22 @@ def _depth_shallow_into_run(monkeypatch):
 @pytest.fixture(autouse=True, scope="session")
 def _no_outer_watch_run_for_the_session():
     """The suite must not see a watched run it happens to be running INSIDE (a qwen-agent
-    --until-done loop with the page on passes these four down to every process it starts,
+    --until-done loop with the page on passes these down to every process it starts,
     pytest included). None of them belongs to the suite: a swarm unit spawned by a test
     would inherit the outer run's activity file and parent pid -- the file an unregistered
     unit's environment must never name, and the register() the real launchers do would
-    refuse as another run's child. All four leave the environment for the whole session
+    refuse as another run's child. QWEN_WATCH_ID (the ledger's run stamp, set by
+    register()) and QA_ROLE (the role the advisor records, exported by qwen-agent.sh)
+    go the same way: a test's ledger line must not claim an outer run or an outer role.
+    All of them leave the environment for the whole session
     (each test's own registration sets what it needs with monkeypatch, and the harnesses
     that build a launcher's child env from scratch drop every QWEN_*, these with them);
     whatever the outer run set comes back when the session ends."""
     names = ("QWEN_WATCH_ACTIVITY", "QWEN_WATCH_PARENT",
-             "QWEN_WATCH_CHILD", "QWEN_WATCH_CTX_WINDOW")
+             "QWEN_WATCH_CHILD", "QWEN_WATCH_CTX_WINDOW", "QWEN_WATCH_ID",
+             "QA_ROLE")   # the ledger's run stamp and the advisor's recorded role:
+                         # neither is the suite's -- a run started under an agent with
+                         # -r would otherwise stamp its role into every ledger line
     saved = {name: os.environ.get(name) for name in names}
     for name in names:
         os.environ.pop(name, None)
@@ -145,6 +151,29 @@ def _watch_off_into_run(monkeypatch):
             if getattr(other, "__name__", "").startswith("test_") and getattr(other, attr, None) is orig:
                 monkeypatch.setattr(other, attr, patched)
         monkeypatch.setattr(mod, attr, patched)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _cache_home_in_tmp(tmp_path_factory):
+    """The Claude usage ledger (lib/watch.py's claude_ledger_path) appends to
+    $XDG_CACHE_HOME/qwen-agent/claude-calls.jsonl -- and an advisor or claude-check call
+    made anywhere in the suite lands there. The whole session therefore runs with the
+    cache dir at a temporary path: no test ever appends to the developer's real
+    ~/.cache/qwen-agent/claude-calls.jsonl (a launcher child built from os.environ
+    inherits it too; the harnesses that strip QWEN_* keep it, and the one harness
+    that strips it on purpose -- qwen-sweep's, whose run-dir default test needs the
+    HOME fallback -- drives a fake dispatcher that never reaches the recording code).
+    Tests that want the dir elsewhere -- the watch's own, the advisor-log assertions
+    -- pin it themselves with monkeypatch/extra, which overrides and restores this.
+    (The real WATCH dir is already kept clean by QWEN_WATCH=0; this is its twin for the
+    one durable file the watch keeps OUTSIDE the watch dir.)"""
+    old = os.environ.get("XDG_CACHE_HOME")
+    os.environ["XDG_CACHE_HOME"] = str(tmp_path_factory.mktemp("xdg-cache"))
+    yield
+    if old is None:
+        del os.environ["XDG_CACHE_HOME"]
+    else:
+        os.environ["XDG_CACHE_HOME"] = old
 
 
 @pytest.fixture(autouse=True, scope="session")

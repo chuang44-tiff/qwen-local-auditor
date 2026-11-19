@@ -47,6 +47,25 @@ so each poll folds only what the emitter wrote since the last one and an overnig
 stays cheap; a changed identity, a file shorter than the offset or no entry re-reads
 from 0, and every derived number lands on a deep copy.
 
+THE CLAUDE LEDGER: the REAL Claude calls -- `claude -p` runs on the user's own claude
+login (advisor ask/plan/rescue, swarm claude-checks) -- also append one JSON line to
+`$XDG_CACHE_HOME/qwen-agent/claude-calls.jsonl` (claude_ledger_path, record_claude_call)
+while their own per-run files stay where they were: the registry prunes old runs, the
+ledger is the durable history. One line per call: {t, kind, call, role, model, cost_usd,
+seconds, ok, run} -- NO prompt, question, answer, item text or path, and only those
+nine keys are kept. `kind` is "advisor" or "claude-check"; `run` is the watch run id
+when one is known (register() leaves QWEN_WATCH_ID=<the id> in the owner's environment
+alongside the child switch, so a registered run's children -- an advisor MCP server, a
+swarm unit -- inherit it), else null. The file is created 0600 on posix and opened for
+APPEND; any error is swallowed -- a ledger problem never fails or slows a Claude call.
+/api/runs carries the ledger folded as its top-level `claude` field ({today, week, all}
+count/cost buckets over local midnight and the last 7 days, `roles` -- the last 7 days
+grouped by role, newest-count first -- and `since`, the oldest stamp), and /api/run/<id>
+carries `claude` for the calls whose run is that id or one of its CHILD ids (pointers
+registered under the run's own run_path); a bucket whose calls have no cost reports the
+known sum with `unpriced`. The file is re-read only when its size or mtime changes, a
+line that does not parse is skipped, and a missing file reads as zero counts/since null.
+
 ACTIVITY: a hook (lib/watch_hook.py) running inside the session appends one line per tool
 call to the file QWEN_WATCH_ACTIVITY names -- RUN/activity/<unit>.jsonl for a swarm unit,
 RUN/activity.jsonl for a coder loop, <watch_dir>/<id>.activity.jsonl for a single-shot
@@ -324,6 +343,8 @@ def register(kind, title, *, run_path=None, pid=None, timeout=None, max_rounds=N
     _write_json(pointer_file, pointer)
     os.environ["QWEN_WATCH_CHILD"] = "1"           # this process owns the registration:
     os.environ["QWEN_WATCH_PARENT"] = own          # its children never re-register
+    os.environ["QWEN_WATCH_ID"] = run_id           # ... and a child that records a Claude
+                                                   # call (the ledger below) names this run
     if start_server and _setting("QWEN_WATCH_NOSERVE") != "1":
         try:
             answer = _health()
@@ -386,6 +407,246 @@ def _spawn_server():
         kwargs["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0)
                                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     subprocess.Popen(argv, **kwargs)
+
+
+# ---------------------------------------------------------------- the claude usage ledger
+# The REAL Claude calls (advisor_mcp's ask/plan/rescue, swarm_engine's claude-checks)
+# already write their records beside their run -- those folders get pruned. This ledger
+# is the durable history: one JSON line per call at claude_ledger_path(), holding only
+# {t, kind, call, role, model, cost_usd, seconds, ok, run} -- never a prompt, question,
+# answer, item text or path. Writing is fire-and-forget: no error may fail or slow the
+# Claude call it belongs to, so everything here is swallowed to a bool.
+
+CLAUDE_LEDGER = "claude-calls.jsonl"
+CLAUDE_KINDS = ("advisor", "claude-check")
+CLAUDE_KEYS = ("t", "kind", "call", "role", "model", "cost_usd", "seconds", "ok", "run")
+WEEK_SECONDS = 7 * 86400                          # "week": the last 7 days
+
+
+def claude_ledger_path():
+    """$XDG_CACHE_HOME/qwen-agent/claude-calls.jsonl -- the cache dir falls back exactly
+    as watch_dir() does (no config-file read: the ledger lives with the cache, not the
+    registry)."""
+    cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(cache, "qwen-agent", CLAUDE_LEDGER)
+
+
+def _claude_text(value):
+    """A ledger text field as kept: a non-empty string, else None (the ledger stores
+    call/role/model as plain words and nothing else -- no field is a free channel)."""
+    return value if isinstance(value, str) and value else None
+
+
+def _claude_record(rec, now=None):
+    """One ledger line's nine fields, normalized, or None when rec is no object at all.
+    kind is one of CLAUDE_KINDS (anything else an advisor call: the advisor is the
+    common writer and a new kind must not silently vanish); t defaults to now; cost_usd
+    and seconds are non-negative finite numbers or None; ok is False only when said so;
+    run is a 12-hex watch id -- anything else (an owner PID left in QWEN_WATCH_PARENT
+    by a launcher that never learned the id) is not an id and stores as null."""
+    if not isinstance(rec, dict):
+        return None
+    kind = rec.get("kind") if rec.get("kind") in CLAUDE_KINDS else CLAUDE_KINDS[0]
+    t = _num(rec.get("t"))
+    run = _claude_text(rec.get("run"))
+    if run is not None and not ID_RE.fullmatch(run):
+        run = None
+    return {"t": t if t is not None else (time.time() if now is None else now),
+            "kind": kind,
+            "call": _claude_text(rec.get("call")),
+            "role": _claude_text(rec.get("role")),
+            "model": _claude_text(rec.get("model")),
+            "cost_usd": _num(rec.get("cost_usd")),
+            "seconds": _num(rec.get("seconds")),
+            "ok": rec.get("ok") is not False,
+            "run": run}
+
+
+def record_claude_call(rec):
+    """Append one call's line to the ledger and report whether it landed. NEVER raises:
+    a ledger that cannot be written (no cache dir, no disk, a hand-made directory in
+    its place) costs the line and nothing else -- the Claude call it belongs to goes on
+    exactly as if this had never been called. The file is opened in APPEND mode, created
+    0600 on posix (the ledger is the user's own usage history; no other account reads
+    it). A caller that knows no run may leave `run` out: the environment of a
+    registered run carries QWEN_WATCH_ID (register's stamp, inherited by the advisor's
+    MCP server and a swarm unit alike), with the owner PID in QWEN_WATCH_PARENT as the
+    legacy handle -- only a real id survives either way."""
+    try:
+        if isinstance(rec, dict) and not rec.get("run"):
+            rec = dict(rec)                        # (a copy: the caller's dict is theirs)
+            rec["run"] = (os.environ.get("QWEN_WATCH_ID")
+                          or os.environ.get("QWEN_WATCH_PARENT"))
+        line = _claude_record(rec)
+        if line is None:
+            return False
+        path = claude_ledger_path()
+        folder = os.path.dirname(path)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+        data = (json.dumps(line) + "\n").encode("utf-8")
+        if os.name == "posix":
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+        else:
+            with open(path, "ab") as fh:
+                fh.write(data)
+        return True
+    except Exception:
+        return False
+
+
+# One cached read of the ledger, per path: the viewer polls /api/runs every 2.5 s and
+# the file moves only when a call lands, so re-reading on a matching (size, mtime) is
+# the one cost that stays out of the poll. Threading: the lock, like the fold cache's.
+_claude_cache = {"path": None, "sig": None, "recs": []}
+_claude_lock = threading.Lock()
+
+
+def _claude_records():
+    """The ledger's readable lines, normalized and oldest-file-order first: a missing
+    or unreadable file is no lines, a line that does not parse (the writer was cut off
+    mid-append most of all) is skipped, and a line that folds to nothing (no kind, no
+    usable t) is skipped too. Re-read only when the file's size or mtime changed since
+    the last call, or when a different path is in play (tests move the cache dir).
+    CONTRACT: the folded dicts are the cache's own -- callers read them, they do not
+    edit them (the buckets and role groups below are built beside them, never into
+    them)."""
+    path = claude_ledger_path()
+    try:
+        st = os.stat(path)
+        sig = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        with _claude_lock:
+            _claude_cache["path"], _claude_cache["sig"], _claude_cache["recs"] = None, None, []
+        return []
+    with _claude_lock:
+        if _claude_cache["path"] == path and _claude_cache["sig"] == sig:
+            return list(_claude_cache["recs"])
+    recs = []
+    for raw in _read_json_lines(path):          # skips the lines that do not parse
+        if _num(raw.get("t")) is None:          # and the ones without a usable stamp:
+            continue                            # reading must not invent "now"s
+        folded = _claude_record(raw)
+        if folded is not None:
+            recs.append(folded)
+    with _claude_lock:
+        _claude_cache["path"], _claude_cache["sig"], _claude_cache["recs"] = path, sig, list(recs)
+    return recs
+
+
+def _claude_bucket():
+    return {"n": 0, "cost_usd": 0.0, "unpriced": 0}
+
+
+def _claude_add(bucket, rec):
+    """One call into a count/cost bucket: cost_usd sums the KNOWN costs and `unpriced`
+    counts the calls that reported none (a call's cost is only known when claude said
+    so -- an unavailable call carries no cost)."""
+    bucket["n"] += 1
+    if rec["cost_usd"] is None:
+        bucket["unpriced"] += 1
+    else:
+        bucket["cost_usd"] += rec["cost_usd"]
+
+
+def _claude_roles(recs):
+    """The role sections the page draws: one {role, n, cost_usd, unpriced,
+    models: {model: n}, calls: {call: n}} per role, sorted by n descending (ties by
+    role, so the list is stable across polls). A call with no role groups under ""."""
+    groups = {}
+    for rec in recs:
+        key = rec["role"] or ""
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {"role": key, "models": {}, "calls": {}}
+            g.update(_claude_bucket())
+        _claude_add(g, rec)
+        if rec["model"]:
+            g["models"][rec["model"]] = g["models"].get(rec["model"], 0) + 1
+        if rec["call"]:
+            g["calls"][rec["call"]] = g["calls"].get(rec["call"], 0) + 1
+    return sorted(groups.values(), key=lambda g: (-g["n"], g["role"]))
+
+
+def claude_summary(now=None):
+    """The /api/runs `claude` field: {today, week, all, roles, since} off the ledger.
+    today counts from LOCAL midnight, week over the last 7 days, all over the file;
+    roles covers the last 7 days (the page's sections); since is the oldest stamp in
+    the ledger or null when it holds nothing readable."""
+    now = time.time() if now is None else now
+    lt = time.localtime(now)
+    midnight = time.mktime(lt[:3] + (0, 0, 0, 0, 0, -1))
+    week_start = now - WEEK_SECONDS
+    today, week, all_b = _claude_bucket(), _claude_bucket(), _claude_bucket()
+    week_recs, since = [], None
+    for rec in _claude_records():
+        _claude_add(all_b, rec)
+        if since is None or rec["t"] < since:
+            since = rec["t"]
+        if rec["t"] >= midnight:
+            _claude_add(today, rec)
+        if rec["t"] >= week_start:
+            _claude_add(week, rec)
+            week_recs.append(rec)
+    return {"today": today, "week": week, "all": all_b,
+            "roles": _claude_roles(week_recs), "since": since}
+
+
+def _claude_child_ids(st):
+    """The ids of the pointers registered UNDER this run's own run folder (nested runs
+    a launcher started inside it): the run page's claude block counts the calls whose
+    run is this id or one of these. A run with no run_path has no children."""
+    ids = set()
+    base = st.get("run_path") if isinstance(st, dict) else None
+    if not isinstance(base, str) or not base:
+        return ids
+    try:
+        base_r = os.path.realpath(base)
+        names = os.listdir(watch_dir())
+    except (OSError, ValueError):               # unreadable dir, or a base no path
+        return ids                              # call accepts (a NUL in a pointer)
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        other = _read_json(os.path.join(watch_dir(), name))
+        if not isinstance(other, dict):
+            continue
+        rid = other.get("id")
+        if not isinstance(rid, str) or not ID_RE.fullmatch(rid) or rid == st.get("id"):
+            continue
+        path = other.get("run_path")
+        if not isinstance(path, str) or not path:
+            continue
+        try:
+            inside = os.path.realpath(path) != base_r \
+                and os.path.commonpath([os.path.realpath(path), base_r]) == base_r
+        except ValueError:                       # another drive on Windows
+            inside = False
+        if inside:
+            ids.add(rid)
+    return ids
+
+
+def claude_run_view(st):
+    """The /api/run/<id> `claude` field: {n, cost_usd, unpriced, roles} for the calls
+    whose run is this run's id or one of its child ids (_claude_child_ids -- a nested
+    run's calls belong to the page that started it). Unlike the overview, this counts
+    the run's WHOLE ledger: a run is its own time window."""
+    ids = set()
+    rid = st.get("id") if isinstance(st, dict) else None
+    if isinstance(rid, str) and ID_RE.fullmatch(rid):
+        ids.add(rid)
+    ids |= _claude_child_ids(st)
+    mine = [rec for rec in _claude_records() if rec["run"] in ids]
+    bucket = _claude_bucket()
+    for rec in mine:
+        _claude_add(bucket, rec)
+    return {"n": bucket["n"], "cost_usd": bucket["cost_usd"],
+            "unpriced": bucket["unpriced"], "roles": _claude_roles(mine)}
 
 
 # ---------------------------------------------------------------- the events fold
@@ -1534,6 +1795,10 @@ class _Handler(BaseHTTPRequestHandler):
     and so is every method we declare except GET (a verb the stdlib does not know is
     its own 501). Quiet by default: a watcher that shouts at every request is a
     watcher the user closes."""
+    # Both /api answers also carry a `claude` field: the usage ledger folded for the
+    # page's Claude panels -- folded in _json below, the one place an answer is
+    # written, so the routes keep the exact shape they were first written in (see
+    # the ledger section).
 
     def log_message(self, fmt, *args):
         pass
@@ -1548,6 +1813,21 @@ class _Handler(BaseHTTPRequestHandler):
                                                 # mid-read is not a server-side fault
 
     def _json(self, obj):
+        # Claude usage: the two data routes answer with the ledger folded onto the
+        # dict in flight -- folded here, at the one place an answer is written, so
+        # the routes above keep the exact shape they were first written in. A fold
+        # that cannot happen (a ledger that cannot be read) reads as no panel: a
+        # null claude the page skips, never a dead viewer. The /health answer is a
+        # different dict on a different path and is left alone.
+        if isinstance(obj, dict):
+            try:
+                here = urllib.parse.urlsplit(self.path).path
+                if here == "/api/runs":
+                    obj["claude"] = claude_summary()
+                elif here.startswith("/api/run/"):
+                    obj["claude"] = claude_run_view(obj)
+            except Exception:
+                obj["claude"] = None
         self._send(200, json.dumps(obj).encode("utf-8"), "application/json")
 
     def _missing(self):

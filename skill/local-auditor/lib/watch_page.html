@@ -73,12 +73,13 @@ button{font:inherit;color:inherit}
   padding:8px 12px;border-top:1px solid var(--line);font-size:13px;min-width:0}
 .agents li:first-child{border-top:0}
 .agents li.attn{background:var(--warn-bg);box-shadow:inset 3px 0 var(--warn)}
-.agents .a1{display:flex;align-items:center;gap:6px;min-width:0;flex:1 1 auto}
+.agents .a1{display:flex;flex-wrap:wrap;align-items:center;gap:2px 6px;min-width:0;flex:1 1 auto}
 .agents .a1 svg{width:26px;height:26px;flex:0 0 auto}
 .agents .a1 b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .agents .a1 .role,.agents .a1 .rnd{color:var(--muted);font-size:12px;flex:0 0 auto}
-.agents .a1 .mood{color:var(--muted);min-width:0;overflow-wrap:anywhere}
-.agents .a2{display:flex;align-items:baseline;gap:10px;margin-left:auto;color:var(--muted);min-width:0}
+.agents .a1 .mood{color:var(--muted);min-width:0;overflow-wrap:break-word}
+.agents .atime,.agents .actx{white-space:nowrap}
+.agents .a2{display:flex;align-items:baseline;gap:10px;margin-left:auto;color:var(--muted);min-width:0;max-width:100%}
 .agents .arun{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .agents .atime.over{color:var(--warn-ink);font-weight:600}
 .agents .actx.hot{color:var(--warn-ink);font-weight:600}
@@ -173,7 +174,9 @@ h2 small{font-weight:400;color:var(--muted);font-size:13px}
   .tile svg{width:48px;height:48px}
   .feed li{grid-template-columns:56px 1fr;gap:8px}
   .agents li{display:block}                          /* two lines, never a sideways scroll */
-  .agents .a2{margin-left:0;justify-content:space-between}
+  .agents .a2{margin:2px 0 0 32px;justify-content:flex-start}
+  .agents .arun{flex:1 1 auto}
+  .agents .a1 .rnd{flex-basis:100%;padding-left:32px}   /* a loop's round: its own line */
 }
 .tile{background:var(--panel);border-radius:var(--r-sm);padding:22px 12px 8px;display:grid;
   grid-template-columns:62px 1fr;gap:0 12px;align-items:center;align-content:start;min-width:0}
@@ -316,6 +319,24 @@ p.offline{background:var(--warn-bg);color:var(--ink);box-shadow:inset 3px 0 var(
 .offline svg.robot *,.offline .spin,.offline .dot{animation-play-state:paused!important}
 .offline .pill.running{color:var(--muted)}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.dot.live{box-shadow:none}.spin{border-top-color:var(--run);border-right-color:var(--run)}.robot .zzz text{opacity:1}svg.robot.waiting .body{transform:rotate(-6deg) translateY(2px)}}
+/* Claude usage */
+/* The panel that counts the real claude -p calls (advisor and claude-checks). One
+   card, its role sections under a hairline; the summary line and the call breakdown
+   sit in the muted tone, the "without a cost" note in the warn ink (it says a number
+   is incomplete), and the collapse control is text in the run ink -- every status
+   colour on this panel is an --*-ink token, so it holds 4.5:1 in both themes like the
+   rest of the page. */
+.claude{background:var(--panel);border-radius:var(--r-lg);padding:10px 14px 14px;margin:14px 0 22px}
+.claude h2{margin:4px 0 0}
+.claude .csum{margin:2px 0 0;color:var(--muted);font-size:14px}
+.claude-t{background:transparent;border:0;color:var(--run-ink);font-size:13px;cursor:pointer;
+  padding:6px 8px;border-radius:6px}
+.claude-t:hover{background:var(--sunk);color:var(--ink)}
+.croles{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
+.crole{font-size:14px;margin:3px 0}
+.crole b{font-weight:650}
+.crole .brk{color:var(--muted);font-size:13px}
+.crole .noprice,.claude .csum .noprice{color:var(--warn-ink);font-size:13px}
 </style>
 </head>
 <body>
@@ -473,14 +494,14 @@ function agentRows(live){var rows=[];
           timeout:e&&e.timeout!=null?e.timeout:u.timeout,
           ctx:e&&e.ctx,win:e&&e.win,needs:!!(e&&e.needs_you)});});
     }else if(r.kind==="until-done"){var lm=loopMood(r),a=r.activity||null;
-      rows.push({r:r,unit:"coder",name:r.title||"",role:"coder",f:lm.f,
+      rows.push({r:r,unit:"coder",name:"coder",role:"coder loop",f:lm.f,
         pose:quiet?"waiting":lm.pose,word:lm.word,timed:lm.timed,since:lm.since,
         started:r.round&&r.round.started!=null?r.round.started:r.start,
         timeout:r.round&&r.round.timeout!=null?r.round.timeout:r.timeout,
         ctx:a&&a.ctx,win:a&&a.win,needs:(r.attention_count||0)>0,
         loop:true,round:r.round,checks:r.checks});
     }else{var a2=r.activity||null;
-      rows.push({r:r,unit:"agent",name:r.title||"",role:"agent",f:FAM.checker,
+      rows.push({r:r,unit:"agent",name:"agent",role:"single agent",f:FAM.checker,
         pose:quiet?"waiting":actPose({state:"running",activity:a2}),
         word:moodWords(a2),timed:moodTimed(a2),
         since:a2&&typeof a2.since==="number"?a2.since:null,
@@ -549,6 +570,7 @@ function overview(runs){
   var head=live.length?(mates.length+(mates.length===1?" agent":" agents")+" at work"):"All quiet";
   var sub=live.length?(live.length===1?"One run in progress":live.length+" runs in progress"):"Start a local agent and it appears here.";
   var h='<div data-sec="floor"><section class="floor"><h1>'+head+'</h1><p>'+sub+'</p><div class="crew">';
+  h=claudePanel(claudeData)+h;   // the Claude usage panel rides at the page's top
   // sixteen robots at most: a two-hundred-agent run is a wall of identical loops, and
   // every one of them is a tab stop and an animation for nothing -- the rest count in
   // the chip. They are decoration beside the cards below, so they leave the tab order.
@@ -640,6 +662,7 @@ function detail(r){
      '<div class="meter">'+bar(o==="running"?r.progress:(r.progress!=null?r.progress:1),
        o==="running"?"":(o==="ended"?"ok":"bad"),"Run progress",progA11y(r))+
        '<div class="meta"><span>'+progHtml(r)+'</span>'+(r.report_stop?'<span>'+esc(r.report_stop)+'</span>':"")+'</div></div></section>';
+  h+=claudeRunPanel(r.claude);   // this run's own real-Claude calls, when it made any
   // the attention items the overview counts with its flag, listed here in full: the run
   // page must say WHAT needs you, latest first, not just that something does
   var atts=Array.isArray(r.attention)?r.attention.slice().reverse():[];
@@ -968,6 +991,73 @@ function setStill(on){stillMem=on;try{localStorage.setItem(STILL_KEY,on?"1":"0")
 function applyStill(){htmlClass("still",getStill());}
 document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button.still-btn");if(!b)return;
   setStill(!getStill());applyStill();render();});
+/* Claude usage: the panel counting the REAL Claude calls -- the `claude -p` runs of
+   the advisor (ask/plan/rescue) and the swarm claude-checks, the ones that cost
+   Claude usage on the person's own claude account. Local Qwen sessions are not in
+   it. The numbers arrive folded server-side from the durable ledger (lib/watch.py)
+   and only as counts and words -- call names, roles and models; no text the person
+   typed, sent or got back is ever carried here.
+   Self-contained (every original line of the file stays where it was): the overview
+   panel reads `claudeData`, and the ONLY writer of that global is the version check
+   below -- it stashes the summary from every overview answer as it already arrives,
+   so the block adds no request, no timer and no global of its own beyond this one
+   variable; the run page takes its block from the run's own answer. Each panel is
+   one self-contained claude section, so a partial-swap render can drop or keep the
+   whole thing as a unit; the builders are plain hoisted declarations, and the two
+   hooks that call them are one line each in the overview and the run view. */
+var claudeData=null,CLAUDE_MEM=null,CLAUDE_KEY="qwen-watch-claude";
+/* The collapse is the user's, kept in localStorage (wrapped, like every other storage
+   access, with an in-memory fallback); with no stored choice the panel starts
+   COLLAPSED on phones (at or below the 480 px of the page's own media query) and open anywhere
+   wider -- usage stats are context, not the reason the page was opened. */
+function claudeOpen(){
+  if(CLAUDE_MEM!==null)return CLAUDE_MEM;
+  try{var v=localStorage.getItem(CLAUDE_KEY);if(v==="1")return true;if(v==="0")return false;}catch(e){}
+  try{if(window.innerWidth&&window.innerWidth<=480)return false;}catch(e){}
+  return true;
+}
+function setClaudeOpen(open){CLAUDE_MEM=open;try{localStorage.setItem(CLAUDE_KEY,open?"1":"0");}catch(e){}}
+document.addEventListener("click",function(e){var b=e.target.closest&&e.target.closest("button[data-claude]");if(!b)return;
+  var open=b.getAttribute("aria-expanded")!=="true",body=document.getElementById(b.getAttribute("aria-controls"));
+  setClaudeOpen(open);b.setAttribute("aria-expanded",String(open));if(body)body.hidden=!open;});
+function fmtCost(x){if(typeof x!=="number"||!isFinite(x)||x<=0)return "$0.00";
+  return x<0.005?"<$0.01":"$"+x.toFixed(2);}  /* two decimals; a positive cost too
+                                                 small to round up shows the under-a-cent marker */
+function claudeNoprice(b){return b&&b.unpriced?' <span class="noprice">('+esc(b.unpriced)+" without a cost)</span>":"";}
+function claudeKeys(m){return Object.keys(m||{}).sort(function(a,b){return (m[b]-m[a])||String(a).localeCompare(String(b));});}
+function claudeRoleHtml(g){
+  var ms=claudeKeys(g.models),cs=claudeKeys(g.calls);
+  return '<div class="crole"><b>'+esc(g.role||"no role")+'</b>: '+cnt(g.n,"call")+", "+fmtCost(g.cost_usd)+
+    claudeNoprice(g)+
+    (ms.length?", "+ms.map(function(m){return esc(m)+" "+esc(g.models[m]);}).join(" · "):"")+
+    (cs.length?' <span class="brk">('+cs.map(function(k){return esc(k)+" "+esc(g.calls[k]);}).join(", ")+')</span>':"")+
+    "</div>";
+}
+function claudeToggle(){
+  var open=claudeOpen();
+  return '<button type="button" class="claude-t" data-claude="1" data-fk="claude" aria-expanded="'+open+
+    '" aria-controls="claude-body">'+(open?"Hide details":"Show details")+"</button>";
+}
+function claudeRoles(c){
+  return '<div id="claude-body"'+(claudeOpen()?"":" hidden")+'><div class="croles">'+
+    (Array.isArray(c.roles)?c.roles:[]).map(claudeRoleHtml).join("")+"</div></div>";
+}
+function claudePanel(c){
+  if(!c)return "";                                   // the summary has not arrived yet
+  if(!c.all||!c.all.n)return '<section class="claude" data-sec="claude"><h2>Claude usage</h2>'+
+    '<p class="note">No Claude calls yet. Advisor and claude-check calls show up here.</p></section>';
+  var t=c.today||{},w=c.week||{};
+  return '<section class="claude" data-sec="claude"><div class="sec-head"><h2>Claude usage</h2>'+claudeToggle()+"</div>"+
+    '<p class="csum">'+cnt(t.n,"call")+" today, "+fmtCost(t.cost_usd)+claudeNoprice(t)+" · "+
+    esc(w.n)+" this week, "+fmtCost(w.cost_usd)+claudeNoprice(w)+"</p>"+
+    claudeRoles(c)+"</section>";
+}
+function claudeRunPanel(c){
+  if(!c||!c.n)return "";                               // a run without calls shows no section
+  return '<section class="claude" data-sec="claude"><div class="sec-head"><h2>Claude calls <small>'+
+    cnt(c.n,"call")+", "+fmtCost(c.cost_usd)+claudeNoprice(c)+"</small></h2>"+claudeToggle()+"</div>"+
+    claudeRoles(c)+"</section>";
+}
 var app=document.getElementById("app"),lastOk=0;
 var failSince=0,fails=0;  /* since when the viewer has not answered, and how many times
                              in a row: the first miss may be one slow poll, the second
@@ -983,6 +1073,10 @@ function checkPageVersion(d){
   // remembers the last version we reloaded for and when: the same server version never
   // reloads the tab twice within 60 s -- that is the guard against a reload loop (a
   // middle layer forever handing back the old page, say).
+  // The Claude usage panel's only data path: every overview answer carries the ledger
+  // folded (`claude`'s bucket shape), so it is stashed right here as it arrives -- a
+  // run answer's own block is a different shape and never lands in the panel's global
+  if(d&&d.claude&&d.claude.all&&d.claude.today)claudeData=d.claude;
   if(!d||!isVersion(d.page)||!isVersion(PAGE_VERSION)||d.page===PAGE_VERSION)return;
   var now=Date.now(),g=null;
   // read and write SEPARATELY: unreadable or junk in the stored value must not keep

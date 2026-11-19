@@ -12,6 +12,8 @@ The environment comes from the MCP config qwen-agent writes:
   QA_ADVISOR_TIMEOUT    seconds per call (default 600)
   QA_ADVISOR_LOG        markdown file each question and answer is appended to
   QA_ADVISOR_CLAUDE     the claude binary (default: claude on PATH)
+  QA_ROLE               the -r role that asked (qwen-agent.sh exports it): recorded with the
+                        call in the watch usage ledger, lib/watch.py's claude_ledger_path()
   QA_ADVISOR_TOOLS      "1": the call may read the agent's working directory (Read, Grep,
                         Glob; up to TOOL_TURNS turns). Set by qwen-agent for the plan hook,
                         the ask server and the rescue unless QWEN_CLAUDE_TOOLS=0 turns the
@@ -187,9 +189,37 @@ def _count(state):
         return 0
 
 
-def _record(state, rec):
+def _record(state, rec, env=None):
     with open(os.path.join(state, "calls.jsonl"), "a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec) + "\n")
+    _ledger(rec, env)
+
+
+def _ledger(rec, env):
+    """The same call's line in the durable usage ledger (lib/watch.py): the watch page
+    counts the REAL Claude calls there, because this run's own calls.jsonl sits with the
+    run and gets pruned. Only words the ledger is allowed to hold go over -- call,
+    model, seconds, cost, ok, run; never the question, the context or an answer.
+    Imported LAZILY and guarded: this module is also run as a bare script (sys.path is
+    then the lib folder, so `watch` may live under `lib` or beside us) and the advisor
+    must answer even when watch.py cannot be imported at all -- a failed ledger is a
+    silent one, like every other watch call."""
+    try:
+        try:
+            from lib import watch
+        except ImportError:
+            import watch
+        e = os.environ if env is None else env
+        watch.record_claude_call({"kind": "advisor", "call": rec.get("call"),
+                                  "role": e.get("QA_ROLE") or None,
+                                  "model": rec.get("model"),
+                                  "cost_usd": rec.get("cost_usd"),
+                                  "seconds": rec.get("seconds"),
+                                  "ok": rec.get("unavailable") is None,
+                                  "run": (e.get("QWEN_WATCH_ID")
+                                          or e.get("QWEN_WATCH_PARENT"))})
+    except Exception:
+        pass                                     # the ledger is a convenience, never a failure
 
 
 def _run(claude, model, brief, timeout, env, read_root=None):
@@ -285,11 +315,11 @@ def ask(question, context, paths, env, root, limit=MAX_CONTEXT):
         except Unavailable as e:
             _record(state, {"call": call, "n": n + 1, "model": model,
                             "seconds": round(time.time() - t0, 1), "cost_usd": None,
-                            "unavailable": str(e), "tools": bool(read_root)})
+                            "unavailable": str(e), "tools": bool(read_root)}, env)
             raise
         _record(state, {"call": call, "n": n + 1, "model": used,
                         "seconds": round(time.time() - t0, 1), "cost_usd": cost, "unavailable": None,
-                        "tools": bool(read_root), "turns": turns})
+                        "tools": bool(read_root), "turns": turns}, env)
     finally:
         try:
             os.rmdir(lk)

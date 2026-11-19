@@ -353,3 +353,76 @@ def test_ask_limit_argument_replaces_the_context_cap(adv):
     assert "Take option A" in out
     with pytest.raises(am.Refused, match="the limit is 100"):
         am.ask("q", "c" * 101, None, adv["env"], str(adv["root"]), limit=100)
+
+
+# ------------------------------------------------- the watch usage ledger (watch.py)
+
+def ledger(tmp_path):
+    """The ledger lines the advisor appended under this test's cache dir."""
+    p = tmp_path / "cache" / "qwen-agent" / "claude-calls.jsonl"
+    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()]
+
+
+@posix_only
+def test_ask_records_the_call_in_the_watch_ledger(adv, tmp_path, monkeypatch):
+    """Every real Claude call the advisor makes also lands in lib/watch.py's durable
+    usage ledger: the -r role that asked (QA_ROLE), the call name (QA_CLAUDE_CALL),
+    the registered run's id (QWEN_WATCH_ID), the model, cost, seconds and verdict --
+    and NOTHING else: the question, the context, the answer and the attached path
+    never reach the file."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.delenv("QWEN_WATCH_ID", raising=False)        # the fallback must be clean:
+    monkeypatch.delenv("QWEN_WATCH_PARENT", raising=False)    # only these two envs decide run
+    env = dict(adv["env"], QA_ROLE="auditor", QWEN_WATCH_ID="ab12cd34ef56",
+               QA_CLAUDE_CALL="rescue")
+    am.ask("Why does F2 break? LEDGER-SECRET-QUESTION", "LEDGER-SECRET-CONTEXT",
+           ["a.py"], env, str(adv["root"]))
+    env2 = {k: v for k, v in adv["env"].items()               # a second call, plain ask,
+            if k not in ("QWEN_WATCH_ID", "QWEN_WATCH_PARENT")}  # under no run at all
+    env2["QA_ROLE"] = "coder"
+    am.ask("q2", "", None, env2, str(adv["root"]))
+    recs = ledger(tmp_path)
+    assert [(r["kind"], r["call"], r["role"], r["model"], r["cost_usd"], r["ok"],
+             r["run"]) for r in recs] == [
+        ("advisor", "rescue", "auditor", "claude-opus-test", 0.12, True, "ab12cd34ef56"),
+        ("advisor", "ask", "coder", "claude-opus-test", 0.12, True, None)]
+    assert all(set(r) == {"t", "kind", "call", "role", "model", "cost_usd", "seconds",
+                          "ok", "run"} for r in recs)
+    raw = (tmp_path / "cache" / "qwen-agent" / "claude-calls.jsonl").read_text(
+        encoding="utf-8")
+    for secret in ("LEDGER-SECRET", "Take option A", "a.py", "question", "context"):
+        assert secret not in raw
+
+
+@posix_only
+def test_ask_records_an_unavailable_call_as_not_ok(adv, tmp_path, monkeypatch):
+    """A call claude could not answer is still a call: it lands with ok:false and no
+    cost (the ledger's unpriced count is what these feed)."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    env = dict(adv["env"], FAKE_ADV_MODE="err", QA_ROLE="mechanic")
+    with pytest.raises(am.Unavailable, match="reported an error"):
+        am.ask("q", "", None, env, str(adv["root"]))
+    [rec] = ledger(tmp_path)
+    assert (rec["kind"], rec["call"], rec["role"], rec["ok"], rec["cost_usd"]) == \
+        ("advisor", "ask", "mechanic", False, None)
+
+
+@posix_only
+def test_advisor_answers_when_the_watch_ledger_cannot_be_written_or_imported(adv,
+                                                                             monkeypatch):
+    """The ledger is a convenience: a watch.py that cannot be imported at all (both
+    spellings) may not break the advisor, and a ledger path that cannot be opened
+    costs the line only -- the answer comes back exactly as it did before."""
+    import lib as lib_pkg
+    monkeypatch.delattr(lib_pkg, "watch", raising=False)      # the attribute path first...
+    monkeypatch.setitem(sys.modules, "lib.watch", None)       # ...then `from lib import watch`
+    monkeypatch.setitem(sys.modules, "watch", None)           # ...and so does `import watch`
+    out = am.ask("q", "", None, adv["env"], str(adv["root"]))
+    assert out.startswith("ADVICE (")
+    assert len(records(adv["state"])) == 1                   # the run's own record stands
+    monkeypatch.undo()
+    from lib import watch
+    monkeypatch.setattr(watch, "claude_ledger_path", lambda: "/dev/null/nope/ledger")
+    out = am.ask("q again", "", None, adv["env"], str(adv["root"]))
+    assert out.startswith("ADVICE (")
+    assert len(records(adv["state"])) == 2

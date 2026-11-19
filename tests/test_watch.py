@@ -35,12 +35,19 @@ HOOK_PY = os.path.abspath(os.path.join(os.path.dirname(WATCH_PY),
 def _watch_home(tmp_path, monkeypatch):
     """watch_dir() lives under this test's tmp_path, and no real config file can
     change host/port defaults; a previous test's register() may have set the child
-    switch and the owner pid into os.environ (register writes them directly), so
-    they go."""
+    switch, the owner pid and the run-id stamp into os.environ (register writes them
+    directly), so they go -- before the test AND after it: a delenv of a variable
+    that was not set records nothing to restore, so what THIS test's register()
+    wrote would otherwise leak into the next test file (the advisor's ledger tests
+    read QWEN_WATCH_ID as the run id)."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     monkeypatch.setenv("QWEN_CONFIG", str(tmp_path / "no-such-config"))
-    monkeypatch.delenv("QWEN_WATCH_CHILD", raising=False)
-    monkeypatch.delenv("QWEN_WATCH_PARENT", raising=False)
+    names = ("QWEN_WATCH_CHILD", "QWEN_WATCH_PARENT", "QWEN_WATCH_ID")
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    yield
+    for name in names:
+        os.environ.pop(name, None)
 
 
 def ev(kind, **fields):
@@ -3575,7 +3582,7 @@ def test_active_agents_row_shows_a_coder_loop_testing():
     assert 'class="robot running p-net"' in h                   # the tester's net
     assert 'class="mood">running tests <span class="tick"' in h
     assert "round 3, 5 of 7 checks passing" in h
-    assert ">add retry</b>" in h and ">coder</small>" in h
+    assert ">coder</b>" in h and ">coder loop</small>" in h   # the link carries the title
     assert 'data-fk="agent:cd12ef56ab12:coder"' in h
     assert "/ 10m" in h and "105k / 512k" in h
     h = _page_html(base % '{name:"reviewing",since:n-10}')
@@ -3611,10 +3618,13 @@ def test_active_agents_rows_are_two_lines_on_a_phone():
     text = page_text()
     assert re.search(r"@media \(max-width:480px\)\{[^@]*"
                      r"\.agents li\{display:block\}", text)   # the row stacks in two
-    assert ".agents .a2{margin-left:0" in text                # the second line, no more
-    #                                                           right-aligned drift
-    assert re.search(r"\.agents \.a1\{[^}]*min-width:0", text)      # shrink, never spill
-    assert re.search(r"\.agents \.a1 \.mood\{[^}]*overflow-wrap:anywhere", text)
+    assert ".agents .a2{margin:2px 0 0 32px" in text           # the second line, under the name
+    assert re.search(r"\.agents \.a1\{[^}]*flex-wrap:wrap[^}]*min-width:0", text)
+    #                         whole items move to a new line before they shrink, and
+    #                         words break only when one word is wider than the row
+    #                         ("anywhere" let the mood shrink to one letter per line)
+    assert re.search(r"\.agents \.a1 \.mood\{[^}]*overflow-wrap:break-word", text)
+    assert ".agents .atime,.agents .actx{white-space:nowrap}" in text  # "1h / 1h 0m" whole
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
@@ -3636,3 +3646,291 @@ def test_active_agents_row_links_all_carry_a_data_fk():
     block = h[h.index('<ul class="agents">'):h.index("</ul>")]
     assert block.count("<a ") >= 16                              # rows and the overflow
     assert block.count("<a ") == block.count('data-fk="')        # every link is keyed
+
+
+# ------------------------------------------------------- the claude usage ledger
+# The durable history of the REAL Claude calls (advisor ask/plan/rescue, swarm
+# claude-checks): one JSON line each, nine fields, no prompt text anywhere near it.
+
+LEDGER_KEYS = {"t", "kind", "call", "role", "model", "cost_usd", "seconds", "ok", "run"}
+
+
+def ledger_raw():
+    """The ledger as bytes on disk, or "" when nothing has been written yet."""
+    try:
+        with open(watch.claude_ledger_path(), encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def ledger_lines():
+    return [json.loads(x) for x in ledger_raw().splitlines() if x.strip()]
+
+
+def test_claude_ledger_records_advisor_and_claude_check_without_prompt_text(tmp_path):
+    """Both writers land in the one durable file, each keeping only the nine allowed
+    fields: a question, an item or an answer smuggled in on the record does not reach
+    the disk at all. The file is 0600 on posix, opened APPEND, and its run is a watch
+    id or null -- an owner PID (what QWEN_WATCH_PARENT carries) is not an id."""
+    now = time.time()
+    assert watch.record_claude_call({"kind": "advisor", "call": "ask", "role": "coder",
+                                     "model": "claude-opus-5", "cost_usd": 0.21,
+                                     "seconds": 12.5, "ok": True, "run": "ab12cd34ef56",
+                                     "question": "SECRET-QUESTION", "prompt": "SECRET-PROMPT"})
+    assert watch.record_claude_call({"kind": "claude-check", "call": "confirm-ui",
+                                     "role": "claude-check", "model": "sonnet",
+                                     "cost_usd": None, "seconds": 3.0, "ok": False,
+                                     "run": None, "item": "SECRET-ITEM",
+                                     "answer": "SECRET-ANSWER"})
+    assert watch.record_claude_call({"kind": "advisor", "call": "ask", "run": "31337"})
+    assert watch.claude_ledger_path() == str(tmp_path / "qwen-agent" / "claude-calls.jsonl")
+    raw = ledger_raw()
+    for secret in ("SECRET-QUESTION", "SECRET-PROMPT", "SECRET-ITEM", "SECRET-ANSWER",
+                   "question", "prompt", "item", "answer"):
+        assert secret not in raw
+    a, b, c = ledger_lines()
+    assert set(a) == LEDGER_KEYS and set(b) == LEDGER_KEYS and set(c) == LEDGER_KEYS
+    assert (a["kind"], a["call"], a["role"], a["model"]) == ("advisor", "ask", "coder",
+                                                             "claude-opus-5")
+    assert (a["cost_usd"], a["seconds"], a["ok"], a["run"]) == (0.21, 12.5, True,
+                                                                "ab12cd34ef56")
+    assert a["t"] >= now                                      # stamped when it landed
+    assert (b["kind"], b["call"], b["role"], b["ok"]) == ("claude-check", "confirm-ui",
+                                                          "claude-check", False)
+    assert b["cost_usd"] is None and b["run"] is None         # no run known: null
+    assert c["run"] is None                                   # a PID is not a watch id
+    if os.name == "posix":
+        assert os.stat(watch.claude_ledger_path()).st_mode & 0o777 == 0o600
+    # a line that does not parse (a writer cut off mid-append) is skipped, never raised,
+    # and a readable line with no stamp does not become "now" on the read side
+    with open(watch.claude_ledger_path(), "a", encoding="utf-8") as fh:
+        fh.write("not json at all\n" + json.dumps({"kind": "advisor", "call": "ask"}) + "\n")
+    assert watch.claude_summary()["all"]["n"] == 3
+
+
+def test_claude_ledger_run_stamp_register_sets_for_children(tmp_path, monkeypatch):
+    """register() stamps the run id into QWEN_WATCH_ID beside the child switches: a
+    descendant that records a call (the advisor's MCP server, a swarm unit) inherits
+    it, and record_claude_call takes the run from it when the caller knows none."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    rid = watch.register("swarm", "stamper", run_path=str(tmp_path / "r1"),
+                         start_server=False)
+    assert os.environ.get("QWEN_WATCH_ID") == rid
+    assert watch.record_claude_call({"kind": "advisor", "call": "ask", "model": "opus",
+                                     "cost_usd": 0.1, "seconds": 1.0, "ok": True})
+    assert ledger_lines()[-1]["run"] == rid
+
+
+def test_claude_ledger_write_error_never_fails_the_call(tmp_path, monkeypatch):
+    """The ledger is fire-and-forget: no error of its own -- the cache folder occupied
+    by a file, the ledger path itself a directory, a path function that raises -- may
+    fail or delay the call it records. It reports False and stays silent."""
+    rec = {"kind": "advisor", "call": "ask", "model": "opus", "cost_usd": 0.1,
+           "seconds": 2.0, "ok": True}
+    (tmp_path / "qwen-agent").write_text("occupied", encoding="utf-8")
+    assert watch.record_claude_call(rec) is False             # the folder cannot be made
+    (tmp_path / "qwen-agent").unlink()
+    os.makedirs(os.path.join(str(tmp_path), "qwen-agent", "claude-calls.jsonl"))
+    assert watch.record_claude_call(rec) is False             # the file cannot be opened
+
+    def boom():
+        raise RuntimeError("no path for you")
+
+    monkeypatch.setattr(watch, "claude_ledger_path", boom)
+    assert watch.record_claude_call(rec) is False             # not even a broken path
+    assert watch.record_claude_call("nope") is False          # not a record at all:
+                                                              # folded away before the
+                                                              # path is ever asked
+
+
+def test_claude_ledger_rereads_only_when_size_or_mtime_changes(tmp_path):
+    """The reader caches on (size, mtime): a rewrite of the same bytes at the same
+    instant is NOT noticed (the poll does not re-read a file nobody appended to), and
+    a fresh mtime is."""
+    assert watch.record_claude_call({"kind": "advisor", "call": "ask", "role": "coder",
+                                     "model": "m1", "cost_usd": 0.1, "seconds": 1,
+                                     "ok": True})
+    assert watch.claude_summary()["roles"][0]["models"] == {"m1": 1}
+    path = watch.claude_ledger_path()
+    st = os.stat(path)
+    data = ledger_raw()
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(data.replace('"m1"', '"m2"'))                # same bytes...
+    assert os.path.getsize(path) == st.st_size
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))       # ...written at the same stamp
+    assert watch.claude_summary()["roles"][0]["models"] == {"m1": 1}   # still the cached read
+    # a full second ahead: an ns bump could round back onto a coarse-filesystem stamp
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1000000000))
+    assert watch.claude_summary()["roles"][0]["models"] == {"m2": 1}   # noticed at last
+
+
+def test_claude_summary_buckets_today_week_roles_and_since():
+    """today counts from LOCAL midnight, week over the last 7 days, all over the file;
+    roles covers the week, most-called first; cost_usd sums the known costs and
+    unpriced counts the calls that reported none; since is the oldest stamp."""
+    now = time.time()
+    midnight = time.mktime(time.localtime(now)[:3] + (0, 0, 0, 0, 0, -1))
+    assert midnight <= now < midnight + 86400                 # the day the buckets read
+
+    def add(**over):
+        rec = {"kind": "advisor", "call": "ask", "role": "coder", "model": "opus",
+               "cost_usd": 0.1, "seconds": 5.0, "ok": True, "run": None}
+        rec.update(over)
+        assert watch.record_claude_call(rec)
+
+    # every stamp and the summary's clock come from ONE captured now: a wall clock
+    # crossing midnight mid-test must not move the buckets under the assertions
+    add(t=now)                                                # today
+    add(t=now, cost_usd=None, model="sonnet", call="rescue")  # today, no cost
+    add(t=midnight - 1, cost_usd=0.20, role="auditor", call="plan")   # yesterday: week
+    add(t=now - 8 * 86400, cost_usd=1.00)                     # last week: all only
+    s = watch.claude_summary(now)
+    assert (s["today"]["n"], s["today"]["unpriced"]) == (2, 1)
+    assert s["today"]["cost_usd"] == pytest.approx(0.10)
+    assert (s["week"]["n"], s["week"]["unpriced"]) == (3, 1)
+    assert s["week"]["cost_usd"] == pytest.approx(0.30)
+    assert (s["all"]["n"], s["all"]["unpriced"]) == (4, 1)
+    assert s["all"]["cost_usd"] == pytest.approx(1.30)
+    assert s["since"] == pytest.approx(now - 8 * 86400, abs=2)
+    coder, auditor = s["roles"]                               # n descending
+    assert (coder["role"], coder["n"], coder["unpriced"]) == ("coder", 2, 1)
+    assert coder["cost_usd"] == pytest.approx(0.10)
+    assert coder["models"] == {"opus": 1, "sonnet": 1} and coder["calls"] == {"ask": 1, "rescue": 1}
+    assert (auditor["role"], auditor["n"]) == ("auditor", 1)
+    assert auditor["cost_usd"] == pytest.approx(0.20) and auditor["unpriced"] == 0
+    assert auditor["models"] == {"opus": 1} and auditor["calls"] == {"plan": 1}
+
+
+def test_claude_summary_tolerates_a_missing_ledger_as_zeros(tmp_path):
+    """No file yet (nobody has called) is not an error: zero counts, no roles and
+    since null; an empty or junk file reads the same way."""
+    assert not os.path.exists(watch.claude_ledger_path())
+    s = watch.claude_summary()
+    assert s["today"]["n"] == 0 and s["week"]["n"] == 0 and s["all"]["n"] == 0
+    assert s["all"]["cost_usd"] == 0 and s["all"]["unpriced"] == 0
+    assert s["roles"] == [] and s["since"] is None
+    os.makedirs(os.path.dirname(watch.claude_ledger_path()))
+    with open(watch.claude_ledger_path(), "w", encoding="utf-8") as fh:
+        fh.write("garbage\n{not json\n")
+    assert watch.claude_summary()["all"]["n"] == 0
+    assert watch.claude_run_view({"id": "ab12cd34ef56"}) == {"n": 0, "cost_usd": 0.0,
+                                                             "unpriced": 0, "roles": []}
+
+
+def test_claude_summary_api_runs_and_run_carry_the_role_breakdown(tmp_path, monkeypatch):
+    """/api/runs answers a top-level `claude` (buckets + roles + since), and
+    /api/run/<id> its own `claude` -- the calls whose run is the run's id or one of
+    its child ids (a pointer registered under the run's own folder)."""
+    monkeypatch.delenv("QWEN_WATCH", raising=False)
+    run = tmp_path / "run"
+    write_events(run, [ev("run_start", workflow="swarm", goal="g")])
+    rid = watch.register("swarm", "ledger run", run_path=str(run), start_server=False)
+    child_id = "abcdef012345"                                 # nested under run/
+    watch._write_json(watch._pointer_path(child_id),
+                      pointer(id=child_id, run_path=str(run / "nested")))
+    now = time.time()
+    # register() stamped QWEN_WATCH_ID for its CHILDREN; these lines name their own
+    # runs, so the stamp goes (a plain pop: it must stay absent for the whole test)
+    os.environ.pop("QWEN_WATCH_ID", None)
+
+    def add(**over):
+        rec = {"kind": "advisor", "call": "ask", "role": "coder", "model": "opus",
+               "cost_usd": 0.10, "seconds": 2.0, "ok": True, "run": rid, "t": now}
+        rec.update(over)
+        assert watch.record_claude_call(rec)
+
+    add()                                                     # this run
+    add(run=child_id, role="auditor", call="rescue", cost_usd=0.25)   # its child
+    add(run=None, call="plan", cost_usd=None)                 # nobody's: overview only
+    add(run="ffffffffffff", model="sonnet")                   # another run's: not this page
+    httpd = watch.make_server("127.0.0.1", 0)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.02},
+                              daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:%d" % port
+    try:
+        def get(path):
+            with urllib.request.urlopen(base + path, timeout=10) as resp:
+                return json.loads(resp.read())
+        body = get("/api/runs")
+        assert sorted(r["id"] for r in body["runs"]) == sorted([rid, child_id])
+        c = body["claude"]                                    # beside runs and page
+        assert set(c) == {"today", "week", "all", "roles", "since"}
+        assert c["all"]["n"] == 4 and c["today"]["n"] == 4
+        assert c["today"]["unpriced"] == 1
+        assert c["today"]["cost_usd"] == pytest.approx(0.45)
+        assert [g["role"] for g in c["roles"]] == ["coder", "auditor"]   # n descending
+        d = get("/api/run/" + rid)["claude"]                  # the run plus its child
+        assert d["n"] == 2 and d["unpriced"] == 0
+        assert d["cost_usd"] == pytest.approx(0.35)
+        assert [(g["role"], g["n"], g["calls"]) for g in d["roles"]] == [
+            ("auditor", 1, {"rescue": 1}), ("coder", 1, {"ask": 1})]   # ties: by name
+        kid = get("/api/run/" + child_id)["claude"]           # the child on its own too
+        assert kid["n"] == 1 and kid["roles"][0]["role"] == "auditor"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=10)
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_claude_usage_panel_has_the_role_sections_and_a_collapse_button():
+    """The overview's Claude usage panel: the heading and the one-line summary
+    ("3 calls today, $0.42 · 18 this week, $2.10"), one section per role with its
+    count, cost, models and calls broken down, and the whole thing behind a REAL
+    aria-expanded button with its own data-fk whose state survives the poll in
+    localStorage (wrapped) -- collapsed on phones with no stored choice, and quiet
+    on one line when there has never been a call. A cost above 0 that rounds to
+    zero reads "<$0.01", and the calls without one are counted."""
+    full = ('claudeData={today:{n:3,cost_usd:0.42,unpriced:0},'
+            'week:{n:18,cost_usd:2.10,unpriced:0},all:{n:18,cost_usd:2.10,unpriced:0},'
+            'roles:[{role:"coder",n:6,cost_usd:0.80,unpriced:0,'
+            'models:{opus:5,sonnet:1},calls:{ask:4,rescue:2}}],since:1};')
+    h = _page_html(full + 'overview([{id:"bbbbbbbbbbbb",kind:"agent",state:"running",'
+                          'title:"u",elapsed:5}])')
+    assert '<section class="claude" data-sec="claude">' in h   # one section, own data-sec
+    assert h.index('class="claude"') < h.index('class="floor"')  # at the TOP of the page
+    assert "<h2>Claude usage</h2>" in h
+    assert "3 calls today, $0.42" in h and "18 this week, $2.10" in h
+    assert "coder</b>: 6 calls, $0.80" in h                 # the role section
+    assert "opus 5" in h and "sonnet 1" in h                # models used, with counts
+    assert "(ask 4, rescue 2)" in h                         # and the calls inside it
+    assert 'aria-expanded="true"' in h and 'data-fk="claude"' in h
+    assert 'aria-controls="claude-body"' in h and 'id="claude-body"' in h
+    # every control still carries its focus key (the audit's balance, panel included)
+    assert _page_true(full + 'var h=overview([{id:"bbbbbbbbbbbb",kind:"agent",'
+                        'state:"ended",exit:0,title:"u",elapsed:5,end:1}]);'
+                      '(h.match(/<(a|button|summary)[\\s>]/g)||[]).length==='
+                      '(h.match(/data-fk="/g)||[]).length')
+    # zero calls ever: the one quiet line, and nothing to expand
+    h = _page_html('claudeData={today:{n:0,cost_usd:0,unpriced:0},week:{n:0,cost_usd:0,'
+                   'unpriced:0},all:{n:0,cost_usd:0,unpriced:0},roles:[],since:null};'
+                   'overview([])')
+    sec = h[h.index('<section class="claude"'):]
+    assert "No Claude calls yet. Advisor and claude-check calls show up here." in sec
+    assert "<button" not in sec
+    # rounding and the unpriced count
+    h = _page_html('claudeData={today:{n:1,cost_usd:0.004,unpriced:1},week:{n:1,'
+                   'cost_usd:0.004,unpriced:1},all:{n:1,cost_usd:0.004,unpriced:1},'
+                   'roles:[{role:"x",n:1,cost_usd:0.004,unpriced:1,models:{},calls:{}}],'
+                   'since:1};overview([])')
+    assert "<$0.01" in h and "(1 without a cost)" in h
+    assert _page_true('fmtCost(0)===\'$0.00\'&&fmtCost(0.004)===\'<$0.01\'&&'
+                      'fmtCost(0.42)===\'$0.42\'&&fmtCost(2.1)===\'$2.10\'&&'
+                      'fmtCost(null)===\'$0.00\'')
+    # the stored choice: localStorage wrapped, phones start collapsed (the ≤480 px
+    # of the page's own media query, read off the viewport width)
+    fn = _page_fn("claudeOpen")
+    assert "try{" in fn and "localStorage.getItem(CLAUDE_KEY)" in fn
+    assert "innerWidth" in fn and "480" in fn
+    assert "localStorage.setItem(CLAUDE_KEY" in _page_fn("setClaudeOpen")
+    assert '<section class="claude" data-sec="claude">' in page_text()  # the CSS card
+    # the run page: the same breakdown when the run made calls, silence when not
+    assert _page_true('claudeRunPanel(null)===""&&claudeRunPanel({n:0})===""')
+    h = _page_html('claudeRunPanel({n:2,cost_usd:0.35,unpriced:0,roles:[{role:"coder",'
+                   'n:2,cost_usd:0.35,unpriced:0,models:{opus:2},calls:{ask:2}}]})')
+    assert "<h2>Claude calls <small>" in h and "2 calls, $0.35" in h
+    assert "coder</b>: 2 calls" in h and "(ask 2)" in h
+    assert "claudeRunPanel(r.claude)" in _page_fn("detail")

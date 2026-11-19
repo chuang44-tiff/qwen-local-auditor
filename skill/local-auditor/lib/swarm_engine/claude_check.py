@@ -403,6 +403,17 @@ def record(wf, name, iid, model, state, why, rec):
         wf.claude_cost_usd += rec["cost_usd"]
     events.emit(wf.run_dir, "claude_call", name=name, item=iid, state=state,
                 seconds=rec["seconds"], cost_usd=rec["cost_usd"])
+    # the durable usage ledger (lib/watch.py): this file sits with the run and the
+    # registry prunes it, so the watch page counts real Claude calls from there. Same
+    # fields, none of them the item text or the prompt. record_claude_call swallows
+    # every error itself; the import guard covers a tree without watch.py.
+    try:
+        from lib import watch
+        watch.record_claude_call({"kind": "claude-check", "call": name, "role": ROLE,
+                                  "model": model, "cost_usd": rec["cost_usd"],
+                                  "seconds": rec["seconds"], "ok": state == "ok"})
+    except Exception:
+        pass
 
 
 def _dry(wf, text, item, parse):

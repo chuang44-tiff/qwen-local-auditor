@@ -825,6 +825,48 @@ def test_totals_keep_their_keys_without_claude_calls(tmp_path):
     assert sorted(wf.totals()) == ["agents_run", "invocations", "seconds", "tokens"]
 
 
+@posix_only
+def test_record_appends_a_watch_ledger_line_for_every_check_call(tmp_path, fake_cc,
+                                                                  monkeypatch):
+    """Every call record() writes also lands in lib/watch.py's durable usage ledger
+    (the watch page's Claude usage panel): kind claude-check, the check's NAME as its
+    call, role claude-check, the model, the cost and seconds, ok only for a call that
+    came back ok -- and the run id of the registered run from the environment
+    (QWEN_WATCH_ID). The prompt, the item id and the answer are never in it."""
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    monkeypatch.setenv("QWEN_WATCH_ID", "ab12cd34ef56")
+    monkeypatch.delenv("QWEN_WATCH_PARENT", raising=False)
+    wf = workflow(tmp_path)
+    wf.claude_check("c", [{"id": "A"}, {"id": "T", "mode": "maxturns"}], ask, parse,
+                   model="opus", max_calls=5)
+    p = cache / "qwen-agent" / "claude-calls.jsonl"
+    raw = p.read_text(encoding="utf-8")
+    for secret in ("ITEM", "MODE", "check ", "seen"):         # no prompt, no item, no answer
+        assert secret not in raw
+    recs = [json.loads(x) for x in raw.splitlines()]
+    assert len(recs) == 2
+    assert all(set(r) == {"t", "kind", "call", "role", "model", "cost_usd", "seconds",
+                          "ok", "run"} for r in recs)
+    assert [(r["kind"], r["call"], r["role"], r["model"], r["cost_usd"], r["ok"],
+             r["run"]) for r in recs] == [
+        ("claude-check", "c", "claude-check", "opus", 0.25, True, "ab12cd34ef56"),
+        ("claude-check", "c", "claude-check", "opus", 0.25, False, "ab12cd34ef56")]
+    # a cached answer makes no call and writes no ledger line (the workflow is fresh
+    # again -- but the artifact remembers), and an unregistered run records run null
+    wf = workflow(tmp_path)
+    wf.claude_check("c", [{"id": "A"}], ask, parse, model="opus", max_calls=5)
+    assert len(p.read_text(encoding="utf-8").splitlines()) == 2   # cache hit: no new line
+    monkeypatch.delenv("QWEN_WATCH_ID")
+    monkeypatch.delenv("QWEN_WATCH_PARENT", raising=False)
+    wf = workflow(tmp_path)
+    wf.claude_check("d", [{"id": "A"}], ask, parse, model="sonnet", max_calls=5)
+    recs = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()]
+    assert len(recs) == 3
+    assert recs[-1]["run"] is None and recs[-1]["model"] == "sonnet"
+    assert recs[-1]["call"] == "d" and recs[-1]["ok"] is True
+
+
 def test_check_dry_run_starts_nothing_and_records_the_calls(tmp_path, monkeypatch):
     from lib.swarm_engine import check
     monkeypatch.setenv("QWEN_CLAUDE_BIN", str(tmp_path / "must-not-run"))
