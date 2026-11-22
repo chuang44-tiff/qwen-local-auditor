@@ -578,7 +578,13 @@ class Driver:
                     continue
                 return
             self._graced = False
-            if self.proc.poll() is not None:
+            if self.proc.poll() is not None or self.eof_seen:
+                # A closed stdout can never emit another result or echo, so the turn
+                # is over: returning lets run() close stdin (_close_stdin), which also
+                # unblocks a child whose own exit waits on its stdin (the Windows
+                # hang: claude finished writing, then stalled in os._exit until stdin
+                # closed -- and stdin only closed after _machine returned). eof_seen is
+                # set under self.cond; reading the bool plainly is fine.
                 self.reader.join(2.0)                          # drain the last lines first:
                 return                                         # late results and echoes
             with self.cond:
@@ -695,7 +701,10 @@ class Driver:
             if self.signum is None:
                 self._close_stdin()
                 with contextlib.suppress(Exception):
-                    self.proc.wait()
+                    # Bounded: a child that still will not exit after its stdin closed
+                    # must not hang us either -- the timeout (or any wait error) falls
+                    # through to the finally's _kill_group().
+                    self.proc.wait(timeout=KILL_WAIT * 5)
         except Exception as e:                      # abnormal finally: never leak claude
             self._warn("internal error (%s): stopping claude" % e)
         finally:

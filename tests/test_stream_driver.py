@@ -85,14 +85,7 @@ class Run:
             env["QWEN_WATCH_ACTIVITY"] = str(self.tmp / "activity.jsonl")
         env.update(env_extra or {})
         self.env = env
-        # Windows hang diagnosis: start the driver under faulthandler so a driver that
-        # outlives wait()'s deadline prints every thread's stack to its stderr first
-        # (surfaced in the "driver hung" message). POSIX launches are unchanged.
-        boot = ([sys.executable, "-c",
-                 "import faulthandler, runpy, sys; faulthandler.dump_traceback_later(20);"
-                 " sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')"]
-                if os.name == "nt" else [sys.executable])
-        argv = boot + [str(DRIVER), "--inbox", str(self.inbox),
+        argv = [sys.executable, str(DRIVER), "--inbox", str(self.inbox),
                 "--prompt-file", str(self.prompt_file), "--raw", str(self.raw)]
         if defer:
             argv.append("--defer-on-end")
@@ -386,6 +379,34 @@ def test_crash_before_result_leaves_raw_empty(tmp_path):
         assert run.raw.exists()
         assert run.raw.read_text(encoding="utf-8") == ""   # no result ever -> empty $RAW
         assert run.log() == []                        # no note touched: no log at all
+    finally:
+        run.cleanup()
+
+
+def test_stdout_eof_closes_stdin_and_ends_the_run(tmp_path):
+    # The Windows CI hang reproduced on POSIX (fake mode eof_then_wait_stdin): the
+    # fake closes its stdout for real after prompt + thinking + text and only exits
+    # once the driver closes its stdin. A driver that waits for poll() alone would
+    # loop on its poll interval forever here -- "driver hung". The note is planted
+    # before the launch so the machine's very first forward pass takes it (stdout
+    # cannot have reached EOF before the prompt is even echoed): it is written, and
+    # never echoed.
+    run = Run(tmp_path, mode="eof_then_wait_stdin", gated=False, poll="100",
+              start=False)
+    try:
+        nid = run.queue()
+        run.launch()
+        assert run.wait() == 1                           # claude's exit 1 propagates
+        assert run.raw.exists()
+        assert run.raw.read_text(encoding="utf-8") == ""   # no result ever -> empty $RAW
+        run.marker("m_stdin_eof")                        # the fake saw stdin close, and
+                                                         # it exited before the driver did
+        recs = [r for r in run.log() if r["id"] == nid]
+        assert [r["state"] for r in recs] == ["queued", "undelivered"]
+        assert recs[1]["reason"] == "crashed"            # forwarded, never echoed
+        assert sorted(os.listdir(str(run.inbox / notes.UNDELIVERED))) == [nid + ".json"]
+        assert os.listdir(str(run.inbox / notes.NEW)) == []
+        assert os.listdir(str(run.inbox / notes.DELIVERED)) == []
     finally:
         run.cleanup()
 

@@ -11,7 +11,8 @@ user line opens the next turn (k = 2, 3, 4, ...).
 Knobs (env vars):
   FAKE_STREAM_MODE          ok (default) | crash_before_result | crash_mid_turn2 |
                             ignoreterm | spawn_child | big_line |
-                            exit126_after_output | slow_tool  -- unknown: stderr + exit 2
+                            exit126_after_output | slow_tool | eof_then_wait_stdin
+                            -- unknown: stderr + exit 2
   FAKE_MARKER_DIR           directory; each step drops an atomic marker file named below
   FAKE_GATE_DIR             directory; the fake parks at the gates below until a file
                             with the gate's exact name exists (0.02 s poll, 30 s give-up
@@ -22,7 +23,8 @@ Knobs (env vars):
   FAKE_STREAM_TOOL_SECONDS  float, default 1.5 (slow_tool's sleep inside the tool)
 
 Markers: m_prompt_got m_prompt_echoed m_tool1 m_tool_waited m_note_echoed
-m_pre_result1 m_result1 m_crash2_pre m_note<k> m_result<k>.  Gates: g_tool g_result1.
+m_pre_result1 m_result1 m_crash2_pre m_stdout_closed m_stdin_eof m_note<k>
+m_result<k>.  Gates: g_tool g_result1.
 """
 import json
 import os
@@ -35,7 +37,7 @@ import time
 
 SESSION_ID = "fake-stream-session-1"
 MODES = {"ok", "crash_before_result", "crash_mid_turn2", "ignoreterm", "spawn_child",
-         "big_line", "exit126_after_output", "slow_tool"}
+         "big_line", "exit126_after_output", "slow_tool", "eof_then_wait_stdin"}
 USAGE = ("usage: python tests/fake_claude_stream.py [other flags] --input-format "
          "stream-json --output-format stream-json --verbose --replay-user-messages")
 # The spawn_child decoy: a real second process that shrugs off SIGTERM, so only a
@@ -255,6 +257,24 @@ def main():
         emit(thinking(1))
         emit(text(1))
         _exit(1)  # no result, ever
+
+    if mode == "eof_then_wait_stdin":
+        # The Windows hang reproduced on POSIX: stdout says the turn is over, the
+        # process says it exits only once its stdin closes -- the two wait on each
+        # other unless the driver treats stdout EOF as the end of the run.
+        emit(thinking(1))
+        emit(text(1))
+        sys.stdout.flush()
+        os.close(1)                     # the driver's reader sees a real stdout EOF...
+        try:
+            sys.stdout.close()          # ...and no half-flushed wrapper ever writes fd 1
+        except OSError:
+            pass
+        marker("m_stdout_closed")
+        while NOTES.get() is not None:  # the daemon reader's EOF sentinel ends the wait:
+            pass                        # the driver closed our stdin (items before it: notes)
+        marker("m_stdin_eof")           # the test's witness that stdin really closed
+        os._exit(1)                     # and only now does the "claude" finish exiting
 
     if mode == "big_line":
         emit({"type": "assistant", "message": {"content": [
