@@ -1231,6 +1231,9 @@ time.sleep(120)
 '''
 
 
+@pytest.mark.skipif(os.name == "nt", reason="on Windows the timeout kill ends the"
+                    " driver without a chance to write the last finished turn, so the"
+                    " run reports 'TIMEOUT ... no result' like the old argv launch")
 def test_stream_on_timeout_labels_the_payload_last_finished_turn(tmp_path, server):   # noqa: F811
     # 4.3: TIMEOUT with a non-empty $RAW still prints the payload to stderr -- and
     # since the streamed driver only ever writes FINISHED turns there, the message

@@ -478,20 +478,28 @@ def test_parity_single_shot_prompt_file(tmp_path, server):                # noqa
     E2BIG ("Argument list too long") before claude is started -- while the driver's
     launch writes the same text to a prompt file and streams it, and it arrives whole.
     The byte-for-byte comparison of the two launches therefore runs on the same-shaped
-    prompt at 96 KiB, the size both paths can carry; the 200 KiB one runs on both
-    paths and is asserted to reach only one of them -- and that last, exit-8 half is a
-    Linux-only premise (only Linux caps a single argument at MAX_ARG_STRLEN), so it is
-    gated on sys.platform while the streamed 200 KiB half runs everywhere."""
+    prompt at a size both paths can carry -- 96 KiB, but 24 KiB on Windows, where the
+    whole command line is capped at 32,767 characters (CreateProcess) and the argv-mode
+    launch could not carry 96 KiB plus the run's other flags; the 200 KiB one runs on
+    both paths and is asserted to reach only one of them -- and that last, exit-8 half
+    is a Linux-only premise (only Linux caps a single argument at MAX_ARG_STRLEN), so
+    it is gated on sys.platform while the streamed 200 KiB half runs everywhere."""
     head = ("Review the login flow, then answer.\n"
             "--this-line-starts-with-the-argv-guard\n"
             "“ünïcødé” ⚙ 漢字 🎯 – ño ã accéntos\n")
-    fits = head + ("x" * 63 + "\n") * (96 * 1024 // 64)       # one argv slot's worth
+    # Windows caps a WHOLE command line at 32,767 characters (CreateProcess), so the
+    # argv-mode launch there could not carry the 96 KiB prompt: the exec dies with
+    # E2BIG ("Argument list too long", exit 8) before the fake witnesses a launch.
+    # 24 KiB keeps the same shape -- non-ASCII, a leading `--` line, a trailing
+    # newline -- with room for the rest of the line (flags, role text, model name).
+    fits_size = 24 * 1024 if os.name == "nt" else 96 * 1024
+    fits = head + ("x" * 63 + "\n") * (fits_size // 64)        # one argv slot's worth
     oversized = head + ("x" * 63 + "\n") * (200 * 1024 // 64)  # past MAX_ARG_STRLEN
     fits_file = tmp_path / "prompt.md"
     fits_file.write_bytes(fits.encode("utf-8"))         # ends on a trailing \n
     big_file = tmp_path / "prompt-200k.md"
     big_file.write_bytes(oversized.encode("utf-8"))
-    assert len(fits_file.read_bytes()) == len(head.encode("utf-8")) + 96 * 1024
+    assert len(fits_file.read_bytes()) == len(head.encode("utf-8")) + fits_size
     assert len(big_file.read_bytes()) == len(head.encode("utf-8")) + 200 * 1024
 
     args = ["-r", "auditor", "--json", "-f", posix(fits_file)]
@@ -504,7 +512,7 @@ def test_parity_single_shot_prompt_file(tmp_path, server):                # noqa
     assert argv_prompt.endswith("x")
     assert "--this-line-starts-with-the-argv-guard" in argv_prompt
     assert "“ünïcødé” ⚙ 漢字 🎯" in argv_prompt
-    assert len(argv_prompt.encode("utf-8")) >= 96 * 1024
+    assert len(argv_prompt.encode("utf-8")) >= fits_size
 
     assert_parity(argv_rec, stream_rec, argv_prompt, run_id=stream_id,
                   per_run=[tmp_path, watch_cache(tmp_path)])

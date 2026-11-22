@@ -163,7 +163,9 @@ class Run:
                 self.p.kill()
         for pid in self._recorded_pids():
             with contextlib.suppress(OSError):
-                os.kill(pid, signal.SIGKILL)
+                # Windows has no SIGKILL; there os.kill with SIGTERM calls
+                # TerminateProcess -- the same hard kill.
+                os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
 
     def wait(self, timeout=25):
         """The driver's exit code; a driver that will not exit is killed and the test

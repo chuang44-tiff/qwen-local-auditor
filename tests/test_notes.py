@@ -103,12 +103,19 @@ def read_log_lines(inbox):
             if raw.strip()]
 
 
-def run_cli(env, tmp_path, args, input=None, timeout=30):
+def run_cli(env, tmp_path, args, input=None, timeout=30, text=True):
     """The CLI as a child: subprocess.run with a timeout -- run() kills and drains on
-    expiry, so no CLI child can outlive the test that spawned it."""
+    expiry, so no CLI child can outlive the test that spawned it.
+
+    text=False switches the pipes off text mode: pass `input` as BYTES and the child's
+    stdin receives exactly those bytes on every platform (Windows text mode rewrites
+    \\n to \\r\\n on the way through the pipe), with res.stdout/stderr coming back as
+    bytes for the caller to decode."""
     cmd = [sys.executable, str(NOTES_PY)] + list(args)
-    kw = dict(env=env, capture_output=True, encoding="utf-8", errors="replace",
-              cwd=str(tmp_path), timeout=timeout)
+    kw = dict(env=env, capture_output=True, cwd=str(tmp_path), timeout=timeout)
+    if text:
+        kw["encoding"] = "utf-8"
+        kw["errors"] = "replace"
     if input is None:
         kw["stdin"] = subprocess.DEVNULL       # never let a child wait on the test's stdin
     else:
@@ -471,9 +478,14 @@ def test_send_dashdash_leading_dash(note_env, tmp_path):
 def test_send_f_stdin(note_env, tmp_path):
     cache, env = note_env
     addr, inbox = live_agent(cache)
-    res = run_cli(env, tmp_path, ["send", addr, "-f", "-"], input="from stdin\n")
+    # bytes with text=False: notes.py reads stdin.buffer and stores verbatim, so on
+    # Windows a text-mode \n would arrive as \r\n and be stored that way -- feeding
+    # raw bytes sends exactly "from stdin\n" on every platform
+    res = run_cli(env, tmp_path, ["send", addr, "-f", "-"],
+                  input=b"from stdin\n", text=False)
     assert res.returncode == 0, res.stderr
-    nid = res.stdout[:-1]
+    # binary pipes: stdout is the id line as the child WROTE it (Windows adds a \r)
+    nid = res.stdout.decode("utf-8").strip()
     body = json.loads((inbox / notes.NEW / (nid + ".json")).read_text(encoding="utf-8"))
     assert body["text"] == "from stdin\n"               # stored verbatim, newline and all
 
