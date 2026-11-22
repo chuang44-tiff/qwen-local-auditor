@@ -22,10 +22,12 @@ import lib.research as rs
 from test_research import FAKE, env  # noqa: F401  (the fixture is used by name)
 
 # events.jsonl is the one addition since the release: the engine's progress stream
-# (lib/swarm_engine/events.py), written by every workflow's runs
+# (lib/swarm_engine/events.py), written by every workflow's runs. inbox/ came with
+# phase-1 messaging: the per-unit note inboxes of this RUN (spec 4.2), created by
+# Swarm.run_unit before the unit_start event.
 PART_B_FILES = ["agents", "angles.json", "claims.json", "config.json", "events.jsonl",
-                "fetch_stats.json", "mcp.json", "pages", "question.md", "report.md",
-                "run.log", "totals.json", "urls.json", "votes.json"]
+                "fetch_stats.json", "inbox", "mcp.json", "pages", "question.md",
+                "report.md", "run.log", "totals.json", "urls.json", "votes.json"]
 PART_B_CFG_KEYS = ["question", "depth", "angles", "sources", "claims", "voters", "max_agents",
                    "max_items", "timeout_per_item", "retries", "effort", "role_effort",
                    "hours", "deadline"]

@@ -68,9 +68,13 @@ def _no_outer_watch_run_for_the_session():
     whatever the outer run set comes back when the session ends."""
     names = ("QWEN_WATCH_ACTIVITY", "QWEN_WATCH_PARENT",
              "QWEN_WATCH_CHILD", "QWEN_WATCH_CTX_WINDOW", "QWEN_WATCH_ID",
+             "QWEN_INBOX", "QWEN_INBOX_DEFER",
              "QA_ROLE")   # the ledger's run stamp and the advisor's recorded role:
                          # neither is the suite's -- a run started under an agent with
-                         # -r would otherwise stamp its role into every ledger line
+                         # -r would otherwise stamp its role into every ledger line.
+                         # The two messaging vars go the same way: they name an outer
+                         # run's inbox, and a launcher that found one inherited would
+                         # stream notes into the suite's own runs (spec 4.2/P5).
     saved = {name: os.environ.get(name) for name in names}
     for name in names:
         os.environ.pop(name, None)

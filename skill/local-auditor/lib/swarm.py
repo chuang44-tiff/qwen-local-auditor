@@ -37,6 +37,7 @@ import subprocess
 import threading
 import time
 
+from lib import notes
 from lib.swarm_engine import events
 
 AGENT_PREFLIGHT, AGENT_APIERR = 3, 4
@@ -352,7 +353,8 @@ class Swarm:
             if self._stopping.is_set():
                 # the same well-formed record shape a real call returns: the caller
                 # reads rec["tokens"]/rec["result"] without guarding for a bare string
-                return -1, {"result": "", "session": "", "tokens": tokens}, "interrupted"
+                return -1, {"result": "", "session": "", "tokens": tokens,
+                            "notes_delivered": 0}, "interrupted"
             # env is None for every unit that names no extra variables: those keep the
             # plain one-argument spawn call, the shape a caller that swaps _spawn out
             # for its own replaces
@@ -369,7 +371,13 @@ class Swarm:
                 break
             time.sleep(self.backoff)
         result = rec.get("result") if isinstance(rec.get("result"), str) else ""
-        return rc, {"result": result, "session": rec.get("session_id") or "", "tokens": tokens}, err
+        # P6: the additive notes_delivered comes along for K3's steered tracking (0 on
+        # the old un-streamed path, where the record never carries the key).
+        nd = rec.get("notes_delivered")
+        if not isinstance(nd, int) or isinstance(nd, bool) or nd < 0:
+            nd = 0
+        return rc, {"result": result, "session": rec.get("session_id") or "",
+                    "tokens": tokens, "notes_delivered": nd}, err
 
     def stop_all(self):
         self._stopping.set()
@@ -478,6 +486,20 @@ class Swarm:
         # for a review-round unit the halved number _argv hands the call -- so the page's
         # per-agent bar counts down the same clock the watchdog does.
         timeout = min(self.timeout if u.timeout is None else u.timeout, self.max_unit_seconds)
+        # K2/P3: the unit's own inbox (RUN/inbox/<unit>/, spec 4.2) exists BEFORE the
+        # unit_start event names it as running -- an address the watch fold lets people
+        # send notes to must already answer. init_inbox also removes a stale `.closed`
+        # an interrupted earlier run left (qwen-swarm --resume). QWEN_STREAM=0 creates
+        # nothing at all (P5); an inbox that cannot be built leaves this unit on the
+        # plain old path: today's argv, byte for byte.
+        unit_inbox = None
+        if os.environ.get("QWEN_STREAM", "1") != "0":
+            candidate = str(self.run_dir / "inbox" / u.name)
+            try:
+                notes.init_inbox(candidate)
+                unit_inbox = candidate
+            except (notes.NotesError, OSError):
+                unit_inbox = None
         self._event("unit_start", u, timeout=_deep_cut(timeout, u.deep) if u.deep else timeout)
         start = time.time()
         rc, tokens, status = -1, 0, "ok"
@@ -497,7 +519,19 @@ class Swarm:
             with contextlib.suppress(OSError):
                 self.activity_dir.mkdir(parents=True, exist_ok=True)
             extra["QWEN_WATCH_ACTIVITY"] = str(self.activity_dir / ("%s.jsonl" % u.name))
+        # The first call and plain retries carry the inbox and are steerable; the swarm
+        # NEVER defers (P2): a note the session never got simply stays in new/, and the
+        # next call of this unit or the finally's close_inbox decides its fate, so
+        # --wait reports the real outcome. Only when an inbox exists for this unit is
+        # the env extended at all: a stream-off run keeps env None and the plain
+        # one-argument _spawn(argv) (K3).
+        if unit_inbox is not None:
+            extra["QWEN_INBOX"] = unit_inbox
         env = None if not extra else dict(os.environ, **extra)
+        # REPAIR runs get no inbox (spec 4.6): the repair only re-asks for an answer in
+        # the right shape -- it is a continuation of the attempt, not a session to steer.
+        _repair_extra = {k: v for k, v in extra.items() if k != "QWEN_INBOX"}
+        env_repair = None if not _repair_extra else dict(os.environ, **_repair_extra)
         set_up = False
         try:
             (self.agents_dir / u.name).mkdir(parents=True, exist_ok=True)
@@ -510,12 +544,16 @@ class Swarm:
             prompt_path.write_bytes(u.prompt.encode("utf-8", "replace"))
             why, data, attempt, retryable = "", None, 0, False
             while True:
+                # K3: does THIS attempt's answer depend on a note? Reset by every fresh
+                # retry; the repair inherits the attempt it repairs (it ORs in below).
+                steered = False
                 for suffix in (".out", ".repair.out"):    # each attempt starts from clean files
                     with contextlib.suppress(OSError):
                         os.unlink(self.agents_dir / ("%s%s" % (u.name, suffix)))
                 t_start, tokens_before = time.time(), tokens
                 rc, rec, err = self._call(self._argv(u, prompt_path, timeout), env)
                 tokens += rec["tokens"]
+                steered = steered or bool(rec.get("notes_delivered"))
                 status = "ok"
                 with self._lock:
                     self.agents_run += 1
@@ -549,8 +587,11 @@ class Swarm:
                             # the repair keeps this attempt's timeout: it is a
                             # continuation of the attempt, not a new one
                             rc, rec2, err = self._call(
-                                self._argv(u, repair, timeout, resume=rec["session"]), env)
+                                self._argv(u, repair, timeout, resume=rec["session"]), env_repair)
                             tokens += rec2["tokens"]   # on any rc, count the repair record's usage
+                            # the repair continues this attempt: it inherits steered and
+                            # adds any note its own (un-inboxed) call somehow saw
+                            steered = steered or bool(rec2.get("notes_delivered"))
                             if rc == 0:
                                 (self.agents_dir / ("%s.repair.out" % u.name)).write_bytes(
                                     rec2["result"].encode("utf-8", "surrogateescape"))
@@ -598,19 +639,34 @@ class Swarm:
                         self.dropped += 1
                     self._event("unit_dropped", u, why=why)
             else:
-                out_path = self.agents_dir / ("%s.json" % u.name)
-                tmp_path = self.agents_dir / ("%s.json.tmp" % u.name)
-                # bytes through surrogateescape: parsed data may carry a non-UTF-8 byte of
-                # a patch as a lone surrogate, and the cache must hold the exact bytes.
-                tmp_path.write_bytes(json.dumps({"data": data, "key": self._key(u)},
-                                                ensure_ascii=False, indent=1)
-                                     .encode("utf-8", "surrogateescape"))
-                os.replace(tmp_path, out_path)
+                # K3: a session that received a note answered that note -- its answer is
+                # not the answer the unsteered cache key asks for, so it must never be
+                # handed to a later run as if it were. An unsteered answer caches
+                # exactly as always (bytes through surrogateescape: parsed data may
+                # carry a non-UTF-8 byte of a patch as a lone surrogate, and the cache
+                # must hold the exact bytes).
+                if not steered:
+                    out_path = self.agents_dir / ("%s.json" % u.name)
+                    tmp_path = self.agents_dir / ("%s.json.tmp" % u.name)
+                    tmp_path.write_bytes(json.dumps({"data": data, "key": self._key(u)},
+                                                    ensure_ascii=False, indent=1)
+                                         .encode("utf-8", "surrogateescape"))
+                    os.replace(tmp_path, out_path)
                 res.update(ok=True, data=data)
         except Exception as e:      # a crashing parse still leaves the unit logged below
             res["why"] = "internal error: %s" % type(e).__name__
             raise
         finally:
+            # 4.6/4.7: every started unit closes its inbox on the way out -- `.closed`
+            # is written and any note still pending in new/ is moved to undelivered/ and
+            # logged `undelivered: run_ended`, so a note sent in the window between the
+            # session's end and here is never silently left queued. Only an inbox that
+            # really exists is swept; close_inbox itself is the idempotent owner sweep.
+            if unit_inbox is not None:
+                try:
+                    notes.close_inbox(unit_inbox, "run_ended")
+                except (notes.NotesError, OSError):
+                    pass
             if set_up and u.teardown is not None:
                 with contextlib.suppress(Exception):     # cleanup must not mask the result
                     u.teardown()

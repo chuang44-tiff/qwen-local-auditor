@@ -766,3 +766,36 @@ The rule that makes the output worth having: ask for extraction, not judgment. "
 this line do, cite it" is reliable; "is this good" is not. Hand it path headers: citations
 were 35/35 correct when the context carried real paths, and ~40% were bare filenames when
 it explored freely.
+
+## Steer a running agent
+
+The main session can message one running agent without waiting for it: a note arrives as a
+plain user message at the agent's next model call — it keeps its context and its work.
+
+```bash
+qwen-agent --send 1a2b3c4d5e6f "check the retry path too"   # queues, prints the note id, returns
+qwen-agent --send 1a2b3c4d5e6f/coder --wait 60 -f note.md
+qwen-agent --notes 1a2b3c4d5e6f
+```
+
+`ADDRESS` is the 12-hex id the run's `watch:` line prints: `<run id>` for a single-shot or
+sweep batch and for an until-done loop (the note goes to the live round, or is carried into
+the next one), `<run id>/<unit>` for a swarm or research unit. A sweep batch's id lives in
+that batch's `bNN/stderr.txt` (`qwen-sweep`). Options come before TEXT; `--` lets a TEXT
+start with a dash. `--send` returns at once; with `--wait SECONDS` (1..3600) it also waits
+and prints the outcome after the id: `delivered at HH:MM:SS` (exit 0), `still queued` (10),
+`undelivered: <reason>` (11) or `deferred to the next round` (12). Exit 2 is usage (bad
+address; empty text; text over 8,000 characters or 32 KiB), exit 3 unavailable (no such
+run, not running, closed inbox, dead pid).
+
+`--notes ADDRESS` lists every note the agent received or missed, one row per note:
+`HH:MM:SS  state[: reason]  id  first 80 characters`.
+
+A note is text only: it never grants permissions, budget or tools, and never ends a run
+early. A note an until-done loop missed is carried into the next round's prompt ("Notes from
+the main session"); notes still pending when the loop ends are listed in report.md under
+`## Steering notes`. Note text never enters the note log (only ids, states and lengths), and
+the agent's raw thinking never reaches any file the main session reads.
+
+The streamed launch is the default for headless runs that own an inbox; `QWEN_STREAM=0`
+restores the old launch exactly and creates no inbox anywhere — such runs refuse `--send`.

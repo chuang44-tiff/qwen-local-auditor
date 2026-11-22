@@ -681,9 +681,9 @@ def test_stopping_unit_is_not_retried(tmp_path, fake):
     u.retries = 3
     spawn = s._spawn
 
-    def spawn_and_stop(argv):                        # the stop lands just after the first try
-        out = spawn(argv)
-        s.stop_all()
+    def spawn_and_stop(argv, env=None):   # the stop lands just after the first try
+        out = spawn(argv, env)            # (env now rides along: a unit with an
+        s.stop_all()                      # inbox spawns with a named env, K3)
         return out
     s._spawn = spawn_and_stop
     res = s.run_unit(u)

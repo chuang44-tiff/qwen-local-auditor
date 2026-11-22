@@ -80,6 +80,25 @@ viewer keeps running between runs; run `python lib/watch.py stop` only when the 
 `QWEN_WATCH_HOST` (e.g. your Tailscale address) and `QWEN_WATCH_PORT` move the page off its
 local-only default so another machine can view it; `QWEN_WATCH=0` switches the page off.
 
+## Steer a running agent
+
+```bash
+qwen-agent --send <run id> "check the retry path too"      # queues a note, prints its id
+qwen-agent --send <id>/<unit> --wait 60 -f note.md          # queue and wait for the outcome
+qwen-agent --notes <run id>                                  # what that agent received or missed
+```
+
+A note reaches one running agent as a plain user message at its next model call; it keeps its
+context and its work. ADDRESS is the 12-hex id the run's `watch:` line prints (sweep batch ids
+live in each batch's `bNN/stderr.txt`); swarm/research units are `<id>/<unit>`. Options come
+before TEXT, and `--` allows a text starting with a dash. Exit 0 queued; with `--wait` it also
+prints `delivered at HH:MM:SS` (0), `still queued` (10), `undelivered: <reason>` (11) or
+`deferred to the next round` (12); exit 2 usage, 3 unavailable. A note never grants anything:
+no permissions, budget or tools, and it never ends a run early. An until-done loop carries a
+missed note into the next round's prompt, and pending notes end up in report.md under
+`## Steering notes`. `QWEN_STREAM=0` restores the old launch, creates no inbox, and such runs
+refuse `--send` (`reference/qwen-agent.md`, "Steer a running agent").
+
 ## Running tests and reproduction tests
 
 ```bash

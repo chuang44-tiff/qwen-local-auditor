@@ -23,7 +23,8 @@ import time
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import advisor_mcp, checks, decisions, probe, taskfile, testrun, watch  # noqa: E402
+from lib import (advisor_mcp, checks, decisions, notes, probe, taskfile,  # noqa: E402
+                 testrun, watch)
 from lib.builders import history  # noqa: E402
 from lib.swarm_engine import events  # noqa: E402
 
@@ -136,7 +137,7 @@ def _backoff():
 
 def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", test=True,
                probe_here=False, test_cmd=True, advisor=None, plan=None, plan_round=None,
-               timeout_extra=0, activity=None):
+               timeout_extra=0, activity=None, inbox=None, defer=False):
     # --shallow goes on the command line, not only into the environment below:
     # qwen-agent reads its config file AFTER the environment, so a QWEN_DEPTH=deep
     # sitting in the config would otherwise re-imply depth (a review round, a
@@ -180,6 +181,16 @@ def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", tes
         extra["QWEN_PLAN_ROUND"] = str(plan_round)
     if activity:
         extra["QWEN_WATCH_ACTIVITY"] = str(activity)
+    # The round's inbox (phase 1 messaging): the launcher streams through the driver
+    # only when QWEN_INBOX is set, so passing it here is what puts this round on the
+    # messaging path; QWEN_INBOX_DEFER=1 goes ONLY between until-done rounds (P2), and
+    # only while another round can still follow -- the last possible round defers to no
+    # one, its pending notes are swept by the loop's own end (4.7). The deviation audit
+    # and every un-messaged call come here without an inbox: today's argv, unchanged.
+    if inbox:
+        extra["QWEN_INBOX"] = str(inbox)
+        if defer:
+            extra["QWEN_INBOX_DEFER"] = "1"
     extra_env = extra or None
     for delay in [0] + _backoff():
         time.sleep(delay)
@@ -193,12 +204,19 @@ def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", tes
     except ValueError:
         rec = {}
     u = rec.get("usage") or {}
-    return {"rc": rc, "session": rec.get("session_id") or "",
-            "result": rec.get("result") if isinstance(rec.get("result"), str) else "",
-            "tokens": int(u.get("input_tokens") or 0) + int(u.get("output_tokens") or 0),
-            "denied": [d.get("tool_name") or "?" for d in (rec.get("permission_denials") or [])
-                       if isinstance(d, dict)],
-            "stderr": err}
+    out = {"rc": rc, "session": rec.get("session_id") or "",
+           "result": rec.get("result") if isinstance(rec.get("result"), str) else "",
+           "tokens": int(u.get("input_tokens") or 0) + int(u.get("output_tokens") or 0),
+           "denied": [d.get("tool_name") or "?" for d in (rec.get("permission_denials") or [])
+                      if isinstance(d, dict)],
+           "stderr": err}
+    # P6: the additive streaming fields ride into round-N.json so the bench harness can
+    # tell a streamed round from an argv one (and conservation checks can count them).
+    # Absent on the old path: a record that never carried them gains no key here.
+    for key in ("stream", "notes_delivered", "note_ids"):
+        if key in rec:
+            out[key] = rec[key]
+    return out
 
 
 def _run_agent(argv, extra_env=None):
@@ -761,6 +779,80 @@ def rescue_advice(model, state_dir, budget, log_path, repo, start, fails, task, 
     return text, {"called": True, "skipped_reason": None, "cost_usd": cost}
 
 
+# ------------------------------------------------------------- steering inbox (phase 1)
+# The loop owns RUN/inbox/ (spec 4.2/K2): every round of it is steerable while the loop
+# runs, and the loop -- not any round -- opens and closes it. QWEN_STREAM=0 keeps the
+# baseline layout exactly: no inbox is created, no QWEN_INBOX is passed (P5).
+
+def _run_inbox_init(run_dir):
+    """Create RUN/inbox/ (P3) and return its path, or None when this loop runs without
+    messaging: QWEN_STREAM=0, or an inbox that cannot be built (the loop then runs
+    exactly as it did before notes existed -- an inbox is never a reason to fail)."""
+    if os.environ.get("QWEN_STREAM", "1") == "0":
+        return None
+    inbox = os.path.join(run_dir, "inbox")
+    try:
+        notes.init_inbox(inbox)             # new/ delivered/ undelivered/ (0700), and a
+                                            # stale .closed removed: resume-safe (P3)
+    except (notes.NotesError, OSError):
+        return None
+    return inbox
+
+
+def _drain_inbox(inbox, reason):
+    """The between-rounds drain (K5): every pending note (fresh or deferred by the last
+    round) is validated with lib/notes.py, moved to delivered/ and logged `delivered:
+    <reason>`; its text rides into the round prompt under the heading the agent sees,
+    in time order, one block per note with the time it was queued. '' when none."""
+    if inbox is None:
+        return ""
+    try:
+        taken = notes.take_pending(inbox, reason)
+    except (notes.NotesError, OSError):     # a drain that cannot read (a symlinked or
+        return ""                           # otherwise unusable inbox) must not eat
+                                            # the round it was draining for
+    if not taken:
+        return ""
+    parts = ["", "", "Notes from the main session", ""]
+    for body in taken:
+        parts.append("[Note %s at %s]" % (body.get("id"), notes.fmt_clock(body.get("t"))))
+        parts.append(body["text"])
+        parts.append("")
+    return "\n".join(parts)
+
+
+def _close_run_inbox(inbox):
+    """The loop's end-of-run sweep (4.7): write `.closed`, move what still waits in
+    new/ to undelivered/ and log each `undelivered: loop_ended`. close_inbox is the one
+    place `.closed` is written and it is idempotent, so every reporting exit, the
+    finally and the os._exit path all call it and only the first one sweeps."""
+    if inbox is None:
+        return
+    try:
+        notes.close_inbox(inbox, "loop_ended")
+    except (notes.NotesError, OSError):
+        pass
+
+
+def _steering_rows(inbox):
+    """The `## Steering notes` rows for report.md (K5): one per note ever logged, its
+    latest state (with its reason), the local time, the id and the 80-character
+    preview. Empty when the inbox holds no log at all -- then the section is absent."""
+    if inbox is None:
+        return []
+    states, order = notes.latest_states(inbox)
+    rows = []
+    for note_id in order:
+        rec = states[note_id]
+        state = rec.get("state") if rec.get("state") in notes.STATES else "undelivered"
+        reason = rec.get("reason")
+        label = "%s: %s" % (state, reason) if reason else state
+        rows.append("%s  %s  %s  %s" % (notes.fmt_clock(rec.get("t") or time.time()),
+                                        label, note_id,
+                                        notes.preview(notes.note_text(inbox, note_id))))
+    return rows
+
+
 def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, start, repo, denied=(),
             agent_err="", notes=(), tools=None, transcript_found=False, switches=(), depth=None,
             advisor=None, plan=None, rescue=None):
@@ -797,6 +889,9 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
     plan_recs = [r for r in run_recs if r.get("call") == "plan"]
     rescue_recs = [r for r in run_recs if r.get("call") == "rescue"]
     plan_head, plan_section = _plan_lines(plan[0] if plan else None, plan_recs)
+    # K5: the loop read RUN/inbox/notes.jsonl for this -- every note the loop ever
+    # logged, with its latest state, present only when at least one note exists.
+    steering = _steering_rows(os.path.join(run_dir, "inbox"))
     rescue_called = sum(1 for r in rescue_recs if r.get("called"))
     rescue_lines = (["rescue: %s" % rescue,
                      "rescue calls: %d" % rescue_called,
@@ -834,6 +929,7 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
         # What the agent itself complained about when it refused to run at all.
         *(["", "## Agent stderr", "```", *agent_err.splitlines()[:20], "```"] if agent_err else []),
         *(["", "## Notes", *notes] if notes else []),
+        *(["", "## Steering notes", *steering] if steering else []),
         "full diff: %s" % os.path.join(run_dir, "diff.patch"), ""])
     path = os.path.join(run_dir, "report.md")
     _write(path, text)
@@ -1028,6 +1124,8 @@ def _run(o):
     # holder's lock on its way out.
     mine = False
     run_dir = session = None
+    run_inbox = None                  # RUN/inbox/, once opened (None: QWEN_STREAM=0,
+                                      # or the loop never reached its folder)
     watch_id = None                   # this loop's watch pointer, once registered
     watch_code = None                 # the exit its finish() records (None: not reached)
     advisor_dir = None                # --advisor: this run's ONE advisor state dir (finally removes it)
@@ -1188,6 +1286,10 @@ def _run(o):
             k += 1
             run_dir = "%s-%d" % (base, k)
         os.makedirs(run_dir)
+        # P3: the loop opens its inbox immediately after the folder exists and BEFORE
+        # the page registers it -- the registration is the address a note is sent to,
+        # and the inbox must already answer when that address goes public.
+        run_inbox = _run_inbox_init(run_dir)
         # The page shows the loop as soon as it has a folder to show: the task file's
         # name is its title, the folder its progress (the round files under it), and
         # --max-rounds the denominator of that progress.
@@ -1241,6 +1343,7 @@ def _run(o):
                 # (KeyboardInterrupt and SystemExit are BaseExceptions: they keep their
                 # own paths -- the interrupted report and 130 below.)
                 print("until-done: --probe: %s" % exc, file=sys.stderr)
+                _close_run_inbox(run_inbox)       # K5: sweep before every report
                 path = _report(run_dir, reason="error: %s: %s" % (type(exc).__name__, exc),
                                code=EXIT_HARNESS, rounds=rounds, session=session,
                                tokens=tokens, results=results, log=log, start=start,
@@ -1263,6 +1366,12 @@ def _run(o):
             prompt = feedback if (feedback and session) else FIRST.format(
                 task=task_text, log=decisions.render(decisions.load(log_path)),
                 shell=SHELL_TEST if has_cmd else SHELL_NONE)
+            # K5: the drain runs before EVERY round (round 1 included -- notes sent
+            # while probe.make ran are pending then) and on every path: FIRST,
+            # REVIEW_ROUND, `unusable` feedback alike. Round 1 logs `before_round_1`,
+            # later rounds `next_round`.
+            prompt += _drain_inbox(run_inbox,
+                                   "before_round_1" if rounds == 1 else "next_round")
             ppath = os.path.join(run_dir, "round-%d.prompt.md" % rounds)
             _write(ppath, prompt)
             sig_before = _tree_sig(repo)
@@ -1294,7 +1403,11 @@ def _run(o):
                            # a loop that IS on the page: unregistered, the rounds carry no
                            # activity file and their launcher wires no hook at all
                            activity=(os.path.join(run_dir, watch.ACTIVITY_FILE)
-                                     if watch_id else None))
+                                     if watch_id else None),
+                           # every round is steerable (the driver streams when the
+                           # inbox is set); deferral only while a next round can
+                           # still follow this one (P2)
+                           inbox=run_inbox, defer=(rounds < o.max_rounds))
             take_plan(r["result"], rounds, r["rc"])
             if pending is not None:
                 # This round is the answer the pending rescue was waiting for:
@@ -1511,6 +1624,7 @@ def _run(o):
                                      % (rounds, info["skipped_reason"]))
         patch = finish_probe()
         flush_pending()
+        _close_run_inbox(run_inbox)               # K5: sweep before every report
         path = _report(run_dir, reason=reason, code=code, rounds=rounds, session=session,
                        tokens=tokens, results=results, log=log, start=start, repo=repo,
                        denied=denied, agent_err=agent_err, notes=notes,
@@ -1541,6 +1655,7 @@ def _run(o):
                 # the reader finds, and it must name the kept sandbox too.
                 notes.append("sandbox kept: %s" % sb)
             flush_pending()
+            _close_run_inbox(run_inbox)           # K5: sweep before every report
             path = _report(run_dir, reason="interrupted", code=EXIT_INTERRUPTED, rounds=rounds,
                            session=session, tokens=tokens, results=results, log=log, start=start,
                            repo=run_dir if (o.probe and sb is None) else repo,
@@ -1592,6 +1707,9 @@ def _run(o):
             for d in (advisor_dir, rescue_dir, plan_dir):
                 if d is not None:
                     shutil.rmtree(d, ignore_errors=True)
+            # os._exit skips the finally, so the inbox sweep happens here too (K5):
+            # idempotent with the one before the interrupted report above.
+            _close_run_inbox(run_inbox)
             os._exit(EXIT_INTERRUPTED)
         return EXIT_INTERRUPTED
     except Exception as exc:
@@ -1615,6 +1733,7 @@ def _run(o):
             # write fails must not mask the error this report is about -- and must
             # not take the report (and the 8) down with it.
             flush_pending()
+        _close_run_inbox(run_inbox)               # K5: sweep before every report
         path = _report(run_dir, reason="error: %s: %s" % (type(exc).__name__, exc),
                        code=EXIT_HARNESS, rounds=rounds, session=session, tokens=tokens,
                        results=results, log=log, start=start,
@@ -1630,6 +1749,10 @@ def _run(o):
             print("report: %s" % path)
         return EXIT_HARNESS
     finally:
+        # K5: the sweep also happens here, so the exception path that re-raises
+        # without reporting still closes its inbox (idempotent with the sweeps that
+        # ran before every report).
+        _close_run_inbox(run_inbox)
         # A sandbox sweep that raises must not skip the lock removal: the next run
         # would be locked out (exit 14) by a run that already ended. A sweep that
         # cannot finish leaves a sandbox nobody chose to keep: say so -- stderr and
