@@ -339,6 +339,73 @@ def test_close_inbox_empty_still_claims(tmp_path):
     assert read_log_lines(inbox) == []                  # empty sweep, empty log
 
 
+def test_pid_alive_own_pid_is_alive():
+    """Our own pid is alive whichever platform runs the suite: os.kill there, and the
+    real ctypes OpenProcess + WaitForSingleObject on Windows (the 0x103 mix-up made
+    every live process read as dead there)."""
+    assert notes.pid_alive(os.getpid()) is True
+
+
+def test_pid_alive_windows_branch_logic(monkeypatch):
+    """The nt branch from any platform: os.name flipped to "nt" and a fake kernel32
+    injected through the module's _kernel32() seam. WAIT_TIMEOUT -> alive, WAIT_OBJECT_0
+    -> gone, OpenProcess NULL + last error 87 -> gone / 5 -> alive / any other -> alive,
+    WAIT_FAILED -> alive, and CloseHandle exactly whenever a handle was opened. The
+    fake only records and asserts live here: pid_alive swallows Exception, so an assert
+    inside the fake would vanish into its "not proven gone" default."""
+    import ctypes
+
+    monkeypatch.setattr(notes.os, "name", "nt")         # flip the branch switch only
+
+    # The last error of a failed OpenProcess rides the reader pid_alive uses. Real
+    # ctypes keeps it in thread state for ctypes.get_last_error() because the DLL is
+    # loaded with use_last_error=True -- but that set/get round-trip is a Windows
+    # mechanism, so off Windows feeding it through ctypes.set_last_error() would
+    # silently say "error 0". Pin the reader directly instead (raising=False: off
+    # Windows the attribute may not even exist); the holder lets inject() set the
+    # value per case without re-patching the module attribute.
+    last = {"error": None}
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: last["error"], raising=False)
+
+    def inject(*, open_return, wait_return=None, last_error=None):
+        rec = {"opened": [], "waited": [], "closed": []}
+        last["error"] = last_error
+
+        class FakeKernel32:
+            def OpenProcess(self, access, inherit, pid):
+                rec["opened"].append((access, inherit, pid))
+                return open_return                  # None plays NULL (HANDLE restype)
+
+            def WaitForSingleObject(self, handle, ms):
+                rec["waited"].append((handle, ms))
+                return wait_return
+
+            def CloseHandle(self, handle):
+                rec["closed"].append(handle)
+
+        monkeypatch.setattr(notes, "_kernel32", lambda: FakeKernel32())
+        return rec
+
+    alive_handle = 0x7FFF_E0F0_0D01_0BAD                # beyond int32: restype matters
+    for wait_return, verdict, why in (
+            (0x00000102, True, "WAIT_TIMEOUT: still running"),
+            (0x00000000, False, "WAIT_OBJECT_0: signalled, exited"),
+            (0xFFFFFFFF, True, "WAIT_FAILED: nothing proved, not proven gone")):
+        rec = inject(open_return=alive_handle, wait_return=wait_return)
+        assert notes.pid_alive(4242) is verdict, why
+        assert rec["opened"] == [(0x00100000, False, 4242)]   # SYNCHRONIZE, not +0x1
+        assert rec["waited"] == [(alive_handle, 0)]           # timeout 0: a peek, no wait
+        assert rec["closed"] == [alive_handle]                # closed whenever opened
+    for last_error, verdict, why in (
+            (87, False, "ERROR_INVALID_PARAMETER: no such pid"),
+            (5, True, "ERROR_ACCESS_DENIED: it exists, we may not open it"),
+            (3, True, "any other error: cannot prove it gone")):
+        rec = inject(open_return=None, last_error=last_error)   # NULL is None, restype
+        assert notes.pid_alive(4242) is verdict, why
+        assert rec["opened"] == [(0x00100000, False, 4242)]
+        assert rec["waited"] == [] and rec["closed"] == []    # NULL: nothing to wait/close
+
+
 # ================================================================ Group B: the CLI
 
 def test_send_prints_id(note_env, tmp_path):

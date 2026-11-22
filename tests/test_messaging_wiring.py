@@ -82,6 +82,14 @@ def cli(tmp_path, env, *args, timeout=60):
                           cwd=str(tmp_path), timeout=timeout)
 
 
+def same_path(a, b):
+    """Path equality that does not care about separators or case: the inbox path a
+    child records comes through bash's native_path (always `/`), while an expected
+    `str(Path)` on Windows carries `\\` -- those two name one and the same directory."""
+    return (os.path.normcase(os.path.normpath(str(a)))
+            == os.path.normcase(os.path.normpath(str(b))))
+
+
 def wait_for(pred, timeout=30, message="condition never became true"):
     deadline = time.time() + timeout
     while not pred():
@@ -386,10 +394,16 @@ def test_single_shot_send_wait_notes_end_to_end(tmp_path, server):   # noqa: F81
         assert NOTE_ID_RE.fullmatch(nid1), repr(nid1)
         assert (inbox / "new" / ("%s.json" % nid1)).exists()
 
-        # --notes: the queued row, with the preview (K9)
+        # --notes: the row with the preview (K9). The parked fake keeps draining and
+        # echoing notes while it waits at its gate, so on a fast runner the driver may
+        # have forwarded the note before we look: the row is `queued` or already
+        # `delivered` (both logged bare, so the state column sits between the row's
+        # two-space field separators -- matching the bare word would let an
+        # `undelivered: ...` row sneak through). The guarantees below (echo marker,
+        # delivered in the log, exactly-once) do not rest on this row.
         r = cli(tmp_path, env, "--notes", rid)
         assert r.returncode == 0, r.stderr
-        assert nid1 in r.stdout and "queued" in r.stdout
+        assert nid1 in r.stdout and ("  queued  " in r.stdout or "  delivered  " in r.stdout)
         assert "use the utf8 reader" in r.stdout
 
         # release the tool: the driver forwards, the parked fake echoes -> delivered
@@ -695,15 +709,15 @@ def test_until_done_note_missed_in_round_one_is_deferred_then_delivered_once(
     # P3: the page saw an inbox already in place (init right after makedirs)
     assert seen.get("at_register") is True
     inbox = pathlib.Path(box["inbox"])
-    assert inbox == run_dir / "inbox"
+    assert same_path(inbox, run_dir / "inbox")        # `/` vs `\`: native_path's shape
     assert (inbox / "new").is_dir() and (inbox / ".closed").exists()
 
     # every round got the inbox; DEFER rode only the round that could be followed
     rec1 = _ud_started(ud, 1)
     rec2 = _ud_started(ud, 2)
-    assert rec1["inbox"] == str(inbox)
+    assert same_path(rec1["inbox"], inbox)
     assert rec1["defer"] == "1"                       # rounds 1 < max 2 (P2)
-    assert rec2["inbox"] == str(inbox)
+    assert same_path(rec2["inbox"], inbox)
     assert rec2["defer"] is None                      # the last round defers to no one
 
     # the missed note: deferred by round 1, delivered ONCE into round 2's prompt
@@ -801,7 +815,7 @@ def test_until_done_deviation_audit_is_called_without_an_inbox(tmp_path, monkeyp
     run_dir = next(state.rglob("report.md")).parent
     assert (run_dir / "inbox" / "new").is_dir()           # the LOOP was steerable
     assert (run_dir / "inbox" / ".closed").exists()       # swept at the loop's end
-    assert _ud_started(ud, 2)["inbox"] == str(run_dir / "inbox")   # rounds carried it
+    assert same_path(_ud_started(ud, 2)["inbox"], run_dir / "inbox")  # rounds carried it
     n = 3                                                 # the audit call(s), if any:
     while (ud / "calls" / ("started.%d.json" % n)).exists() \
             or n == 3:                                    # (n=3 must exist: it ran)

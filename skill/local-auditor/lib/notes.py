@@ -518,10 +518,31 @@ def valid_address(address):
     return isinstance(address, str) and bool(ADDRESS_RE.fullmatch(address))
 
 
+def _kernel32():
+    """kernel32 for pid_alive, with the signatures of the calls it makes declared so a
+    64-bit HANDLE is not truncated to a 32-bit int (restype defaults to c_int!). The
+    use_last_error flag is what feeds ctypes.get_last_error() after a failed call. This
+    is also the seam a test monkeypatches to drive the nt branch off Windows."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)   # noqa: N806 (API type)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    return kernel32
+
+
 def pid_alive(pid):
     """POSIX os.kill(pid, 0); Windows OpenProcess(SYNCHRONIZE) + WaitForSingleObject(h,
     0) via ctypes -- watch._alive returns True off POSIX, so the sender must judge for
-    itself. Anything we cannot prove gone counts as alive."""
+    itself. The process object is signalled when the process exits: WAIT_TIMEOUT
+    (0x102) says it runs, WAIT_OBJECT_0 (0) says it is gone, and WAIT_FAILED
+    (0xFFFFFFFF) proves nothing; an OpenProcess NULL whose last error is 5
+    (ERROR_ACCESS_DENIED) names a process we may not open, and only 87
+    (ERROR_INVALID_PARAMETER) proves the pid away. Anything we cannot prove gone
+    counts as alive."""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return True                                  # not a pid we may judge: watch's rule
     if os.name == "posix":
@@ -535,14 +556,22 @@ def pid_alive(pid):
     if os.name == "nt":
         try:
             import ctypes
-            kernel32 = ctypes.windll.kernel32        # noqa: N806 (a Windows API handle type)
-            handle = kernel32.OpenProcess(0x00100001, False, pid)   # SYNCHRONIZE
-            if not handle:
-                return False                         # no such process to open
+            kernel32 = _kernel32()                   # the test seam, never ctypes.windll
+            handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE only
+            if not handle:                           # NULL: the last error tells how far
+                last_error = ctypes.get_last_error()
+                if last_error == 5:                  # ERROR_ACCESS_DENIED: it exists
+                    return True
+                return last_error != 87              # 87 INVALID_PARAMETER: gone; else unknown
             try:
-                return kernel32.WaitForSingleObject(handle, 0) == 0x00000103  # STILL_ALIVE
+                result = kernel32.WaitForSingleObject(handle, 0)
+                if result == 0x00000102:             # WAIT_TIMEOUT: still running
+                    return True
+                if result == 0:                      # WAIT_OBJECT_0: signalled, exited
+                    return False
+                return True                          # WAIT_FAILED or a surprise: not proved
             finally:
-                kernel32.CloseHandle(handle)
+                kernel32.CloseHandle(handle)         # whenever a handle was opened
         except Exception:                            # any ctypes trouble: not proven gone
             return True
     return True

@@ -479,7 +479,9 @@ def test_parity_single_shot_prompt_file(tmp_path, server):                # noqa
     launch writes the same text to a prompt file and streams it, and it arrives whole.
     The byte-for-byte comparison of the two launches therefore runs on the same-shaped
     prompt at 96 KiB, the size both paths can carry; the 200 KiB one runs on both
-    paths and is asserted to reach only one of them."""
+    paths and is asserted to reach only one of them -- and that last, exit-8 half is a
+    Linux-only premise (only Linux caps a single argument at MAX_ARG_STRLEN), so it is
+    gated on sys.platform while the streamed 200 KiB half runs everywhere."""
     head = ("Review the login flow, then answer.\n"
             "--this-line-starts-with-the-argv-guard\n"
             "“ünïcødé” ⚙ 漢字 🎯 – ño ã accéntos\n")
@@ -516,8 +518,7 @@ def test_parity_single_shot_prompt_file(tmp_path, server):                # noqa
     assert inbox_dir_for(tmp_path, stream_id).is_dir()
     assert not inbox_dir_for(tmp_path, argv_id).exists()
 
-    # ...and the same prompt at 200 KiB: the streamed launch hands it over whole, the
-    # argv launch cannot start claude with it at all.
+    # ...and the same prompt at 200 KiB: the streamed launch hands it over whole.
     big_args = ["-r", "auditor", "--json", "-f", posix(big_file)]
     big_out, big_rec, _bid = single_shot(tmp_path, server, big_args, stream=True, call=3)
     assert big_out.returncode == 0, big_out.stdout + big_out.stderr
@@ -528,13 +529,19 @@ def test_parity_single_shot_prompt_file(tmp_path, server):                # noqa
     assert "“ünïcødé” ⚙ 漢字 🎯" in big_rec["stdin_user_texts"][0]
     launched(records_dir(tmp_path), ["1.json", "2.json", "3.json"])
 
-    big_argv, _none, _sid = single_shot(tmp_path, server, big_args,
-                                        stream=False, call=None, expect=8)
-    assert "Argument list too long" in big_argv.stderr, \
-        "the argv launch failed for some reason other than the kernel's per-argument " \
-        "cap, and this test's premise is wrong:\n%s" % big_argv.stderr
-    assert not (records_dir(tmp_path) / "4.json").exists(), \
-        "claude was started after all: the failure was not the exec"
+    # The argv launch cannot start claude with that prompt at all -- but that rests
+    # on Linux's MAX_ARG_STRLEN: the kernel caps ONE argument at 128 KiB, so execve
+    # fails with E2BIG ("Argument list too long") before claude runs. macOS and
+    # Windows have no such per-argument cap, so this half runs on Linux only; the
+    # streamed 200 KiB half above (and everything before it) runs on every platform.
+    if sys.platform.startswith("linux"):
+        big_argv, _none, _sid = single_shot(tmp_path, server, big_args,
+                                            stream=False, call=None, expect=8)
+        assert "Argument list too long" in big_argv.stderr, \
+            "the argv launch failed for some reason other than the kernel's per-argument " \
+            "cap, and this test's premise is wrong:\n%s" % big_argv.stderr
+        assert not (records_dir(tmp_path) / "4.json").exists(), \
+            "claude was started after all: the failure was not the exec"
 
 
 def reset_repo(repo):
