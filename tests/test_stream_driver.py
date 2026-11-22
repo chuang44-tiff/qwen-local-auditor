@@ -85,7 +85,14 @@ class Run:
             env["QWEN_WATCH_ACTIVITY"] = str(self.tmp / "activity.jsonl")
         env.update(env_extra or {})
         self.env = env
-        argv = [sys.executable, str(DRIVER), "--inbox", str(self.inbox),
+        # Windows hang diagnosis: start the driver under faulthandler so a driver that
+        # outlives wait()'s deadline prints every thread's stack to its stderr first
+        # (surfaced in the "driver hung" message). POSIX launches are unchanged.
+        boot = ([sys.executable, "-c",
+                 "import faulthandler, runpy, sys; faulthandler.dump_traceback_later(20);"
+                 " sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')"]
+                if os.name == "nt" else [sys.executable])
+        argv = boot + [str(DRIVER), "--inbox", str(self.inbox),
                 "--prompt-file", str(self.prompt_file), "--raw", str(self.raw)]
         if defer:
             argv.append("--defer-on-end")
@@ -177,7 +184,7 @@ class Run:
             with contextlib.suppress(Exception):
                 self.p.wait(timeout=10)
             self.stderr = self._read_stderr()
-            raise AssertionError("driver hung")
+            raise AssertionError("driver hung; its stderr:\n%s" % self.stderr[-6000:])
         self.stderr = self._read_stderr()
         return self.rc
 
