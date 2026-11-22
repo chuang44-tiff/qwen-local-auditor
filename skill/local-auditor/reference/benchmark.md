@@ -67,3 +67,34 @@ not compared: the Haiku runs did not use the local GPU.
   copy lacks. Qwen wrote them on its own; Haiku got one extra instruction line allowing it.
 - **All tests count, graded separately.** Every test case is enabled (Harbor's adapter runs
   only the first for C++, Rust and JavaScript), and each check runs in a fresh container.
+
+## Steering a running agent: notes vs rescue
+
+Can the main session fix a running coder better than rescue can? A note
+(`qwen-agent --send`, [qwen-agent.md](qwen-agent.md#steer-a-running-agent)) reaches the agent
+while it works; rescue (`--rescue opus`) asks Claude after a failing round. Qwen3.8-Flash-Next
+under `--until-done --max-rounds 2`, plan and advisor off, November 2026.
+
+| test | no help | rescue | note from the main session |
+|---|---|---|---|
+| a note sent mid-run (add a file, change a convention, leave a file alone, add a line to a one-shot answer): followed | 0/12 | no equivalent: rescue runs only between rounds | 12/12 |
+| round 1 fails on a rule the spec never states (4 exercises, checker prints only FAIL): passed round 2 | 0/12 | 0/12 | 12/12 |
+| 20 Aider polyglot exercises: passed | 14-18 (6 runs) | 19 of 20 | 18 of 20 |
+| the same 20: round-1 failures passed in round 2 | 38/60 | 10/10 | 5/7 |
+| Claude cost | $0 | $0.73 (12 calls) and $0.95 (10 calls) | the main session's own context |
+
+- **On public exercises rescue is the better fixer.** It reads the failure and the code, and it
+  also remembers the exercise's canonical tests: one diagnosis cited them and caught a second
+  bug the failure output had not shown yet. The notes were written from the same failure
+  output, without the hidden tests.
+- **Notes win where the answer is not in the repository:** a requirement only the person
+  knows, a change of plan, or work to stop. Rescue saw the same spec and the same FAIL as the
+  agent and fixed none of the four unstated rules.
+- **Bad tests.** Two of the seven failures in the notes run were the agent's own wrong test;
+  the note said to delete it, and both passed.
+- **Delivery.** All 33 notes were delivered while the agent was running. The streamed launch
+  that carries them hands `claude` the same flags, prompt and environment as the old launch
+  (`tests/test_stream_parity.py`).
+
+**Limits:** one run per setup on the 20 exercises, so their differences are not significant;
+the main session's notes were written by Claude.

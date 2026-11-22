@@ -79,6 +79,8 @@ Every run prints a `watch:` link to a live page on `127.0.0.1:8790`.
 - **What it never shows:** tool output, prompts or transcripts.
 - **Setup:** the page needs nothing installed beyond Python, and `QWEN_WATCH=0` turns it off. [configuration.md](skill/local-auditor/reference/configuration.md#watch-page-every-command) covers the settings.
 
+A running agent can be steered without stopping it: `qwen-agent --send <id> "use underscores, not hyphens"` delivers a note at its next model call, and `--notes <id>` lists what it received ([qwen-agent.md](skill/local-auditor/reference/qwen-agent.md#steer-a-running-agent)).
+
 `--help` on any command is its complete flag reference; `--test`, `qwen-cc`, research and
 swarms are on the reference pages below.
 
@@ -151,6 +153,8 @@ of Claude per exercise), plan + advisor 2.13 ($0.16), plan + rescue 2.17 ($0.18)
 the coder took 2.82 rounds for $0.10 per exercise: about Qwen alone's speed, at more than
 plan's cost. Method and numbers:
 [reference/benchmark.md](skill/local-auditor/reference/benchmark.md).
+
+Steering a running coder with notes from the main session fixed 12/12 runs that hit a requirement the spec never stated, where rescue fixed 0/12; on public exercises rescue did better (19 of 20 against 18 of 20). Details: [steering benchmark](skill/local-auditor/reference/benchmark.md#steering-a-running-agent-notes-vs-rescue).
 
 ![Rounds to pass and Claude cost per pass for Qwen alone, Haiku 5.5 alone, Qwen + plan and Qwen + plan + advisor](skill/local-auditor/reference/benchmark-boxplot.png)
 
