@@ -180,7 +180,7 @@ def test_ask_text_layout():
     assert lines[1].startswith("repo: ")
     i_task = lines.index("task: /work/repo/task.md")
     i_round = lines.index("round: 3 of 10")
-    i_next = lines.index("next round: started at 21:04:07")
+    i_next = lines.index("next round: started at 21:04:07 (it is running now)")
     i_start = lines.index("start commit: 8c348e8")
     i_files = lines.index("changed files:")
     i_fails = lines.index("## Failing checks")

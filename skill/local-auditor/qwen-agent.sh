@@ -454,8 +454,23 @@ STEERING  (send a note to a RUNNING local agent; it arrives as a plain user
                        (11) or 'deferred to the next round' (12).
       --notes ADDRESS  One row per note that agent ever received or missed:
                        'HH:MM:SS  state[: reason]  id  first 80 characters'.
+      --next-ask ID    Wait for the oldest ask of the until-done loop ID and
+                       claim it: prints the claimed ask's path and exits 0 (the
+                       ask's text is never printed). --wait SECONDS (1..3600,
+                       default 3600) caps the wait; 'no ask yet' exits 10 when
+                       it runs out or the lease was released, 'run ended' exits
+                       11 when the loop has ended. --release gives up the ask
+                       lease and exits 0, always.
+      --amend ID       Send the whole corrected task file to the until-done
+                       loop ID for it to apply at the next check run (-f FILE,
+                       or -f - to read stdin): 0 queued, 2 on a usage error or
+                       a parse error (an empty checklist is one; a test item
+                       needs a run that has a test command), 3 when the run is
+                       not there to take it.
       (env QWEN_STREAM=0 restores today's launch exactly: no inbox is created
-       anywhere and no run streams — a steered agent needs the streamed call.)
+       anywhere and no run streams — a steered agent needs the streamed call.
+       An until-done run with QWEN_STREAM=0 makes no asks/ or amend/ layout
+       either, so --next-ask and --amend exit 3 against it.)
 
 DEPTH  (the default, not the extra: unless --shallow is given every direct run gets
       the switches below that FIT it, and --json records which ones under qwen_agent.
@@ -1205,6 +1220,11 @@ while [ $# -gt 0 ]; do
     # The sender CLI (4.4): everything after --send/--notes belongs to notes.py.
     --send)               MSG_MODE=send;  MSG_ARGS=("${@:2}"); shift $# ;;
     --notes)              MSG_MODE=notes; MSG_ARGS=("${@:2}"); shift $# ;;
+    # The asks CLI (stage 1.5, 10.2): the same verbatim takeover for --next-ask/
+    # --amend; the grammar is lib/asks.py's to enforce, so the launcher parses
+    # nothing after the sub-command here either.
+    --next-ask)           MSG_MODE=next-ask; MSG_ARGS=("${@:2}"); shift $# ;;
+    --amend)              MSG_MODE=amend;    MSG_ARGS=("${@:2}"); shift $# ;;
     -e|--effort)          need_arg "$1" $(($#-1)); EFFORT="$2"; shift 2 ;;
     -m|--model)           need_arg "$1" $(($#-1)); MODEL="$2"; shift 2 ;;
     -b|--base)            need_arg "$1" $(($#-1)); BASE="$2"; shift 2 ;;
@@ -1599,16 +1619,22 @@ if [ -n "$RECORD" ] && [ -z "$SCENARIOS" ]; then
   exit $QA_USAGE
 fi
 
-# ------------------------------------------------- --send / --notes (phase 1)
+# ------------------------------------ --send / --notes (phase 1), --next-ask / --amend (1.5)
 # The sender side of messaging talks to the watch registry and the target's inbox:
 # no model, no preflight, no argv, no role -- dispatched early, like --replay
-# (spec 4.4). lib/notes.py owns the grammar and every exit code (K9): 0 queued (or
-# delivered, with --wait), 2 usage, 3 unavailable, and 10/11/12 for the --wait
-# outcomes; they are this run's exit codes, passed through untouched.
+# (spec 4.4). lib/notes.py owns the --send/--notes grammar and every exit code (K9):
+# 0 queued (or delivered, with --wait), 2 usage, 3 unavailable, and 10/11/12 for
+# the --wait outcomes; lib/asks.py owns --next-ask/--amend (stage 1.5, spec 10.2):
+# 0 claimed/queued, 2 usage, 3 unavailable, 10 no ask yet, 11 run ended. They are
+# this run's exit codes, passed through untouched.
 if [ -n "$MSG_MODE" ]; then
+  case "$MSG_MODE" in
+    next-ask|amend) _ms_rel="lib/asks.py" ;;
+    *)              _ms_rel="lib/notes.py" ;;
+  esac
   if ! resolve_py; then
     die "no working Python 3.8+ found (tried \$QWEN_PYTHON, python3, python): $QA_SELF --$MSG_MODE"
-    die "talks to lib/notes.py. Set QWEN_PYTHON, or put one in $QA_CONFIG."
+    die "talks to $_ms_rel. Set QWEN_PYTHON, or put one in $QA_CONFIG."
     exit $QA_HARNESS
   fi
   # On Windows only -f's operand is a path for us to convert (native_path); every
@@ -1631,8 +1657,13 @@ if [ -n "$MSG_MODE" ]; then
     esac
   done
   unset _a _ms_file
+  # A QWEN_ASK_LEASE that came from $QA_CONFIG is only a shell variable here: the
+  # asks CLI reads the lease length from the ENVIRONMENT (asks.lease_seconds), so
+  # export it for the dispatch. One that came from the caller's environment is
+  # exported already.
+  [ -n "${QWEN_ASK_LEASE:-}" ] && export QWEN_ASK_LEASE
   MSYS2_ARG_CONV_EXCL='*' PYTHONPATH="$(native_path "$SKILL_DIR")" \
-    "$QA_PY" "$(native_path "$SKILL_DIR/lib/notes.py")" "$MSG_MODE" \
+    "$QA_PY" "$(native_path "$SKILL_DIR/$_ms_rel")" "$MSG_MODE" \
     ${_ms_argv[@]+"${_ms_argv[@]}"}
   exit $?
 fi
@@ -1924,6 +1955,10 @@ if [ -n "$UNTIL_DONE" ]; then
   [ -n "${QWEN_TEST_MAX_BYTES:-}" ] && export QWEN_TEST_MAX_BYTES
   [ -n "${QWEN_TEST_WORKTREES:-}" ] && export QWEN_TEST_WORKTREES
   [ -n "${QWEN_AGENT_STATE:-}" ] && export QWEN_AGENT_STATE
+  # QWEN_STREAM too (10.6): the supervisor opens the loop's ask layout (asks.init_run)
+  # and its rounds answer asks through lib/asks.py -- both read the messaging switch
+  # from the environment, and one set in $QA_CONFIG is only a shell variable here.
+  [ -n "${QWEN_STREAM:-}" ] && export QWEN_STREAM
   # The advisor knobs too: every round is a fresh qwen-agent, and a budget or a claude
   # path set in THIS run's config must be the same in all of them through the state dir.
   [ -n "${QWEN_ADVISOR_MAX_CALLS:-}" ] && export QWEN_ADVISOR_MAX_CALLS

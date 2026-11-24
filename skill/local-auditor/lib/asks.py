@@ -4,7 +4,10 @@ the ask text, the claim and the asks log (stage 1.5).
 An until-done round that fails in the same way twice asks the MAIN session instead
 of flailing on: the loop writes an ask, the main session answers with a note
 (``qwen-agent --send``) or a task amendment (``qwen-agent --amend``). This module
-owns everything ask-shaped under the run folder; no supervisor or CLI wiring yet.
+owns everything ask-shaped under the run folder, and the sender-side CLI the main
+session runs (``main`` with the ``next-ask`` and ``amend`` modes, the twin of
+lib/notes.py's ``send``/``notes``); the loop side -- the supervisor writing asks
+and applying amendments -- comes later.
 
 Run-folder layout (spec 4.1)::
 
@@ -12,9 +15,24 @@ Run-folder layout (spec 4.1)::
     <RUN>/asks/claimed/<n>.md   the ask one answerer holds (claimed by rename)
     <RUN>/asks/lease.json       {"pid","until","t"}: who may ask right now
     <RUN>/asks/log.jsonl        the asks event log, one JSON line per event
+    <RUN>/amend/pending.md      the amendment --amend queued for the loop
     <RUN>/amend/applied/        amendments the loop applied
     <RUN>/amend/rejected/       amendments the loop rejected
     <RUN>/amend/meta.json       {"has_test_cmd": <bool>}
+    <RUN>/.ended                the supervisor's end-of-run sentinel
+
+The sender CLI (spec 10.2): ``python lib/asks.py next-ask ID [--wait SECONDS]
+[--release]`` stamps the lease and polls once a second -- the claimed ask's
+absolute path on stdout (exit 0, logged ``claimed``), ``no ask yet`` and 10 when
+the wait runs out or the lease is released under us, ``run ended`` and 11 when the
+loop has ended (the check runs BEFORE the first lease stamp, and a SIGTERM/SIGINT/
+SIGHUP gives our own lease up); --release deletes the lease and exits 0, always.
+``python lib/asks.py amend ID -f FILE|-f -`` parses the corrected task file with
+lib/taskfile.py and queues it at amend/pending.md (``amend queued``, 0): 2 for a
+parse error (an empty checklist is one), an over-AMEND_MAX body, a wrong grammar
+or a test item in a run with no test command; 3 for an ended run, a closed inbox
+or a missing amend folder. The ask's text is never printed. qwen-agent.sh
+dispatches --next-ask/--amend here and exports QWEN_ASK_LEASE for the dispatch.
 
 Directories are 0700 and files 0600 on POSIX, like lib/notes.py; every write goes
 through safe_write (a unique temp name in the destination's own directory, pid plus
@@ -49,20 +67,25 @@ log_event appends one JSON line to
 asks/log.jsonl with ONE os.write on an append fd; a line is kept under LOG_MAX
 bytes by dropping fields (biggest first) and, if the ev alone would reach the
 cap, by truncating the ev -- every event lands, and a symlinked asks/ directory
-is refused in silence -- the log is never a reason to fail the round that wrote it.
+is refused in silence; log_event NEVER raises, so a missing or blocked asks/
+folder is refused the same way -- the log is never a reason to fail the round
+that wrote it.
 """
 import contextlib
 import itertools
 import json
 import os
 import re
+import signal
 import sys
+import threading
 import time
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib.notes import DIR_MODE, FILE_MODE, _is_link  # noqa: E402
+from lib import taskfile  # noqa: E402
+from lib.notes import DIR_MODE, FILE_MODE, _is_link, _pointer, pid_alive  # noqa: E402
 
 # ----------------------------------------------------------------- constants
 LEASE_DEFAULT = 600        # seconds a lease holds without a refresh
@@ -75,6 +98,7 @@ AMEND_MAX = 256 * 1024     # UTF-8 bytes of one amendment body
 LOG_MAX = 512              # bytes of one asks log line, newline included
 DIFF_LINES = 60            # diffstat lines shown before the tail is cut
 ASK_RE = re.compile(r"^[1-9][0-9]*\.md$")
+RUN_ID_RE = re.compile(r"^[0-9a-f]{12}$")   # the plain watch id -- no /<unit> here
 REASONS = ("noop", "parse_error", "test_without_cmd", "symlink", "uid",
            "read_error", "too_large")
 
@@ -85,8 +109,19 @@ APPLIED, REJECTED = "applied", "rejected"
 LEASE_FILE = "lease.json"
 LOG_FILE = "log.jsonl"
 META_FILE = "meta.json"
+PENDING_FILE = "pending.md"     # the amendment --amend queues for the loop
+INBOX_DIR = "inbox"             # the loop's inbox: its .closed ends the run for us
+CLOSED_SENTINEL = ".closed"
+ENDED_FILE = ".ended"           # the supervisor's end-of-run sentinel under RUN
 
-_EXIT_UNAVAILABLE = 3      # the notes.py exit-code convention this module joins
+POLL = 1                 # seconds between --next-ask's polls of the ask queue
+WAIT_MIN, WAIT_MAX = 1, 3600    # --wait SECONDS bounds, like notes' --wait
+WAIT_DEFAULT = 3600      # the --next-ask wait when no --wait is given
+
+_EXIT_USAGE = 2          # the notes.py exit-code convention this module joins
+_EXIT_UNAVAILABLE = 3
+EXIT_NO_ASK = 10         # --next-ask: the wait ran out, or the lease went away
+EXIT_RUN_ENDED = 11      # --next-ask: the run ended while we waited (or before)
 _LEASE_MAX_BYTES = 4096    # a lease.json we cannot parse in full is not a lease
 
 _TMP_SEQ = itertools.count()
@@ -312,13 +347,6 @@ def ask_text(*, n, max_rounds, title, run_id, repo, probe, task_path,
              "task": str(task_path), "next": str(next_started),
              "start": str(start)}
     body = str(fails)[:FAILS_MAX]
-    answer = [
-        "## How to answer",
-        "qwen-agent --send %s -f - <<'EOF'" % run_id,
-        "Answer this ask: the text you send is delivered before the next round.",
-        "qwen-agent --amend %s -f - <<'EOF'" % run_id,
-        "Amend the task: the loop applies or rejects it between rounds.",
-    ]
 
     def assemble(cut_fails, cut):
         head = [
@@ -327,10 +355,17 @@ def ask_text(*, n, max_rounds, title, run_id, repo, probe, task_path,
                             " (probe sandbox: read only)" if probe else ""),
             "task: %s" % cut["task"],
             "round: %d of %d" % (n, max_rounds),
-            "next round: started at %s" % cut["next"],
+            "next round: started at %s (it is running now)" % cut["next"],
             "start commit: %s" % cut["start"],
             "changed files:",
             cut["diff"],
+        ]
+        answer = [
+            "## How to answer",
+            "qwen-agent --send %s -f - <<'EOF'" % run_id,
+            "advice; reaches the running round as a note",
+            "qwen-agent --amend %s -f - <<'EOF'" % run_id,
+            "the whole corrected task file; applies at the next check run",
         ]
         sections = ["\n".join(head),
                     "## Failing checks\n" + cut_fails,
@@ -419,7 +454,9 @@ def log_event(run_dir, ev, **fields):
     dropped rather than the line exceeded (biggest value first) -- and an `ev`
     so long that even the bare {"t","ev"} line would reach the cap is truncated
     to the longest prefix that fits: every event lands on the log. A symlinked
-    asks/ directory is refused in silence: the log is never the round's problem."""
+    asks/ directory is refused in silence, and so is any OSError (a missing or
+    blocked asks/): log_event never raises -- the log is never the round's
+    problem."""
     asks_dir = os.path.join(run_dir, ASKS_DIR)
     if _is_link(asks_dir):
         return
@@ -446,11 +483,307 @@ def log_event(run_dir, ev, **fields):
                 hi = mid - 1
         rec["ev"] = ev_str[:lo]
         line = _event_line(rec)
-    fd = os.open(os.path.join(asks_dir, LOG_FILE),
-                 os.O_WRONLY | os.O_CREAT | os.O_APPEND
-                 | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
-                 FILE_MODE)
+    with contextlib.suppress(OSError):        # never raises: not even a missing or
+        fd = os.open(os.path.join(asks_dir, LOG_FILE),   # blocked asks/ is the
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND   # round's problem
+                     | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                     FILE_MODE)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+
+
+# ----------------------------------------------------------------- addressing (10.2)
+def resolve_until_done(run_id):
+    """The registry pointer and run folder of an until-done loop, for --next-ask
+    and --amend. AsksError code 2 for an id that is not the plain 12-hex watch id
+    (an `<id>/<unit>` address is usage -- an until-done loop has no units); code 3
+    for no pointer, a pointer of another kind, no run_path, or an asks/ folder
+    that is missing or a symlink."""
+    if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
+        raise AsksError("run id must be 12 lowercase hex characters (got %r)"
+                        % (run_id,), code=_EXIT_USAGE)
+    pointer = _pointer(run_id)
+    if pointer is None:
+        raise AsksError("no such run: %s" % run_id)
+    if pointer.get("kind") != "until-done":
+        raise AsksError("run %s is not an until-done loop (kind %r)"
+                        % (run_id, pointer.get("kind")))
+    run_path = pointer.get("run_path")
+    if not isinstance(run_path, str) or not run_path:
+        raise AsksError("run %s has no run folder" % run_id)
+    asks_dir = os.path.join(run_path, ASKS_DIR)
+    if _is_link(asks_dir) or not os.path.isdir(asks_dir):
+        raise AsksError("no asks folder at %s (is the loop running with "
+                        "messaging on?)" % asks_dir)
+    return run_path, pointer
+
+
+def run_ended(run_dir: str, pointer: dict) -> bool:
+    """True when the loop is over: RUN/.ended exists, or the pointer -- RE-READ
+    here, so an `end` set while we wait counts -- has `end` set, or its pid is
+    dead (notes.pid_alive judges, watch's _alive would answer True off posix)."""
+    if os.path.lexists(os.path.join(run_dir, ENDED_FILE)):
+        return True
+    rec = pointer if isinstance(pointer, dict) else {}
+    run_id = rec.get("id")
+    if isinstance(run_id, str) and RUN_ID_RE.fullmatch(run_id):
+        fresh = _pointer(run_id)
+        if fresh is not None:
+            rec = fresh
+    if rec.get("end") is not None:
+        return True
+    return not pid_alive(rec.get("pid"))
+
+
+# ----------------------------------------------------------------- the CLI (10.2)
+USAGE_NEXT_ASK = "usage: qwen-agent --next-ask ID [--wait SECONDS] [--release]"
+USAGE_AMEND = "usage: qwen-agent --amend ID -f FILE|-f -"
+
+
+def _parse_next_ask(argv):
+    """(run_id, wait, release), hand-rolled like notes._parse_send: every wrong
+    shape is an AsksError code 2. SECONDS is an int WAIT_MIN..WAIT_MAX (default
+    WAIT_DEFAULT); --wait together with --release is usage."""
+    wait = None
+    release = False
+    positional = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--wait":
+            if wait is not None:
+                raise AsksError("--wait may be given only once", code=_EXIT_USAGE)
+            if i + 1 >= len(argv):
+                raise AsksError("--wait needs its seconds", code=_EXIT_USAGE)
+            try:
+                wait = int(argv[i + 1])
+            except ValueError:
+                raise AsksError("--wait SECONDS must be an integer",
+                                code=_EXIT_USAGE) from None
+            if not WAIT_MIN <= wait <= WAIT_MAX:
+                raise AsksError("--wait SECONDS must be %d..%d"
+                                % (WAIT_MIN, WAIT_MAX), code=_EXIT_USAGE)
+            i += 1
+        elif token == "--release":
+            if release:
+                raise AsksError("--release may be given only once", code=_EXIT_USAGE)
+            release = True
+        elif token.startswith("-") and len(token) > 1:
+            raise AsksError("unknown option: %s" % token, code=_EXIT_USAGE)
+        else:
+            positional.append(token)
+        i += 1
+    if len(positional) != 1:
+        raise AsksError("%s (got %d positional(s))"
+                        % (USAGE_NEXT_ASK, len(positional)), code=_EXIT_USAGE)
+    if wait is not None and release:
+        raise AsksError("--release waits for nothing: drop --wait", code=_EXIT_USAGE)
+    return positional[0], WAIT_DEFAULT if wait is None else wait, release
+
+
+def _install_lease_cleanup(run_dir):
+    """SIGTERM/SIGINT (and SIGHUP where the platform has it) give up OUR lease --
+    only the one that still names this pid -- and end the wait (spec 10.2): the
+    handler raises SystemExit, which unwinds cmd_next_ask through its finally.
+    Handlers belong to the main thread; off it nothing is installed. The saved
+    pairs go back through _restore_handlers."""
+    saved = {}
+    if threading.current_thread() is not threading.main_thread():
+        return saved
+
+    def _give_up(_signum, _frame):
+        delete_lease(run_dir, only_pid=os.getpid())
+        raise SystemExit(1)
+
+    names = ["SIGINT", "SIGTERM"]
+    if hasattr(signal, "SIGHUP"):
+        names.append("SIGHUP")
+    for name in names:
+        num = getattr(signal, name, None)
+        if num is None:
+            continue
+        with contextlib.suppress(OSError, ValueError):
+            saved[num] = signal.getsignal(num)
+            signal.signal(num, _give_up)
+    return saved
+
+
+def _restore_handlers(saved):
+    for num, old in saved.items():
+        with contextlib.suppress(OSError, ValueError):
+            signal.signal(num, old)
+
+
+def cmd_next_ask(argv) -> int:
+    """The --next-ask mode (spec 10.2). The ended check runs BEFORE the lease is
+    stamped -- an ended run exits 11 with no lease written and nothing claimed.
+    Then poll once a second: (1) ended: delete our own lease, `run ended`, 11;
+    (2) an ask claims: print its absolute path, log `claimed`, refresh, 0;
+    (3) the lease vanished under us (someone ran --release): `no ask yet`, 10;
+    (4) the wait over: refresh, `no ask yet`, 10. The lease is refreshed every
+    REFRESH seconds while waiting -- REFRESH is read at call time. The ask's
+    text is never printed: the answerer opens the path the claim returns."""
+    run_id, wait, release = _parse_next_ask(argv)
+    run_dir, pointer = resolve_until_done(run_id)
+    if release:
+        delete_lease(run_dir)              # any pid's, even after the run ended
+        return 0
+    if run_ended(run_dir, pointer):
+        sys.stderr.write("run ended\n")
+        return EXIT_RUN_ENDED
+    write_lease(run_dir, os.getpid())
+    saved = _install_lease_cleanup(run_dir)
     try:
-        os.write(fd, line)
+        deadline = time.time() + wait
+        last_refresh = time.time()
+        while True:
+            if run_ended(run_dir, pointer):
+                delete_lease(run_dir, only_pid=os.getpid())
+                sys.stderr.write("run ended\n")
+                return EXIT_RUN_ENDED
+            path = claim_oldest(run_dir)
+            if path is not None:
+                print(path)
+                sys.stdout.flush()
+                log_event(run_dir, "claimed",
+                          round=int(os.path.basename(path)[:-len(".md")]),
+                          pid=os.getpid())
+                write_lease(run_dir, os.getpid())
+                return 0
+            if not os.path.lexists(_lease_path(run_dir)):
+                sys.stderr.write("no ask yet\n")   # --release by another caller
+                return EXIT_NO_ASK
+            now = time.time()
+            if now >= deadline:
+                write_lease(run_dir, os.getpid())  # a waiter still owns the lease
+                sys.stderr.write("no ask yet\n")
+                return EXIT_NO_ASK
+            if now - last_refresh >= REFRESH:      # read at call time, not before
+                write_lease(run_dir, os.getpid())
+                last_refresh = now
+            time.sleep(POLL)
     finally:
-        os.close(fd)
+        _restore_handlers(saved)
+
+
+def _parse_amend(argv):
+    """(run_id, file_spec): exactly one ID and exactly one -f FILE|-f -, no
+    positional text -- the amendment is the file, never an argument. Usage 2."""
+    file_spec = None
+    positional = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "-f":
+            if file_spec is not None:
+                raise AsksError("-f may be given only once", code=_EXIT_USAGE)
+            if i + 1 >= len(argv):
+                raise AsksError("-f needs FILE or -", code=_EXIT_USAGE)
+            file_spec = argv[i + 1]
+            i += 1
+        elif token.startswith("-") and len(token) > 1:
+            raise AsksError("unknown option: %s" % token, code=_EXIT_USAGE)
+        else:
+            positional.append(token)
+        i += 1
+    if len(positional) != 1:
+        raise AsksError("%s (got %d positional(s))"
+                        % (USAGE_AMEND, len(positional)), code=_EXIT_USAGE)
+    if file_spec is None:
+        raise AsksError("--amend needs -f FILE or -f -", code=_EXIT_USAGE)
+    return positional[0], file_spec
+
+
+def _read_amend_source(spec):
+    """-f's operand: a file path, or `-` for stdin; bytes decoded leniently. Over
+    AMEND_MAX UTF-8 bytes is usage 2 -- the loop could never apply a file that
+    big -- and an unreadable file is usage too (like notes._read_text_source)."""
+    if spec == "-":
+        raw = (sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer")
+               else sys.stdin.read().encode("utf-8", "replace"))
+    else:
+        try:
+            with open(spec, "rb") as fh:
+                raw = fh.read()
+        except OSError as e:
+            raise AsksError("cannot read -f %s (%s)" % (spec, e),
+                            code=_EXIT_USAGE) from e
+    if len(raw) > AMEND_MAX:
+        raise AsksError("the amendment is %d bytes; the limit is %d"
+                        % (len(raw), AMEND_MAX), code=_EXIT_USAGE)
+    return raw.decode("utf-8", "replace")
+
+
+def _has_test_cmd(amend_dir):
+    """What amend/meta.json says about the run's test command. Only an explicit
+    false refuses a `test` item: a missing or unreadable meta does not say false."""
+    try:
+        rec = json.loads(safe_read(os.path.join(amend_dir, META_FILE),
+                                   _LEASE_MAX_BYTES).decode("utf-8", "replace"))
+    except (AsksError, OSError, ValueError):
+        return True
+    if not isinstance(rec, dict) or "has_test_cmd" not in rec:
+        return True
+    return bool(rec.get("has_test_cmd"))
+
+
+def cmd_amend(argv) -> int:
+    """The --amend mode (spec 10.2): the run must be there to take it (3 for an
+    ended run, a closed inbox, or a missing amend/), the corrected task file must
+    parse through taskfile.parse (a parse error -- an empty checklist is one --
+    prints the parser's message and writes nothing, 2), a `test` item needs a run
+    that has a test command (2), and then the bytes land in amend/pending.md by
+    safe_write with `amend queued` on stdout (0)."""
+    run_id, file_spec = _parse_amend(argv)
+    run_dir, pointer = resolve_until_done(run_id)
+    if run_ended(run_dir, pointer):
+        raise AsksError("the run has ended: %s" % run_id)
+    if os.path.lexists(os.path.join(run_dir, INBOX_DIR, CLOSED_SENTINEL)):
+        raise AsksError("the run's inbox is closed: %s" % run_id)
+    amend_dir = os.path.join(run_dir, AMEND_DIR)
+    if _is_link(amend_dir) or not os.path.isdir(amend_dir):
+        raise AsksError("no amend folder at %s (is the loop running with "
+                        "messaging on?)" % amend_dir)
+    text = _read_amend_source(file_spec)
+    try:
+        task = taskfile.parse(text)
+    except ValueError as e:
+        sys.stderr.write("%s\n" % e)           # the parser's own message
+        return _EXIT_USAGE
+    if any(item.kind == "test" for item in task.items) and not _has_test_cmd(amend_dir):
+        raise AsksError("the run has no test command (amend/meta.json): a "
+                        "'-- check: test' item could never be checked",
+                        code=_EXIT_USAGE)
+    safe_write(os.path.join(amend_dir, PENDING_FILE), text.encode("utf-8"))
+    print("amend queued")
+    sys.stdout.flush()
+    return 0
+
+
+def main(argv=None) -> int:
+    """qwen-agent.sh dispatches --next-ask/--amend here (the twin of notes.main's
+    send/notes): every refusal that is not printed by the mode itself rides on an
+    AsksError and leaves as its exit code (2 usage, 3 unavailable); the modes
+    return 0, 10 or 11 themselves."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if os.name == "nt":                        # bash reads our lines: never a \r (K8)
+        with contextlib.suppress(Exception):
+            sys.stdout.reconfigure(newline="\n")
+    if argv and argv[0] in ("next-ask", "--next-ask"):
+        handler = cmd_next_ask
+    elif argv and argv[0] in ("amend", "--amend"):
+        handler = cmd_amend
+    else:
+        sys.stderr.write("%s\n%s\n" % (USAGE_NEXT_ASK, USAGE_AMEND))
+        return _EXIT_USAGE
+    try:
+        return handler(argv[1:])
+    except AsksError as e:
+        sys.stderr.write("asks: %s\n" % e)
+        return e.code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

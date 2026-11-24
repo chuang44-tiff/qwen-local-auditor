@@ -211,6 +211,15 @@ def _no_advisor_budget_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_ask_lease_env(monkeypatch):
+    """A developer's QWEN_ASK_LEASE shell setting must not decide how long an
+    asks/lease.json lives in a test (asks.lease_seconds reads it, and the asks CLI
+    tests assert on lease expiry and freshness); the tests that need a lease length
+    set it themselves."""
+    monkeypatch.delenv("QWEN_ASK_LEASE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _claude_probe_off(monkeypatch):
     """The claude availability probe (claude_check.probe, and with it ui-test's run-start
     notice) never runs against this machine's real claude or network from a test. Probe
