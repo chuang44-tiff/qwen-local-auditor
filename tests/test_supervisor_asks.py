@@ -1,5 +1,5 @@
 # ruff: noqa: F811
-"""Stage 1.5, Task 4: the until-done supervisor writes an ask for a listening main
+"""Stage 1.5: the until-done supervisor writes an ask for a listening main
 session when a round fails (spec 10.3): the ask lands in RUN/asks/new/, the loop
 goes on without waiting, --rescue records its skip instead of calling Claude, and
 every way out stamps RUN/asks/.ended (spec 4.1, 10.1).

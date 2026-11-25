@@ -947,7 +947,7 @@ def _ask_lines(run_dir) -> list[str]:
 
 def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, start, repo, denied=(),
             agent_err="", notes=(), tools=None, transcript_found=False, switches=(), depth=None,
-            advisor=None, plan=None, rescue=None):
+            advisor=None, plan=None, rescue=None, amendments=None):
     diff = _git(repo, "diff", start)
     new = _new_files(repo)
     for rel in new:
@@ -994,6 +994,23 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
     # their own rows, present whenever the asks log holds an event -- a run that
     # asked gets the section even without --advisor or --rescue.
     ask_rows = _ask_lines(run_dir)
+    # Spec 10.4: the amendments the loop applied (k, local time, full
+    # diff), the ones it rejected (local time, enum reason -- never parser text
+    # or task lines) and the pending.md its end never reached. The section is
+    # there only when at least one of the three has something to say.
+    amend_applied, amend_rejected, unapplied = amendments if amendments else ([], [], None)
+    amend_lines = []
+    for k, clock, amend_diff in amend_applied:
+        amend_lines += ["### Amendment %d (%s)" % (k, clock), "", "```diff",
+                        *amend_diff.rstrip("\n").splitlines(), "```", ""]
+    if amend_rejected:
+        amend_lines += ["### Rejected", ""]
+        amend_lines += ["- %s: %s" % (clock, reason) for clock, reason in amend_rejected]
+        amend_lines += [""]
+    if unapplied:
+        amend_lines += ["### Unapplied", "", unapplied, ""]
+    if amend_lines:
+        amend_lines = ["", "## Checklist amendments", "", *amend_lines]
     text = "\n".join([
         "# until-done report", "",
         "stop: %s (exit %d)" % (reason, code),
@@ -1027,6 +1044,7 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
         *(["", "## Agent stderr", "```", *agent_err.splitlines()[:20], "```"] if agent_err else []),
         *(["", "## Notes", *notes] if notes else []),
         *(["", "## Steering notes", *steering] if steering else []),
+        *amend_lines,
         "full diff: %s" % os.path.join(run_dir, "diff.patch"), ""])
     path = os.path.join(run_dir, "report.md")
     _write(path, text)
@@ -1241,7 +1259,10 @@ def _run(o):
     watch_code = None                 # the exit its finish() records (None: not reached)
     asks_on = False                   # asks layout opened AND this loop on the page:
                                       # the only state in which a round may ask (10.3)
-    amend_k = 0                       # amendments applied this run (Task 5 counts them)
+    amend_k = 0                       # amendments applied this run (apply_amend counts them)
+    amend_applied = []                # report.md's applied rows: (k, local time, full diff)
+    amend_rejected = []               # report.md's rejected rows: (local time, enum reason)
+    amend_blocks = []                 # coder blocks waiting for the next resumed prompt
     advisor_dir = None                # --advisor: this run's ONE advisor state dir (finally removes it)
     rescue_dir = None                 # --rescue: this run's ONE rescue state dir (finally removes it)
     pending = None                    # the rescue record waiting for the next round's reply
@@ -1366,9 +1387,60 @@ def _run(o):
     def print_amend_line():
         """The line every reporting exit says on stdout once the checklist has been
         amended this run (k > 0): the session that started the loop must learn the
-        task changed without opening report.md. Task 5 counts the amendments."""
+        task changed without opening report.md. apply_amend counts the amendments."""
         if amend_k > 0:
             print("until-done: checklist amended %d time(s); see report" % amend_k)
+
+    def apply_amend(round_no):
+        """Spec 10.4: apply the amendment --amend queued under RUN/amend/
+        -- the loop calls this at TWO points of every round: right before the
+        round prompt is assembled, and immediately before the checks_start emit,
+        so a check run always uses the newest task. An amendment that lands
+        while a check run is in progress is therefore applied at the NEXT point,
+        never to the running one. Only an asks-on loop has the layout to apply
+        from; without it this does nothing. An exception inside the apply step
+        is treated as the read_error rejection it would have been -- the run
+        goes on. A rejection names the enum reason and nothing else: parser
+        text and task lines never reach the events."""
+        nonlocal amend_k, task_text, task, prev
+        if not asks_on:
+            return
+        try:
+            res = asks.apply_pending(run_dir, task_text, amend_k, has_cmd, round_no)
+        except Exception:
+            # Treated like the rejection it is -- the claim it may have left behind
+            # goes where a rejection's bytes go, and the reason rides on the log
+            # like _reject_amendment would have put it there.
+            res = asks.Rejected("read_error")
+            with contextlib.suppress(Exception):
+                os.replace(os.path.join(run_dir, asks.AMEND_DIR, asks.APPLYING_FILE),
+                           os.path.join(run_dir, asks.AMEND_DIR, asks.REJECTED,
+                                        "%d.md" % time.time_ns()))
+            asks.log_event(run_dir, "amend_rejected", round=round_no, reason="read_error")
+        if res is None:
+            return
+        if isinstance(res, asks.Rejected):
+            print("until-done: amendment rejected (%s)" % res.reason, file=sys.stderr)
+            _emit_loop(run_dir, "amend_rejected", round=round_no, reason=res.reason)
+            amend_rejected.append((time.strftime("%H:%M:%S"), res.reason))
+            return
+        amend_k += 1
+        task_text, task = res.text, res.task
+        with contextlib.suppress(Exception):    # the in-memory text is the run's
+            asks.safe_write(os.path.join(run_dir, "task.md"),  # truth now: a task.md
+                            task_text.encode("utf-8"))        # that will not land
+                                                              # never stops the loop
+        prev = None                 # 10.4: the no-progress stop cannot fire across
+                                    # an amendment: the old signature is the old task's
+        if plan_dir is not None and not plan_taken:
+            # --plan: the hook shows the advisor THIS run's task -- until the one
+            # plan call is taken, the copy in the plan dir must be the newest one.
+            with contextlib.suppress(OSError):
+                _write(os.path.join(plan_dir, "task.md"), task_text)
+        amend_blocks.append(asks.coder_block(res.k, res.diff))
+        amend_applied.append((res.k, time.strftime("%H:%M:%S"), res.diff))
+        _emit_loop(run_dir, "amend", k=res.k, round=round_no,
+                   added=res.added, removed=res.removed, changed=res.changed)
     try:
         # The handler in _stop_on_signal is not enough on its own: a signal
         # landing between the mkdir and `mine = True` would run the cleanup
@@ -1474,12 +1546,13 @@ def _run(o):
                 print("until-done: --probe: %s" % exc, file=sys.stderr)
                 flush_pending()
                 _close_run_inbox(run_inbox)       # K5: sweep before every report
-                asks.leftover_pending(run_dir)    # 10.1: housekeeping before the report
+                unapplied = asks.leftover_pending(run_dir)   # 10.1: housekeeping
                 path = _report(run_dir, reason="error: %s: %s" % (type(exc).__name__, exc),
                                code=EXIT_HARNESS, rounds=rounds, session=session,
                                tokens=tokens, results=results, log=log, start=start,
                                repo=run_dir, denied=denied, switches=_switches(o),
-                               depth=getattr(o, "depth", None), advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
+                               depth=getattr(o, "depth", None), advisor=advisor_info(), plan=plan_info(), rescue=o.rescue,
+                               amendments=(amend_applied, amend_rejected, unapplied))
                 report_path = path
                 _write_ended(run_dir)             # 10.1: the end marker after the report
                 print("report: %s" % path)
@@ -1496,9 +1569,22 @@ def _run(o):
         timeout_run = 0                 # consecutive unusable rounds that were timeouts
         reason, code = "round limit reached", EXIT_PARTIAL
         for rounds in range(1, o.max_rounds + 1):
-            prompt = feedback if (feedback and session) else FIRST.format(
+            # 10.4: the FIRST apply point -- before the prompt is assembled and
+            # before the notes are drained, so this round is asked about the
+            # newest task.
+            apply_amend(rounds)
+            resumed = bool(feedback and session)
+            prompt = feedback if resumed else FIRST.format(
                 task=task_text, log=decisions.render(decisions.load(log_path)),
                 shell=SHELL_TEST if has_cmd else SHELL_NONE)
+            if amend_blocks:
+                # The coder is told what changed (10.4): the pending blocks ride
+                # into this RESUMED prompt next to the drained notes, once. A
+                # FIRST prompt carries the whole current task already: dropped.
+                if resumed:
+                    for block in amend_blocks:
+                        prompt += "\n\n" + block
+                amend_blocks.clear()
             # K5: the drain runs before EVERY round (round 1 included -- notes sent
             # while probe.make ran are pending then) and on every path: FIRST,
             # REVIEW_ROUND, `unusable` feedback alike. Round 1 logs `before_round_1`,
@@ -1605,6 +1691,12 @@ def _run(o):
             decisions.append(log_path, decisions.parse(r["result"]), session=session,
                              commit=_git(repo, "rev-parse", "HEAD").strip())
             log = decisions.load(log_path)
+            # 10.4: the SECOND apply point -- immediately before the checks: a
+            # check run always uses the newest task. An amendment the main
+            # session queues while a check run is in progress waits for the
+            # next point (this round's prompt-assembly one never reruns; the
+            # next round's does) -- it never joins a running check run.
+            apply_amend(rounds)
             # The checks are running NOW: the page shows "Testing" from this line until the
             # `checks` line. It carries the checklist's size -- a count and nothing else,
             # never what a check printed. (A runner that dies leaves this line and no
@@ -1789,14 +1881,17 @@ def _run(o):
         patch = finish_probe()
         flush_pending()
         _close_run_inbox(run_inbox)               # K5: sweep before every report
-        asks.leftover_pending(run_dir)            # 10.1: an amendment nobody reached
-                                                  # moves aside before the report reads
+        unapplied = asks.leftover_pending(run_dir)   # 10.1: an amendment nobody
+                                                     # reached moves aside before the
+                                                     # report reads (10.4: it is
+                                                     # listed as unapplied there)
         path = _report(run_dir, reason=reason, code=code, rounds=rounds, session=session,
                        tokens=tokens, results=results, log=log, start=start, repo=repo,
                        denied=denied, agent_err=agent_err, notes=notes,
                        tools=tool_totals, transcript_found=transcript_found,
                        switches=_switches(o), depth=getattr(o, "depth", None),
-                       advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
+                       advisor=advisor_info(), plan=plan_info(), rescue=o.rescue,
+                       amendments=(amend_applied, amend_rejected, unapplied))
         report_path = path
         _write_ended(run_dir)                     # 10.1: the end marker after the report
         print("until-done: %s after %d round(s); session %s" % (reason, rounds, session or "-"))
@@ -1824,14 +1919,15 @@ def _run(o):
                 notes.append("sandbox kept: %s" % sb)
             flush_pending()
             _close_run_inbox(run_inbox)           # K5: sweep before every report
-            asks.leftover_pending(run_dir)        # 10.1: housekeeping before the report
+            unapplied = asks.leftover_pending(run_dir)   # 10.1: housekeeping
             path = _report(run_dir, reason="interrupted", code=EXIT_INTERRUPTED, rounds=rounds,
                            session=session, tokens=tokens, results=results, log=log, start=start,
                            repo=run_dir if (o.probe and sb is None) else repo,
                            denied=denied, notes=notes,
                            tools=tool_totals, transcript_found=transcript_found,
                            switches=_switches(o), depth=getattr(o, "depth", None),
-                           advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
+                           advisor=advisor_info(), plan=plan_info(), rescue=o.rescue,
+                           amendments=(amend_applied, amend_rejected, unapplied))
             report_path = path
             _write_ended(run_dir)                 # 10.1: the end marker after the report
             # A dead terminal (the window closed under the run) must not turn
@@ -1907,7 +2003,7 @@ def _run(o):
             # not take the report (and the 8) down with it.
             flush_pending()
         _close_run_inbox(run_inbox)               # K5: sweep before every report
-        asks.leftover_pending(run_dir)            # 10.1: housekeeping before the report
+        unapplied = asks.leftover_pending(run_dir)   # 10.1: housekeeping before the report
         path = _report(run_dir, reason="error: %s: %s" % (type(exc).__name__, exc),
                        code=EXIT_HARNESS, rounds=rounds, session=session, tokens=tokens,
                        results=results, log=log, start=start,
@@ -1915,7 +2011,8 @@ def _run(o):
                        denied=denied, agent_err=agent_err, notes=notes,
                        tools=tool_totals, transcript_found=transcript_found,
                        switches=_switches(o), depth=getattr(o, "depth", None),
-                       advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
+                       advisor=advisor_info(), plan=plan_info(), rescue=o.rescue,
+                       amendments=(amend_applied, amend_rejected, unapplied))
         report_path = path
         _write_ended(run_dir)                     # 10.1: the end marker after the report
         with contextlib.suppress(OSError):

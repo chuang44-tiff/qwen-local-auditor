@@ -31,9 +31,9 @@ that number is written to the directory's `count` file (what advisor_mcp.ask wri
 launches claude: a hook killed mid-call leaves a count and no record). A call that has either
 key but no --plan-state is a loud ValueError. With "plan_files" ({name: text}), those files
 are written into the directory too (the hook's plan.md and plan-digest.md logs).
-Every call that has --plan-state also appends {"round", "state", "task"} to
-$FAKE_AGENT_RECORD.plan: the QWEN_PLAN_ROUND it was given, the directory, and whether the
-supervisor had put task.md in it by then.
+Every call that has --plan-state also appends {"round", "state", "task", "task_text"} to
+$FAKE_AGENT_RECORD.plan: the QWEN_PLAN_ROUND it was given, the directory, whether the
+supervisor had put task.md in it by then, and that copy's text (None when there is none).
 Every call's argv is appended to $FAKE_AGENT_RECORD as one JSON line.
 """
 import json
@@ -94,9 +94,15 @@ if step.get("advisor_count") is not None:
         fh.write(str(step["advisor_count"]))
 if "--plan-state" in argv:
     pdir = argv[argv.index("--plan-state") + 1]
+    tpath = os.path.join(pdir, "task.md")
+    has_task = os.path.isfile(tpath)
+    task_text = None
+    if has_task:
+        with open(tpath, encoding="utf-8") as fh:
+            task_text = fh.read()
     with open(os.environ["FAKE_AGENT_RECORD"] + ".plan", "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"round": os.environ.get("QWEN_PLAN_ROUND"), "state": pdir,
-                             "task": os.path.isfile(os.path.join(pdir, "task.md"))}) + "\n")
+                             "task": has_task, "task_text": task_text}) + "\n")
 if step.get("plan_record") is not None or step.get("plan_count") or step.get("plan_files"):
     pdir = argv[argv.index("--plan-state") + 1]
     if step.get("plan_record") is not None:
