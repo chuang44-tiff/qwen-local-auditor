@@ -99,6 +99,11 @@ missed note into the next round's prompt, and pending notes end up in report.md 
 `## Steering notes`. `QWEN_STREAM=0` restores the old launch, creates no inbox, and such runs
 refuse `--send` (`reference/qwen-agent.md`, "Steer a running agent").
 
+An `--until-done` loop can ask the main session when a round fails, and it keeps looping while it
+does. Run `qwen-agent --next-ask ID` in the background; on exit 0 it prints the claimed ask's
+path — hand that file to a helper subagent on any model you pick. `--amend ID -f FILE` sends a
+corrected task file. The recipe and the helper brief are in `reference/ask-main.md`.
+
 ## Running tests and reproduction tests
 
 ```bash

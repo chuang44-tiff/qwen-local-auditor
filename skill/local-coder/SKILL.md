@@ -86,6 +86,8 @@ files and the denied tool calls.
 | 14 | another run holds this repo | wait, or remove a stale lock named in the message |
 | 130 | interrupted (Ctrl-C) | re-run when ready |
 
+A failing round can ask the main session for help while the loop keeps going: `local-auditor/reference/ask-main.md`.
+
 ## 4. Deviations
 
 The coder records every deliberate departure from the spec as a `## DEVIATION`
