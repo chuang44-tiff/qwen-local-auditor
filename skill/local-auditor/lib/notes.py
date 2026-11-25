@@ -40,10 +40,13 @@ is written. `take_pending(inbox, reason)` is the supervisor's between-rounds dra
 
 Text limits: non-empty after strip, at most 8,000 Unicode characters and 32 KiB UTF-8.
 
-CLI (spec 4.4/K9; qwen-agent.sh dispatches `--send`/`--notes` here before preflight):
+CLI (spec 4.4/K9 and 11.2; qwen-agent.sh dispatches `--send`/`--notes`/`--ask`/
+`--answer` here before preflight):
 
   python lib/notes.py send ADDRESS [--wait SECONDS] [-f FILE | -f -] [--] TEXT
   python lib/notes.py notes ADDRESS
+  python lib/notes.py ask ADDRESS [--wait SECONDS] [-f FILE | -f -] [--] TEXT
+  python lib/notes.py answer ADDRESS NOTE_ID [--wait SECONDS]
 
 `send` prints the note id on stdout and exits 0; exit 2 is usage (bad grammar, empty
 or oversized text, bad option combination), exit 3 is unavailable (no such run, run or
@@ -56,6 +59,20 @@ never-swept inbox reports `undelivered: closed`). `notes` prints one row per not
 (latest state) as `HH:MM:SS  <state>[: reason]  <id>  <preview>`, `no notes` for none,
 exit 0 for a run whose pointer exists (running or ended), exit 3 for none; the preview
 is the first 80 characters with control characters shown as spaces.
+
+`ask` (phase 2, spec 11.2) is `send` with kind `ask`: the same grammar and the same
+refusals, but it queues `kind="ask"`, prints `asked <id>`, and --wait SECONDS (1..3600;
+absent means 600) polls the agent's msg dir (single-shot `<watch_dir>/<id>.msg`,
+until-done `<RUN>/msg`, swarm/research unit `<RUN>/msg/units/<unit>`) once a second
+for its `reply` tool answer: `answer from <address> (HH:MM:SS):` then the text (over
+4000 characters is printed cut, with a last line `... (cut at 4000 characters)`),
+exit 0; `the agent ended without answering` on stderr and 11 when the inbox closes
+with no reply; `no answer yet: <id>` on stderr and 10 when the wait runs out.
+`answer ADDRESS NOTE_ID [--wait SECONDS]` (0..3600, absent means 0: one look) fetches
+a reply later -- even after the run ended (resolve with require_running=False: no
+running, pid or closed checks): an id with neither an inbox note (in `delivered/`,
+`new/` or `undelivered/`) nor a reply is `no such ask: <id>` and 3; a reply prints as
+above and exits 0; no reply waits like --ask (closed 11, wait over 10).
 """
 import contextlib
 import json
@@ -93,6 +110,10 @@ SENDER = "main"                        # phase 1: every note comes from the main
 
 EXIT_OK, EXIT_USAGE, EXIT_UNAVAILABLE = 0, 2, 3
 EXIT_STILL_QUEUED, EXIT_UNDELIVERED, EXIT_DEFERRED = 10, 11, 12
+
+ASK_WAIT_DEFAULT = 600                       # --ask with no --wait: ten minutes
+ASK_POLL = 1                                 # seconds between read_reply polls (4.3)
+REPLY_MAX = 4000                             # answer text printed whole, else cut (4.3)
 
 _FLAGS = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0) \
     | getattr(os, "O_NOFOLLOW", 0)
@@ -801,6 +822,9 @@ def resolve_address(address, require_running=True):
 USAGE_SEND = ("usage: qwen-agent --send ADDRESS [--wait SECONDS] "
               "[-f FILE | -f -] [--] TEXT")
 USAGE_NOTES = "usage: qwen-agent --notes ADDRESS"
+USAGE_ASK = ("usage: qwen-agent --ask ADDRESS [--wait SECONDS] "
+             "[-f FILE | -f -] [--] TEXT")
+USAGE_ANSWER = "usage: qwen-agent --answer ADDRESS NOTE_ID [--wait SECONDS]"
 
 
 def _read_text_source(spec):
@@ -961,6 +985,156 @@ def cmd_notes(argv):
     return EXIT_OK
 
 
+# ------------------------------------------------------------ ask and answer (11.2)
+def _msgdir():
+    """The msgdir module, imported on first use: lib/msgdir.py imports this module
+    at its top, so a module-level import would be a cycle (the repo's deferred-
+    import pattern, cf. lib/advisor_mcp.py's watch import inside its handler)."""
+    from lib import msgdir
+    return msgdir
+
+
+def msg_dir_for(pointer, unit):
+    """The agent's message dir from its registry pointer (spec 4.1/11.2): the
+    single-shot's `<watch_dir>/<id>.msg` beside its pointer and inbox, the
+    until-done loop's `RUN/msg` (one per loop, shared by its rounds), a swarm or
+    research unit's `RUN/msg/units/<unit>`. resolve_address has already vouched
+    for the pointer's kind and run_path; only the agent kind's own id is checked."""
+    kind = pointer.get("kind")
+    if kind == "agent":
+        run_id = pointer.get("id")
+        if not isinstance(run_id, str) or not run_id:
+            raise NotesError("pointer has no run id", EXIT_UNAVAILABLE)
+        return _msgdir().single_msgdir(watch.watch_dir(), run_id)
+    if kind == "until-done":
+        return _msgdir().loop_msgdir(pointer.get("run_path"))
+    return _msgdir().unit_msgdir(pointer.get("run_path"), unit)
+
+
+def _print_reply(address, reply):
+    """One answer on stdout (spec 4.3): `answer from <address> (HH:MM:SS):` from the
+    reply's own stamp, then the text; more than REPLY_MAX characters is printed cut,
+    the cut notice as the last line."""
+    print("answer from %s (%s):" % (address, fmt_clock(reply.get("t") or time.time())))
+    text = reply.get("text")
+    if not isinstance(text, str):
+        text = ""
+    # the model's text lands in the caller's terminal: no escape sequences
+    text = _strip_controls(text)
+    if len(text) > REPLY_MAX:
+        print(text[:REPLY_MAX])
+        print("... (cut at %d characters)" % REPLY_MAX)
+    else:
+        print(text)
+
+
+def _ask_note_exists(inbox, note_id):
+    """Does the inbox hold a note file with that id in `delivered/`, `new/` or
+    `undelivered/` (the driver moves it as it delivers)? --answer's unknown-id
+    check (11.2); a symlink is never opened and never counts."""
+    if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
+        return False
+    for state in (DELIVERED, NEW, UNDELIVERED):
+        path = os.path.join(inbox, state, "%s.json" % note_id)
+        if not _is_link(path) and os.path.isfile(path):
+            return True
+    return False
+
+
+def _wait_for_reply(msg_dir, inbox, address, note_id, seconds):
+    """The answer wait (spec 4.3/11.2): poll the agent's msg dir for its reply every
+    ASK_POLL seconds. A reply prints (0); the inbox `.closed` with no reply is
+    `the agent ended without answering` (11); the wait running out is
+    `no answer yet: <id>` (10). seconds == 0 is exactly one look: reply, closed,
+    over -- it never sleeps."""
+    msgdir = _msgdir()
+    deadline = time.time() + seconds
+    while True:
+        reply = msgdir.read_reply(msg_dir, note_id)
+        if reply is not None:
+            _print_reply(address, reply)
+            return EXIT_OK
+        if is_closed(inbox):
+            sys.stderr.write("the agent ended without answering\n")
+            return EXIT_UNDELIVERED
+        if time.time() >= deadline:
+            sys.stderr.write("no answer yet: %s\n" % note_id)
+            return EXIT_STILL_QUEUED
+        time.sleep(ASK_POLL)
+
+
+def cmd_ask(argv):
+    """The `--ask` mode (11.2): `send`'s grammar and refusals (require_running=True),
+    but the note is kind `ask` and the wait is for the agent's `reply` tool answer
+    in its msg dir -- default 600 s, no `--wait` given."""
+    address, wait, text = _parse_send(argv)
+    if not valid_address(address):
+        raise NotesError("malformed address: %r" % address, EXIT_USAGE)
+    inbox, pointer, unit = resolve_address(address, require_running=True)
+    note_id = queue_note(inbox, address, text, kind="ask")
+    print("asked %s" % note_id)
+    sys.stdout.flush()
+    return _wait_for_reply(msg_dir_for(pointer, unit), inbox, address, note_id,
+                           ASK_WAIT_DEFAULT if wait is None else wait)
+
+
+def _parse_answer(argv):
+    """The `--answer` grammar, hand-rolled like _parse_send: ADDRESS, NOTE_ID and an
+    optional --wait SECONDS (0..3600; absent means 0 -- one look, no wait). Every
+    wrong shape is a NotesError code 2."""
+    wait = None
+    positional = []
+    rest = False
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if rest:
+            positional.append(token)
+        elif token == "--":
+            rest = True
+        elif token == "--wait":
+            if wait is not None or i + 1 >= len(argv):
+                raise NotesError("--wait needs its seconds, once", EXIT_USAGE)
+            try:
+                wait = int(argv[i + 1])
+            except ValueError:
+                raise NotesError("--wait SECONDS must be an integer", EXIT_USAGE) from None
+            if not 0 <= wait <= 3600:
+                raise NotesError("--wait SECONDS must be 0..3600", EXIT_USAGE)
+            i += 1
+        elif token.startswith("--wait="):
+            return _parse_answer(argv[:i] + ["--wait", token[len("--wait="):]] + argv[i + 1:])
+        elif token.startswith("-") and len(token) > 1:
+            raise NotesError("unknown option: %s" % token, EXIT_USAGE)
+        else:
+            positional.append(token)
+        i += 1
+    if len(positional) != 2:
+        raise NotesError("%s (got %d positional(s))" % (USAGE_ANSWER, len(positional)),
+                         EXIT_USAGE)
+    return positional[0], positional[1], 0 if wait is None else wait
+
+
+def cmd_answer(argv):
+    """The `--answer` mode (11.2): fetch the reply to an earlier ask, even after the
+    run ended -- resolve with require_running=False (no running, pid or closed
+    checks). Unknown id (no note of it in the inbox and no reply) is 3; a reply
+    prints (0); no reply waits like --ask (closed 11, over 10)."""
+    address, note_id, wait = _parse_answer(argv)
+    if not valid_address(address):
+        raise NotesError("malformed address: %r" % address, EXIT_USAGE)
+    inbox, pointer, unit = resolve_address(address, require_running=False)
+    msg_dir = msg_dir_for(pointer, unit)
+    reply = _msgdir().read_reply(msg_dir, note_id)
+    if reply is not None:
+        _print_reply(address, reply)
+        return EXIT_OK
+    if not _ask_note_exists(inbox, note_id):
+        sys.stderr.write("no such ask: %s\n" % note_id)
+        return EXIT_UNAVAILABLE
+    return _wait_for_reply(msg_dir, inbox, address, note_id, wait)
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if os.name == "nt":                        # bash reads our lines: never a \r (K8)
@@ -971,8 +1145,13 @@ def main(argv=None):
         handler = cmd_send
     elif argv and argv[0] in ("notes", "--notes"):
         handler = cmd_notes
+    elif argv and argv[0] in ("ask", "--ask"):
+        handler = cmd_ask
+    elif argv and argv[0] in ("answer", "--answer"):
+        handler = cmd_answer
     else:
-        sys.stderr.write("%s\n%s\n" % (USAGE_SEND, USAGE_NOTES))
+        sys.stderr.write("%s\n%s\n%s\n%s\n"
+                         % (USAGE_SEND, USAGE_NOTES, USAGE_ASK, USAGE_ANSWER))
         return EXIT_USAGE
     try:
         return handler(argv[1:])

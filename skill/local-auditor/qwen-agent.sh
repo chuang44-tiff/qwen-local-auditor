@@ -454,6 +454,12 @@ STEERING  (send a note to a RUNNING local agent; it arrives as a plain user
                        (11) or 'deferred to the next round' (12).
       --notes ADDRESS  One row per note that agent ever received or missed:
                        'HH:MM:SS  state[: reason]  id  first 80 characters'.
+      --ask ADDRESS TEXT
+                       Ask a running agent a question; --wait S prints its
+                       reply (default 600 s).
+      --answer ADDRESS ID
+                       Print the reply to an earlier --ask (works after the
+                       run ended).
       --next-ask ID    Wait for the oldest ask of the until-done loop ID and
                        claim it: prints the claimed ask's path and exits 0 (the
                        ask's text is never printed). --wait SECONDS (1..3600,
@@ -1217,9 +1223,12 @@ while [ $# -gt 0 ]; do
     --replay)             need_arg "$1" $(($#-1))
                           [ -n "$2" ] || { die "--replay needs a directory, not an empty string"; exit $QA_USAGE; }
                           REPLAY="$2"; shift 2 ;;
-    # The sender CLI (4.4): everything after --send/--notes belongs to notes.py.
-    --send)               MSG_MODE=send;  MSG_ARGS=("${@:2}"); shift $# ;;
-    --notes)              MSG_MODE=notes; MSG_ARGS=("${@:2}"); shift $# ;;
+    # The sender CLI (4.4) and the ask CLI (11.2): everything after --send/--notes/
+    # --ask/--answer belongs to notes.py.
+    --send)               MSG_MODE=send;   MSG_ARGS=("${@:2}"); shift $# ;;
+    --notes)              MSG_MODE=notes;  MSG_ARGS=("${@:2}"); shift $# ;;
+    --ask)                MSG_MODE=ask;    MSG_ARGS=("${@:2}"); shift $# ;;
+    --answer)             MSG_MODE=answer; MSG_ARGS=("${@:2}"); shift $# ;;
     # The asks CLI (stage 1.5, 10.2): the same verbatim takeover for --next-ask/
     # --amend; the grammar is lib/asks.py's to enforce, so the launcher parses
     # nothing after the sub-command here either.
@@ -1619,12 +1628,14 @@ if [ -n "$RECORD" ] && [ -z "$SCENARIOS" ]; then
   exit $QA_USAGE
 fi
 
-# ------------------------------------ --send / --notes (phase 1), --next-ask / --amend (1.5)
+# ------ --send / --notes / --ask / --answer (phases 1-2), --next-ask / --amend (1.5)
 # The sender side of messaging talks to the watch registry and the target's inbox:
 # no model, no preflight, no argv, no role -- dispatched early, like --replay
-# (spec 4.4). lib/notes.py owns the --send/--notes grammar and every exit code (K9):
-# 0 queued (or delivered, with --wait), 2 usage, 3 unavailable, and 10/11/12 for
-# the --wait outcomes; lib/asks.py owns --next-ask/--amend (stage 1.5, spec 10.2):
+# (spec 4.4). lib/notes.py owns the --send/--notes/--ask/--answer grammar and every
+# exit code (K9, and 11.2 for the ask): 0 queued (or delivered, with --wait; the
+# reply printed, for --ask/--answer), 2 usage, 3 unavailable, and 10/11/12 for
+# the --wait outcomes (10 no answer yet, 11 the agent ended without answering);
+# lib/asks.py owns --next-ask/--amend (stage 1.5, spec 10.2):
 # 0 claimed/queued, 2 usage, 3 unavailable, 10 no ask yet, 11 run ended. They are
 # this run's exit codes, passed through untouched.
 if [ -n "$MSG_MODE" ]; then
