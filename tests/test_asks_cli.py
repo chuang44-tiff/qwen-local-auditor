@@ -533,3 +533,57 @@ def test_sh_help_lists_next_ask_and_amend(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "--next-ask" in r.stdout
     assert "--amend" in r.stdout
+
+
+def test_amend_queued_after_the_loop_closed_is_taken_back(tmp_path, monkeypatch, capsys):
+    # The loop's end runs: close inbox -> move a leftover pending.md aside ->
+    # report -> .ended. An --amend whose write lands after that move would be
+    # read by nobody: it sees the closed inbox after writing, takes the file
+    # back and exits 3 instead of claiming "amend queued".
+    run = setup(tmp_path, monkeypatch)
+    task = tmp_path / "task.md"
+    task.write_text(VALID_TASK, encoding="utf-8")
+    inbox = os.path.join(run, asks.INBOX_DIR)
+    real_write = asks.safe_write
+
+    def write_then_close(path, data, *a, **kw):
+        real_write(path, data, *a, **kw)
+        os.makedirs(inbox, exist_ok=True)
+        open(os.path.join(inbox, asks.CLOSED_SENTINEL), "a").close()
+
+    monkeypatch.setattr(asks, "safe_write", write_then_close)
+    assert asks.main(["amend", RUN_ID, "-f", str(task)]) == 3
+    assert not os.path.lexists(pending_path(run))
+    assert "amend queued" not in capsys.readouterr().out
+
+
+def test_amend_taken_by_the_loop_before_close_is_queued(tmp_path, monkeypatch, capsys):
+    # ...but when the loop already took the file (applied it, or moved it to
+    # unapplied.md for the report) before the inbox closed, it IS queued: exit 0.
+    run = setup(tmp_path, monkeypatch)
+    task = tmp_path / "task.md"
+    task.write_text(VALID_TASK, encoding="utf-8")
+    inbox = os.path.join(run, asks.INBOX_DIR)
+    real_write = asks.safe_write
+
+    def write_then_loop_takes_it(path, data, *a, **kw):
+        real_write(path, data, *a, **kw)
+        assert asks.leftover_pending(run)            # the loop's end, moving it aside
+        os.makedirs(inbox, exist_ok=True)
+        open(os.path.join(inbox, asks.CLOSED_SENTINEL), "a").close()
+
+    monkeypatch.setattr(asks, "safe_write", write_then_loop_takes_it)
+    assert asks.main(["amend", RUN_ID, "-f", str(task)]) == 0
+    assert capsys.readouterr().out == "amend queued\n"
+    assert os.path.exists(os.path.join(run, asks.AMEND_DIR, "unapplied.md"))
+
+
+def test_amend_invalid_utf8_counts_its_decoded_size(tmp_path, monkeypatch, capsys):
+    # invalid bytes decode to U+FFFD (3 bytes each): a file under the cap on disk
+    # but over it once decoded is refused here, not queued for the loop to reject
+    run = setup(tmp_path, monkeypatch)
+    task = tmp_path / "task.md"
+    task.write_bytes(VALID_TASK.encode("utf-8") + b"\xff" * (asks.AMEND_MAX // 2))
+    assert asks.main(["amend", RUN_ID, "-f", str(task)]) == 2
+    assert not os.path.lexists(pending_path(run))
+    capsys.readouterr()

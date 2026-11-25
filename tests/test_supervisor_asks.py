@@ -175,6 +175,8 @@ def test_live_lease_writes_ask_and_skips_rescue(env, page, fake_claude, tmp_path
     text = ask_of(run, 1)
     assert text.startswith("# Ask 1 for ")
     assert "(run %s)" % watch in text
+    # the title is the description only: the task line already names the file
+    assert "(%s)" % os.path.basename(str(task)) not in text.splitlines()[0]
     assert "round: 1 of 8" in text
     assert "changed files:" in text
     assert "## Failing checks" in text and "FAIL item 1" in text
@@ -357,6 +359,13 @@ def test_ask_diffstat_excludes_secrets(env, page, tmp_path):
     # the same rule straight from the helper
     stat = supervisor._diffstat(str(repo), start)
     assert "value.txt" in stat and ".env" not in stat
+    # a RENAMED secret: rename detection would list only the new name and print
+    # ".env => notes.txt"; the rule runs with --no-renames, so .env stays out
+    (repo / ".env").write_text("API=A\n")             # the start content: an exact rename
+    os.replace(repo / ".env", repo / "notes.txt")
+    git(repo, "add", "-A")
+    stat = supervisor._diffstat(str(repo), start)
+    assert ".env" not in stat and "notes.txt" in stat
 
 
 def test_stream_off_no_asks_dirs(env, page, tmp_path, monkeypatch):

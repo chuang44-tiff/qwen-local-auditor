@@ -20,7 +20,7 @@ the lease, the rescue call is skipped, and the report notes
 | exit | meaning | what to do |
 |---|---|---|
 | 0 | an ask was claimed; its path is on stdout | start a helper subagent with the brief below and that path, then run `--next-ask` again |
-| 10 | `no ask yet`: the wait ran out, or the lease was released | run `--next-ask` again, or stop |
+| 10 | `no ask yet`: the wait ran out, or the lease was released | run `--next-ask` again, or stop with `--next-ask ID --release` |
 | 11 | `run ended` | stop |
 | 3 | no such until-done run, or it runs with messaging off (`QWEN_STREAM=0`) | stop |
 | 2 | usage error | fix the command |
@@ -83,9 +83,9 @@ ends first.
 | 3 | the run has ended, its inbox is closed, or it has no amend folder |
 
 The loop rejects an amendment that is identical to the current task or no longer parses.
-Every applied amendment is printed on the loop's stdout
-(`until-done: checklist amended k time(s); see report`) and diffed in full in report.md
-under `## Checklist amendments`.
+When the run ends, the loop's stdout counts the applied amendments
+(`until-done: checklist amended k time(s); see report`), and report.md diffs each one in
+full under `## Checklist amendments`.
 
 ## What this does not protect against
 

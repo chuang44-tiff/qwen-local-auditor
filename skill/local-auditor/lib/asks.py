@@ -289,9 +289,14 @@ def lease_seconds():
         value = None
     if value is not None and LEASE_MIN <= value <= LEASE_MAX:
         return value
-    sys.stderr.write("asks: QWEN_ASK_LEASE=%r is not an integer in %d..%d;"
-                     " using %d\n" % (raw, LEASE_MIN, LEASE_MAX, LEASE_DEFAULT))
+    if raw not in _LEASE_WARNED:               # one warning, not one per refresh
+        _LEASE_WARNED.add(raw)
+        sys.stderr.write("asks: QWEN_ASK_LEASE=%r is not an integer in %d..%d;"
+                         " using %d\n" % (raw, LEASE_MIN, LEASE_MAX, LEASE_DEFAULT))
     return LEASE_DEFAULT
+
+
+_LEASE_WARNED = set()
 
 
 def write_lease(run_dir, pid):
@@ -895,10 +900,12 @@ def _read_amend_source(spec):
         except OSError as e:
             raise AsksError("cannot read -f %s (%s)" % (spec, e),
                             code=_EXIT_USAGE) from e
-    if len(raw) > AMEND_MAX:
+    text = raw.decode("utf-8", "replace")
+    size = max(len(raw), len(text.encode("utf-8")))   # replacements grow invalid bytes
+    if size > AMEND_MAX:
         raise AsksError("the amendment is %d bytes; the limit is %d"
-                        % (len(raw), AMEND_MAX), code=_EXIT_USAGE)
-    return raw.decode("utf-8", "replace")
+                        % (size, AMEND_MAX), code=_EXIT_USAGE)
+    return text
 
 
 def _has_test_cmd(amend_dir):
@@ -923,15 +930,16 @@ def cmd_amend(argv) -> int:
     safe_write with `amend queued` on stdout (0)."""
     run_id, file_spec = _parse_amend(argv)
     run_dir, pointer = resolve_until_done(run_id)
+    text = _read_amend_source(file_spec)       # before the checks: stdin can be slow
+    closed = os.path.join(run_dir, INBOX_DIR, CLOSED_SENTINEL)
     if run_ended(run_dir, pointer):
         raise AsksError("the run has ended: %s" % run_id)
-    if os.path.lexists(os.path.join(run_dir, INBOX_DIR, CLOSED_SENTINEL)):
+    if os.path.lexists(closed):
         raise AsksError("the run's inbox is closed: %s" % run_id)
     amend_dir = os.path.join(run_dir, AMEND_DIR)
     if _is_link(amend_dir) or not os.path.isdir(amend_dir):
         raise AsksError("no amend folder at %s (is the loop running with "
                         "messaging on?)" % amend_dir)
-    text = _read_amend_source(file_spec)
     try:
         task = taskfile.parse(text)
     except ValueError as e:
@@ -941,7 +949,20 @@ def cmd_amend(argv) -> int:
         raise AsksError("the run has no test command (amend/meta.json): a "
                         "'-- check: test' item could never be checked",
                         code=_EXIT_USAGE)
-    safe_write(os.path.join(amend_dir, PENDING_FILE), text.encode("utf-8"))
+    pending = os.path.join(amend_dir, PENDING_FILE)
+    safe_write(pending, text.encode("utf-8"))
+    # The loop closes its inbox BEFORE it moves a leftover pending.md aside, so a
+    # write that lands after that move sees the sentinel here and takes the file
+    # back. If the file is already gone, the loop took it (applied, or listed as
+    # unapplied in the report): it is queued either way.
+    if os.path.lexists(closed) or run_ended(run_dir, pointer):
+        try:
+            os.remove(pending)
+        except FileNotFoundError:
+            pass
+        else:
+            raise AsksError("the run ended while the amendment was being queued: %s"
+                            % run_id)
     print("amend queued")
     sys.stdout.flush()
     return 0

@@ -730,11 +730,13 @@ def claude_tools_for(call):
 
 def _secret_exclude(repo, start):
     """(secret-named changed paths, git pathspec) -- the no-secret-leaves-the-machine
-    rule every diff of this loop is cut by."""
+    rule every diff of this loop is cut by. Every diff under this rule runs with
+    --no-renames: rename detection would list only the new name, so a renamed
+    secret would slip past the pathspec, its old content riding along."""
     # -z, not --name-only's lines: porcelain would octal-quote a non-ASCII name
     # (core.quotePath), and an escaped pathspec matches nothing -- the secret it
     # names would stay in the diff.
-    secrets = [p for p in _git(repo, "diff", "--name-only", "-z", start).split("\0")
+    secrets = [p for p in _git(repo, "diff", "--no-renames", "--name-only", "-z", start).split("\0")
                if p and advisor_mcp.looks_secret(p)]
     # A magic pathspec's body matches as a GLOB: without literal, a secret named
     # key[1].pem would not match :(exclude)key[1].pem ([1] is a one-char class).
@@ -747,7 +749,7 @@ def _secrets_left(repo, start, spec):
     reaches this process with replacements) defeat even a literal pathspec. True
     when a secret-named changed path would still sit in the excluded diff."""
     return any(advisor_mcp.looks_secret(p)
-               for p in _git(repo, "diff", "--name-only", "-z", start, *spec).split("\0")
+               for p in _git(repo, "diff", "--no-renames", "--name-only", "-z", start, *spec).split("\0")
                if p)
 
 
@@ -758,7 +760,7 @@ def _diffstat(repo, start):
     secrets, spec = _secret_exclude(repo, start)
     if secrets and _secrets_left(repo, start, spec):
         return "(diff stat omitted: a secret file could not be excluded)"
-    return "\n".join(_git(repo, "diff", "--stat", start, *spec).splitlines()[:40])
+    return "\n".join(_git(repo, "diff", "--no-renames", "--stat", start, *spec).splitlines()[:40])
 
 
 def rescue_advice(model, state_dir, budget, log_path, repo, start, fails, task, check_files=()):
@@ -778,7 +780,7 @@ def rescue_advice(model, state_dir, budget, log_path, repo, start, fails, task, 
     env["QA_ADVISOR_TOOLS"] = "1" if claude_tools_for("rescue") else ""
     try:
         secrets, spec = _secret_exclude(repo, start)
-        diff = _git(repo, "diff", start, *spec)
+        diff = _git(repo, "diff", "--no-renames", start, *spec)
         if secrets and _secrets_left(repo, start, spec):
             # A secret-named file would still sit in the diff: no diff goes out
             # at all rather than that file's content.
@@ -1119,18 +1121,21 @@ def _watch_start(title, run_dir, max_rounds):
                                       # so _watch_end still closes the pointer
 
 
-def _watch_title(task_path):
+def _watch_title(task_path, with_name=True):
     """The loop's page title: a short description taken from the task file's OWN text
     and its name kept at the end -- "<description> (<file name>)", or just the file
     name when watch.describe() finds nothing (or the file cannot be read: a title is
-    never a reason to fail the run, so this is best effort all the way down)."""
+    never a reason to fail the run, so this is best effort all the way down).
+    with_name=False drops the "(<file name>)" suffix; an ask already has a task line."""
     name = os.path.basename(str(task_path))
     try:
         desc = watch.describe(task_path)
     except Exception as e:
         watch._warn("the title description failed (%s); the file name stands alone" % e)
         desc = ""
-    return "%s (%s)" % (desc, name) if desc else name
+    if not desc:
+        return name
+    return "%s (%s)" % (desc, name) if with_name else desc
 
 
 def _watch_end(run_id, code):
@@ -1835,7 +1840,7 @@ def _run(o):
                 with contextlib.suppress(Exception):
                     asks.write_ask(run_dir, rounds, asks.ask_text(
                         n=rounds, max_rounds=o.max_rounds,
-                        title=_watch_title(o.task), run_id=watch_id, repo=repo,
+                        title=_watch_title(o.task, with_name=False), run_id=watch_id, repo=repo,
                         probe=bool(o.probe),
                         task_path=os.path.join(run_dir, "task.md"),
                         next_started=time.strftime("%H:%M:%S"), start=start,

@@ -109,6 +109,7 @@ def test_lease_live_and_expired(tmp_path, monkeypatch):
 
 
 def test_lease_seconds_env(monkeypatch, capsys):
+    monkeypatch.setattr(asks, "_LEASE_WARNED", set())
     monkeypatch.delenv("QWEN_ASK_LEASE", raising=False)
     assert asks.LEASE_DEFAULT == 600
     assert asks.lease_seconds() == 600
@@ -371,3 +372,15 @@ def test_log_event_symlinked_asks_dir_refused(tmp_path):
     os.symlink(str(elsewhere), str(run / asks.ASKS_DIR))
     asks.log_event(str(run), "anything")              # silent refusal, no raise
     assert not elsewhere.exists()
+
+
+def test_bad_lease_env_warns_once(tmp_path, monkeypatch, capsys):
+    # a listener refreshes its lease every 30 s: a bad QWEN_ASK_LEASE is ONE
+    # warning for the whole wait, not one per refresh
+    monkeypatch.setattr(asks, "_LEASE_WARNED", set())
+    monkeypatch.setenv("QWEN_ASK_LEASE", "abc")
+    run = str(tmp_path / "run")
+    asks.init_run(run, True)
+    for _ in range(3):
+        asks.write_lease(run, os.getpid())
+    assert capsys.readouterr().err.count("QWEN_ASK_LEASE") == 1
