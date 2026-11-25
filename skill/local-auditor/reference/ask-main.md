@@ -87,6 +87,24 @@ When the run ends, the loop's stdout counts the applied amendments
 (`until-done: checklist amended k time(s); see report`), and report.md diffs each one in
 full under `## Checklist amendments`.
 
+## Questions from agents
+
+A running agent can also ask the main session a question of its own (the `ask_main`
+tool). Question asks are `q<N>.md` files, and they arrive through the very same
+`qwen-agent --next-ask ID` as failing-round asks: it claims whichever ask is older
+(a tie goes to the failing round) and prints its path. `--next-ask` covers until-done
+loops and swarm/research runs alike.
+
+Open the claimed file. It carries the question, the options the agent offered, and the
+one command that answers the asker directly: `qwen-agent --send <address> -f - <<'EOF'`.
+Answer with it — or don't answer: the agent was told to decide for itself and keep
+working, so an unanswered question blocks nothing.
+
+A question is never a failing round: `--amend` does not apply to `q<N>.md`. A run allows
+`QWEN_ASK_MAIN_MAX` questions in total (default 5); later ones are dropped and the agent
+is told to decide itself. The report counts them on the
+`questions: admitted N, dropped N, answered N` line.
+
 ## What this does not protect against
 
 Everything here runs as the same OS user, so a coder that wanted to could forge an ask, a

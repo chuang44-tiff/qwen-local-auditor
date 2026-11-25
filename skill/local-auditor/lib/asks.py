@@ -12,12 +12,15 @@ with an enum reason; ``leftover_pending`` moves an amendment nobody reached at r
 end); the rest of the loop side -- the supervisor writing asks and the wiring that
 calls these -- comes later.
 
-Run-folder layout (spec 4.1)::
+Run-folder layout (spec 4.1, phase 2 spec 11.3)::
 
-    <RUN>/asks/new/<n>.md       the asks, written by the failing round
+    <RUN>/asks/new/<n>.md       the failing-round asks, written by the loop
+    <RUN>/asks/new/q<n>.md      an agent's ask_main question, admitted by the relay
     <RUN>/asks/claimed/<n>.md   the ask one answerer holds (claimed by rename)
     <RUN>/asks/lease.json       {"pid","until","t"}: who may ask right now
     <RUN>/asks/log.jsonl        the asks event log, one JSON line per event
+    <RUN>/asks/questions.json   {"admitted": N}: the run's question counter
+    <RUN>/asks/.admit.lock      admission's O_EXCL lock (transient, 30 s stale)
     <RUN>/amend/pending.md      the amendment --amend queued for the loop
     <RUN>/amend/.applying.md    the amendment mid-claim by apply_pending (transient)
     <RUN>/amend/applied/        amendments the loop applied
@@ -38,6 +41,10 @@ parse error (an empty checklist is one), an over-AMEND_MAX body, a wrong grammar
 or a test item in a run with no test command; 3 for an ended run, a closed inbox
 or a missing amend folder. The ask's text is never printed. qwen-agent.sh
 dispatches --next-ask/--amend here and exports QWEN_ASK_LEASE for the dispatch.
+--next-ask (and --release) resolve their run through ``resolve_asks_run``: an
+until-done loop or a swarm/research run; --amend keeps ``resolve_until_done``
+(until-done only). Admission (``admit_question``, the relays' side, phase 2
+spec 11.3) is the only writer of ``q<n>.md``, the counter and the lock.
 
 Directories are 0700 and files 0600 on POSIX, like lib/notes.py; every write goes
 through safe_write (a unique temp name in the destination's own directory, pid plus
@@ -45,9 +52,12 @@ a per-process counter, then os.replace, retried on PermissionError the way
 notes.move_note retries on a still-open Windows handle). Reads refuse anything
 symlinked, foreign-owned or oversized -- the reasons a later CLI maps onto exit
 codes -- so a planted file can never trick the loop into reading or writing
-somewhere else. The file-name grammar for an ask is ASK_RE: 1.md, 2.md, ... with
-no leading zeros; claiming is numeric (2 before 10), and a source that vanished
-mid-claim (the race against another claimer) moves on to the next candidate.
+somewhere else. The file-name grammar for an ask is ASK_RE: 1.md, 2.md, ... (the
+failing-round asks) and q1.md, q2.md, ... (the question asks an agent's ask_main
+question becomes once admitted), either with no leading zeros; each kind queues in
+its own numeric order and the two queues claim by file mtime (the older head first,
+a tie to the round ask), and a source that vanished mid-claim (the race against
+another claimer) moves on to the next candidate.
 
 Safety rules, inherited from notes.py and enforced here rather than assumed:
 writes refuse a symlinked path or a symlinked parent directory (reason "symlink"),
@@ -93,8 +103,9 @@ from typing import NamedTuple
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import taskfile  # noqa: E402
-from lib.notes import DIR_MODE, FILE_MODE, _is_link, _pointer, pid_alive  # noqa: E402
+from lib import msgdir, taskfile  # noqa: E402
+from lib.notes import (DIR_MODE, FILE_MODE, _is_link, _pointer,  # noqa: E402
+                       _strip_controls, pid_alive)
 
 # ----------------------------------------------------------------- constants
 LEASE_DEFAULT = 600        # seconds a lease holds without a refresh
@@ -106,8 +117,10 @@ FAILS_MAX = 6000           # characters of the failing-checks section
 AMEND_MAX = 256 * 1024     # UTF-8 bytes of one amendment body
 LOG_MAX = 512              # bytes of one asks log line, newline included
 DIFF_LINES = 60            # diffstat lines shown before the tail is cut
-ASK_RE = re.compile(r"^[1-9][0-9]*\.md$")
+ASK_RE = re.compile(r"^(?:[1-9][0-9]*|q[1-9][0-9]*)\.md$")
 RUN_ID_RE = re.compile(r"^[0-9a-f]{12}$")   # the plain watch id -- no /<unit> here
+QUESTION_PREFIX = "q"                       # a question ask is q<seq>.md (11.3)
+ASKS_KINDS = ("until-done", "swarm", "research")   # pointers that hold asks
 REASONS = ("noop", "parse_error", "test_without_cmd", "symlink", "uid",
            "read_error", "too_large")
 
@@ -124,6 +137,14 @@ UNAPPLIED_FILE = "unapplied.md"  # a pending.md left at run end, moved aside who
 INBOX_DIR = "inbox"             # the loop's inbox: its .closed ends the run for us
 CLOSED_SENTINEL = ".closed"
 ENDED_FILE = ".ended"           # the supervisor's end-of-run sentinel under RUN/asks
+QUESTIONS_FILE = "questions.json"   # {"admitted": N}: the run's question counter
+ADMIT_LOCK_FILE = ".admit.lock"     # admission's O_EXCL lock (transient)
+ADMIT_LOCK_STALE = 30.0         # seconds before an .admit.lock is taken over
+ADMIT_LOCK_POLL = 0.05          # seconds between lock retries
+ADMIT_LOCK_GIVEUP = 35.0        # seconds, then the lock is refused (AsksError)
+ASK_MAIN_MAX_DEFAULT = 5        # QWEN_ASK_MAIN_MAX default: questions per run
+ASK_MAIN_MAX_BOUND = 20         # ... and its clamp, 0..20
+_STATE_MAX = 4096               # a questions.json we will even read
 
 POLL = 1                 # seconds between --next-ask's polls of the ask queue
 WAIT_MIN, WAIT_MAX = 1, 3600    # --wait SECONDS bounds, like notes' --wait
@@ -190,6 +211,27 @@ def init_run(run_dir, has_test_cmd):
     except (OSError, AsksError):
         # the contract is bool only: an unusable layout (blocked, unreadable or
         # symlinked anywhere in it) is False, never a raise, never a half-built run
+        return False
+
+
+def init_asks_only(run_dir) -> bool:
+    """Create the ASKS half of the layout only -- asks/, asks/new/, asks/claimed/
+    at 0700 with the same symlink refusal as init_run, no amend/ and no meta --
+    for a swarm or research run, whose questions land here but which has no
+    task-file amendment. False when it cannot build or any part is a symlink,
+    and False when QWEN_STREAM is "0" (the no-messaging baseline, P5)."""
+    if os.environ.get("QWEN_STREAM", "1") == "0":
+        return False
+    try:
+        top = os.path.join(run_dir, ASKS_DIR)
+        for path in (top, os.path.join(top, NEW), os.path.join(top, CLAIMED)):
+            if _is_link(path):
+                raise AsksError("asks folder is a symlink: %s" % path,
+                                reason="symlink")
+            os.makedirs(path, mode=DIR_MODE, exist_ok=True)
+            _chmod_dir(path)
+        return True
+    except (OSError, AsksError):
         return False
 
 
@@ -429,23 +471,68 @@ def write_ask(run_dir, n, text):
     return path
 
 
-def claim_oldest(run_dir):
-    """Claim the oldest pending ask by rename (2 before 10 -- numeric order is
-    the queue): os.replace asks/new/<n>.md into asks/claimed/ and return the
-    claimed path as an absolute path (a relative run_dir still yields an openable
-    one). A source that vanished (the race against another claimer) moves on to
-    the next candidate; None when nothing can be claimed."""
-    new_dir = os.path.join(run_dir, ASKS_DIR, NEW)
-    claimed_dir = os.path.join(run_dir, ASKS_DIR, CLAIMED)
+def _ask_queues(new_dir):
+    """The two claim queues from asks/new/: the round asks and the question asks,
+    each a list of its own numbers in numeric order (2 before 10; q2 before q10),
+    names outside ASK_RE not queues at all."""
+    rounds, questions = [], []
     try:
         names = os.listdir(new_dir)
     except OSError:
-        return None
-    candidates = []
+        return rounds, questions
     for name in names:
-        if ASK_RE.fullmatch(name):
-            candidates.append((int(name[:-len(".md")]), name))
-    for _number, name in sorted(candidates):
+        if not ASK_RE.fullmatch(name):
+            continue
+        stem = name[:-len(".md")]
+        if stem.startswith(QUESTION_PREFIX):
+            questions.append(int(stem[len(QUESTION_PREFIX):]))
+        else:
+            rounds.append(int(stem))
+    rounds.sort()
+    questions.sort()
+    return rounds, questions
+
+
+def _head_mtime_ns(new_dir, name):
+    """The head's mtime_ns, or None when the file vanished since the listing."""
+    try:
+        return os.stat(os.path.join(new_dir, name)).st_mtime_ns
+    except OSError:
+        return None
+
+
+def claim_oldest(run_dir):
+    """Claim the oldest pending ask by rename across the two queues (spec 11.3):
+    the round asks ``<n>.md`` queue in numeric order and the question asks
+    ``q<n>.md`` queue in their own numeric order, and the head with the older
+    file mtime (st_mtime_ns) claims first -- a tie goes to the round ask. The
+    rename is os.replace asks/new/<name> into asks/claimed/, and the claimed path
+    comes back absolute (a relative run_dir still yields an openable one). A head
+    that vanished (the race against another claimer) moves on to the next
+    candidate; None when nothing can be claimed."""
+    new_dir = os.path.join(run_dir, ASKS_DIR, NEW)
+    claimed_dir = os.path.join(run_dir, ASKS_DIR, CLAIMED)
+    rounds, questions = _ask_queues(new_dir)
+    while rounds or questions:
+        if rounds and questions:
+            r_ns = _head_mtime_ns(new_dir, "%d.md" % rounds[0])
+            q_ns = _head_mtime_ns(new_dir,
+                                  "%s%d.md" % (QUESTION_PREFIX, questions[0]))
+            if r_ns is None:
+                rounds.pop(0)                     # vanished head: next candidate
+                continue
+            if q_ns is None:
+                questions.pop(0)
+                continue
+            kind = "round" if r_ns <= q_ns else "question"   # tie: the round ask
+        elif rounds:
+            kind = "round"
+        else:
+            kind = "question"
+        if kind == "round":
+            name = "%d.md" % rounds.pop(0)
+        else:
+            name = "%s%d.md" % (QUESTION_PREFIX, questions.pop(0))
         src = os.path.join(new_dir, name)
         dst = os.path.join(claimed_dir, name)
         try:
@@ -508,6 +595,222 @@ def log_event(run_dir, ev, **fields):
             os.write(fd, line)
         finally:
             os.close(fd)
+
+
+# ------------------------------------------------- question asks and admission (11.3)
+def ask_main_max() -> int:
+    """The per-run question cap (spec 11.3): QWEN_ASK_MAIN_MAX as an int,
+    clamped to 0..ASK_MAIN_MAX_BOUND; unset or non-integer is the default
+    ASK_MAIN_MAX_DEFAULT. The relay reads it once and passes it to
+    admit_question as `limit`."""
+    raw = os.environ.get("QWEN_ASK_MAIN_MAX")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):                # unset, "" or not an integer
+        return ASK_MAIN_MAX_DEFAULT
+    return max(0, min(value, ASK_MAIN_MAX_BOUND))
+
+
+def question_text(*, q, title, run_id, asker_address, question, options) -> str:
+    """The whole question ask file: the header naming the asker and the run, a
+    `Run:` line with the task title, then the question and every option (as
+    `- <option>` before quoting) quoted the way render_note quotes a share --
+    every line prefixed "> ", control characters stripped by notes' own
+    _strip_controls -- and a "## How to answer" block with the one command that
+    reaches the asker. Nothing but these fields ever lands in the text: a
+    question is advice material for the main session, never a place for the
+    asker's metadata."""
+    text = question if isinstance(question, str) else ""
+    opts = options if isinstance(options, (list, tuple)) else []
+    head = ["# Question %s%s from %s (run %s)"
+            % (QUESTION_PREFIX, q, asker_address, run_id),
+            "Run: %s" % (title if isinstance(title, str) else "")]
+    quoted = []
+    for chunk in [text] + ["- %s" % (o if isinstance(o, str) else "")
+                           for o in opts]:
+        quoted.extend("> " + line for line in _strip_controls(chunk).split("\n"))
+    answer = [
+        "## How to answer",
+        "qwen-agent --send %s -f - <<'EOF'" % asker_address,
+        "your answer, on the lines before the EOF",
+        "EOF",
+        "Not answering is fine: the agent was told to decide for itself and"
+        " keep working.",
+    ]
+    return "\n\n".join(["\n".join(head), "\n".join(quoted),
+                        "\n".join(answer)]) + "\n"
+
+
+def _pointer_for_run(run_dir, asker_address):
+    """The registry pointer of the asking run (the question ask's title and run
+    id come from it): the asker's address starts with the run's watch id
+    (`<id>` or `<id>/<unit>`), and the pointer counts only when its run_path is
+    this run folder. None otherwise -- the caller then uses "" for both fields."""
+    run_id = asker_address.split("/", 1)[0] if isinstance(asker_address, str) else ""
+    if not RUN_ID_RE.fullmatch(run_id):
+        return None
+    pointer = _pointer(run_id)
+    if not isinstance(pointer, dict):
+        return None
+    run_path = pointer.get("run_path")
+    if not isinstance(run_path, str) or not run_path:
+        return None
+    if os.path.realpath(run_path) != os.path.realpath(run_dir):
+        return None
+    return pointer
+
+
+def _questions_path(run_dir):
+    return os.path.join(run_dir, ASKS_DIR, QUESTIONS_FILE)
+
+
+def _admitted_count(run_dir):
+    """asks/questions.json's counter: a missing, unreadable, symlinked,
+    unparsable or malformed file reads as 0, never a raise and never a block."""
+    try:
+        data = safe_read(_questions_path(run_dir), _STATE_MAX)
+    except (AsksError, OSError):
+        return 0
+    try:
+        rec = json.loads(data.decode("utf-8", "replace"))
+    except ValueError:
+        return 0
+    if not isinstance(rec, dict):
+        return 0
+    n = rec.get("admitted")
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        return 0
+    return n
+
+
+def _admit_lock_path(run_dir):
+    return os.path.join(run_dir, ASKS_DIR, ADMIT_LOCK_FILE)
+
+
+def _acquire_admit_lock(run_dir):
+    """Take asks/.admit.lock (O_CREAT|O_EXCL, the relay's one admission lock):
+    an existing lock whose mtime is over ADMIT_LOCK_STALE seconds old is removed
+    and retried (the crashed relay's lock is nobody's), any other is waited out
+    at ADMIT_LOCK_POLL s and given up after ADMIT_LOCK_GIVEUP with an AsksError.
+    A symlinked asks/ folder is refused outright -- O_NOFOLLOW guards the final
+    component only, and an O_CREAT open would otherwise follow the planted
+    DIRECTORY link and land the lock somewhere else (the log_event/safe_write
+    rule, kept here). A stale link is unlinked, never its target; an UNLINKABLE
+    "lock" (a planted directory) is polled, never spun on."""
+    asks_dir = os.path.join(run_dir, ASKS_DIR)
+    if _is_link(asks_dir):
+        raise AsksError("asks folder is a symlink: %s" % asks_dir,
+                        reason="symlink")
+    lock = _admit_lock_path(run_dir)
+    deadline = time.time() + ADMIT_LOCK_GIVEUP
+    while True:
+        try:
+            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | getattr(os, "O_BINARY", 0)
+                         | getattr(os, "O_NOFOLLOW", 0), FILE_MODE)
+        except FileExistsError:
+            if time.time() >= deadline:
+                raise AsksError("the asks admission lock is held: %s" % lock)
+            try:
+                stale = (time.time() - os.lstat(lock).st_mtime) > ADMIT_LOCK_STALE
+            except OSError:
+                stale = True               # gone since the open failed: retry now
+            if stale:
+                try:
+                    os.unlink(lock)
+                except OSError:
+                    # not removable (a planted directory): one poll of patience
+                    # between retries -- never spin to the deadline
+                    time.sleep(ADMIT_LOCK_POLL)
+                continue
+            time.sleep(ADMIT_LOCK_POLL)
+            continue
+        except OSError as e:
+            raise AsksError("cannot take the asks admission lock %s (%s)"
+                            % (lock, e)) from e
+        os.close(fd)
+        return
+
+
+def _release_admit_lock(run_dir):
+    with contextlib.suppress(OSError):
+        os.unlink(_admit_lock_path(run_dir))
+
+
+def _rec_field(rec, key):
+    return rec.get(key) if isinstance(rec, dict) else None
+
+
+def _log_drop(run_dir, asker_address, msg_dir, rec, reason):
+    """The one drop: question_dropped with reason, asker and the record's id --
+    never the question text -- and the asker's open question cleared when it
+    names exactly this record (a drop for someone else's open question leaves it
+    open: it is still the asker's pending answer)."""
+    qid = _rec_field(rec, "id")
+    log_event(run_dir, "question_dropped", reason=reason,
+              asker=asker_address, id=qid)
+    if not isinstance(qid, str):
+        return
+    open_rec = msgdir.open_question(msg_dir)
+    if open_rec is not None and open_rec.get("q_id") == qid:
+        msgdir.clear_open_question(msg_dir)
+
+
+def admit_question(run_dir, asker_address, msg_dir, rec, limit) -> tuple[str, str]:
+    """Admit one agent question (spec 11.3, the relay's side of ask_main): under
+    asks/.admit.lock, checking IN THIS ORDER -- the lease live (else drop
+    "no_listener"); the asker has no OTHER open question (the server opens the
+    asker's own at queue time, so its own record never blocks itself -- another
+    one drops as "open_question"); the run's admitted count in
+    asks/questions.json below `limit` (else "run_limit"). Admitted: q = N + 1,
+    asks/new/q<q>.md written from question_text (title and run id read from the
+    run's registry pointer, "" when there is none), the counter saved (temp +
+    replace) and question_admitted logged, and ("admitted", path) comes back.
+    Every drop logs question_dropped (reason, asker, id -- never the text) and
+    clears the asker's open question when it names this record; None-shaped or
+    malformed `rec` fields simply read as empty. `rec` is the body
+    msgdir.take_out returned: {"id","t","kind":"question","question","options"}."""
+    _acquire_admit_lock(run_dir)
+    try:
+        qid = _rec_field(rec, "id")
+        if not lease_live(run_dir):
+            _log_drop(run_dir, asker_address, msg_dir, rec, "no_listener")
+            return "dropped", "no_listener"
+        open_rec = msgdir.open_question(msg_dir)
+        if open_rec is not None and open_rec.get("q_id") != qid:
+            _log_drop(run_dir, asker_address, msg_dir, rec, "open_question")
+            return "dropped", "open_question"
+        admitted = _admitted_count(run_dir)
+        if admitted >= limit:
+            _log_drop(run_dir, asker_address, msg_dir, rec, "run_limit")
+            return "dropped", "run_limit"
+        q = admitted + 1
+        pointer = _pointer_for_run(run_dir, asker_address) or {}
+        title = pointer.get("title")
+        run_id = pointer.get("id")
+        text = question_text(
+            q=q, title=title if isinstance(title, str) else "",
+            run_id=run_id if isinstance(run_id, str) else "",
+            asker_address=asker_address,
+            question=_rec_field(rec, "question"),
+            options=_rec_field(rec, "options"))
+        path = os.path.join(run_dir, ASKS_DIR, NEW,
+                            "%s%d.md" % (QUESTION_PREFIX, q))
+        safe_write(path, text.encode("utf-8"))
+        safe_write(_questions_path(run_dir),
+                   json.dumps({"admitted": q}).encode("utf-8"))
+        log_event(run_dir, "question_admitted", q="%s%d" % (QUESTION_PREFIX, q),
+                  asker=asker_address, id=qid)
+        return "admitted", os.path.abspath(path)
+    finally:
+        _release_admit_lock(run_dir)
+
+
+def drop_question(run_dir, asker_address, msg_dir, rec, reason) -> None:
+    """The drop half, bare (the loop-end drain, Task 7): the same
+    question_dropped logging and open-question clearing as a refused admission,
+    with no lock and no checks -- whoever calls it has already decided."""
+    _log_drop(run_dir, asker_address, msg_dir, rec, reason)
 
 
 # ------------------------------------------------- applying an amendment (4.5, 9)
@@ -678,21 +981,19 @@ def leftover_pending(run_dir: str) -> str | None:
 
 
 # ----------------------------------------------------------------- addressing (10.2)
-def resolve_until_done(run_id):
-    """The registry pointer and run folder of an until-done loop, for --next-ask
-    and --amend. AsksError code 2 for an id that is not the plain 12-hex watch id
-    (an `<id>/<unit>` address is usage -- an until-done loop has no units); code 3
-    for no pointer, a pointer of another kind, no run_path, or an asks/ folder
-    that is missing or a symlink."""
+def _resolve_run(run_id, kinds, wrong_kind):
+    """The shared half of the two resolvers: id grammar (usage 2 for anything but
+    the plain 12-hex watch id -- an `<id>/<unit>` address is usage), pointer,
+    kind (the caller's message on a wrong one, code 3), run_path and an asks/
+    folder that is neither missing nor a symlink. Returns (run_path, pointer)."""
     if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
         raise AsksError("run id must be 12 lowercase hex characters (got %r)"
                         % (run_id,), code=_EXIT_USAGE)
     pointer = _pointer(run_id)
     if pointer is None:
         raise AsksError("no such run: %s" % run_id)
-    if pointer.get("kind") != "until-done":
-        raise AsksError("run %s is not an until-done loop (kind %r)"
-                        % (run_id, pointer.get("kind")))
+    if pointer.get("kind") not in kinds:
+        raise AsksError(wrong_kind % (run_id, pointer.get("kind")))
     run_path = pointer.get("run_path")
     if not isinstance(run_path, str) or not run_path:
         raise AsksError("run %s has no run folder" % run_id)
@@ -701,6 +1002,29 @@ def resolve_until_done(run_id):
         raise AsksError("no asks folder at %s (is the loop running with "
                         "messaging on?)" % asks_dir)
     return run_path, pointer
+
+
+def resolve_until_done(run_id):
+    """The registry pointer and run folder of an until-done loop, for --amend
+    (--next-ask and --release take resolve_asks_run, which also admits the two
+    swarm pointer kinds). AsksError code 2 for an id that is not the plain
+    12-hex watch id (an `<id>/<unit>` address is usage -- an until-done loop has
+    no units); code 3
+    for no pointer, a pointer of another kind, no run_path, or an asks/ folder
+    that is missing or a symlink."""
+    return _resolve_run(run_id, ("until-done",),
+                        "run %s is not an until-done loop (kind %r)")
+
+
+def resolve_asks_run(run_id):
+    """The registry pointer and run folder of a run that HOLDS asks: an
+    until-done loop or a swarm/research run (phase 2 spec 11.3 -- both swarm
+    pointer kinds ask, a single-shot never does). The same grammar, errors and
+    asks-folder checks as resolve_until_done; any other pointer kind (an
+    `agent` single-shot) is AsksError code 3. --next-ask and --release use
+    this; --amend keeps resolve_until_done."""
+    return _resolve_run(run_id, ASKS_KINDS,
+                        "run %s holds no asks (kind %r)")
 
 
 def ended_path(run_dir: str) -> str:
@@ -810,13 +1134,14 @@ def cmd_next_ask(argv) -> int:
     """The --next-ask mode (spec 10.2). The ended check runs BEFORE the lease is
     stamped -- an ended run exits 11 with no lease written and nothing claimed.
     Then poll once a second: (1) ended: delete our own lease, `run ended`, 11;
-    (2) an ask claims: print its absolute path, log `claimed`, refresh, 0;
+    (2) an ask claims: print its absolute path, log `claimed` (with
+        kind="round", round=<int> or kind="question", q="q<n>"), refresh, 0;
     (3) the lease vanished under us (someone ran --release): `no ask yet`, 10;
     (4) the wait over: refresh, `no ask yet`, 10. The lease is refreshed every
     REFRESH seconds while waiting -- REFRESH is read at call time. The ask's
     text is never printed: the answerer opens the path the claim returns."""
     run_id, wait, release = _parse_next_ask(argv)
-    run_dir, pointer = resolve_until_done(run_id)
+    run_dir, pointer = resolve_asks_run(run_id)
     if release:
         delete_lease(run_dir)              # any pid's, even after the run ended
         return 0
@@ -837,9 +1162,13 @@ def cmd_next_ask(argv) -> int:
             if path is not None:
                 print(path)
                 sys.stdout.flush()
-                log_event(run_dir, "claimed",
-                          round=int(os.path.basename(path)[:-len(".md")]),
-                          pid=os.getpid())
+                stem = os.path.basename(path)[:-len(".md")]
+                if stem.startswith(QUESTION_PREFIX):
+                    log_event(run_dir, "claimed", kind="question", q=stem,
+                              pid=os.getpid())
+                else:
+                    log_event(run_dir, "claimed", kind="round",
+                              round=int(stem), pid=os.getpid())
                 write_lease(run_dir, os.getpid())
                 return 0
             if not os.path.lexists(_lease_path(run_dir)):

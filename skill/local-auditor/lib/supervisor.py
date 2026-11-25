@@ -911,13 +911,19 @@ def _write_ended(run_dir) -> None:
 
 
 def _ask_lines(run_dir) -> list[str]:
-    """report.md's ask-main row (spec 10.5): one line counting this run's ask
-    events off asks/log.jsonl -- written, claimed, amends applied, amends
-    rejected. The trigger is any EVENT, not any line: a record is an event only
-    as asks.log_event writes one (a JSON object with a string "ev"), so a torn
-    or planted line is a reporting gap, not a row for a run that never asked.
-    [] likewise when the log cannot be read: a gap, never a run failure."""
+    """report.md's ask-main row (spec 10.5, phase 2 12.8): one line counting this
+    run's ask events off asks/log.jsonl -- written, claimed, amends applied,
+    amends rejected. `claimed` counts the FAILING-ROUND asks only: a `claimed`
+    event whose `kind` is absent (stage 1.5 wrote none) or "round"; a
+    `claimed kind="question"` is an answered question and rides on the second
+    line -- `questions: admitted N, dropped N, answered N` -- present whenever
+    any question_admitted or question_dropped event exists. The trigger is any
+    EVENT, not any line: a record is an event only as asks.log_event writes one
+    (a JSON object with a string "ev"), so a torn or planted line is a reporting
+    gap, not a row for a run that never asked. [] likewise when the log cannot be
+    read: a gap, never a run failure."""
     counts = {"written": 0, "claimed": 0, "amend_applied": 0, "amend_rejected": 0}
+    q_counts = {"admitted": 0, "dropped": 0, "answered": 0}
     try:
         with open(os.path.join(run_dir, asks.ASKS_DIR, asks.LOG_FILE),
                   encoding="utf-8") as fh:
@@ -939,13 +945,28 @@ def _ask_lines(run_dir) -> list[str]:
         if not isinstance(ev, str):
             continue
         seen = True
-        if ev in counts:
+        if ev == "claimed":
+            kind = rec.get("kind")
+            if kind is None or kind == "round":
+                counts["claimed"] += 1        # stage 1.5's statistic: round asks
+            elif kind == "question":
+                q_counts["answered"] += 1     # an answered question ask
+        elif ev in counts:
             counts[ev] += 1
+        elif ev == "question_admitted":
+            q_counts["admitted"] += 1
+        elif ev == "question_dropped":
+            q_counts["dropped"] += 1
     if not seen:
         return []
-    return ["ask-main: written %d, claimed %d, amends applied %d, rejected %d"
+    rows = ["ask-main: written %d, claimed %d, amends applied %d, rejected %d"
             % (counts["written"], counts["claimed"],
                counts["amend_applied"], counts["amend_rejected"])]
+    if q_counts["admitted"] or q_counts["dropped"]:
+        rows.append("questions: admitted %d, dropped %d, answered %d"
+                    % (q_counts["admitted"], q_counts["dropped"],
+                       q_counts["answered"]))
+    return rows
 
 
 def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, start, repo, denied=(),
