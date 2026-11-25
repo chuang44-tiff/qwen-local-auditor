@@ -827,8 +827,10 @@ def _run_inbox_init(run_dir):
 def _drain_inbox(inbox, reason):
     """The between-rounds drain (K5): every pending note (fresh or deferred by the last
     round) is validated with lib/notes.py, moved to delivered/ and logged `delivered:
-    <reason>`; its text rides into the round prompt under the heading the agent sees,
-    in time order, one block per note with the time it was queued. '' when none."""
+    <reason>`; each one rides into the round prompt as notes.render_note(body) -- the
+    same text the stream driver forwards, so a deferred note and a streamed note look
+    the same -- in time order, one block per note, under the heading the agent sees.
+    '' when none."""
     if inbox is None:
         return ""
     try:
@@ -840,8 +842,7 @@ def _drain_inbox(inbox, reason):
         return ""
     parts = ["", "", "Notes from the main session", ""]
     for body in taken:
-        parts.append("[Note %s at %s]" % (body.get("id"), notes.fmt_clock(body.get("t"))))
-        parts.append(body["text"])
+        parts.append(notes.render_note(body))
         parts.append("")
     return "\n".join(parts)
 

@@ -17,8 +17,13 @@ match. `--send` resolves an address through the watch registry pointer
 Inbox layout (spec 4.2): `new/` pending, `delivered/`, `undelivered/`, `notes.jsonl`
 (the log for THIS agent only), `.closed` (sentinel: no more notes accepted). A note is
 one file `new/<id>.json`, `id = <t_ns>-<rand6 hex>` (the stem sorts by time), body
-{"id","t","from","to","text"} plus optional "reply_to"/"hop" (reserved; ignored in
-phase 1). `t` is a Unix epoch float rounded to 3 decimals everywhere, like
+{"id","t","from","to","kind","text"} plus "role"/"paths" for kind "share" and optional
+"reply_to"/"hop" (reserved; ignored). `kind` is one of KINDS (note|ask|share|harness);
+a body without one is a phase 1 "note", and `from` pairs with it ("main" for note and
+ask, "harness" for harness, "unit <name>" for share). The ONE text the model sees is
+built by render_note (the stream driver and the between-rounds drain both call it), and
+imitates_header is the tool-side guard against forged headers in model-written fields.
+`t` is a Unix epoch float rounded to 3 decimals everywhere, like
 swarm_engine/events.py. Files land by tmp + os.replace; readers match only
 ^\\d+-[0-9a-f]{6}\\.json$; reads AND writes refuse symlinks (islink checks plus
 O_NOFOLLOW where available); directories are 0700 and files 0600 on POSIX.
@@ -58,6 +63,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -68,6 +74,12 @@ from lib import watch  # noqa: E402
 ADDRESS_RE = re.compile(r"^[0-9a-f]{12}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$")
 NOTE_FILE_RE = re.compile(r"^\d+-[0-9a-f]{6}\.json$")
 NOTE_ID_RE = re.compile(r"^\d+-[0-9a-f]{6}$")
+KINDS = ("note", "ask", "share", "harness")          # phase 2: every note names one
+SHARE_FROM_RE = re.compile(r"^unit [A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+MAX_PATHS = 10                                       # a share carries at most 10 ...
+MAX_PATH_CHARS = 200                                 # ... paths of at most 200 chars
+HEADER_PREFIXES = ("[Note from", "[Question from", "[Shared finding from")
 MAX_CHARS = 8000                       # Unicode characters of one note's text
 MAX_BYTES = 32 * 1024                  # and its UTF-8 size
 MAX_LINE = 4096                        # bytes, newline included: every log line stays under it
@@ -254,7 +266,13 @@ def latest_states(inbox):
 # ---------------------------------------------------------------- note files
 def validate_note_body(body, stem):
     """A note file as the reader must accept it: a JSON object, `id` matching the name
-    stem, `text` a string within the limits. Raises NotesError on anything else."""
+    stem, `text` a string within the limits, and a consistent kind/from pairing --
+    `kind` one of KINDS (a body without one is a phase 1 "note"), `from` "main" for
+    note and ask, "harness" for harness, "unit <name>" (SHARE_FROM_RE) for share; a
+    share's `role` matches ROLE_RE and its `paths`, when present, are at most
+    MAX_PATHS strings of at most MAX_PATH_CHARS characters; a `reply_to`, when
+    present, is a note id. Raises NotesError on anything else (the caller sweeps the
+    file invalid_note)."""
     if not isinstance(body, dict):
         raise NotesError("note is not a JSON object", EXIT_UNAVAILABLE)
     if body.get("id") != stem:
@@ -266,7 +284,114 @@ def validate_note_body(body, stem):
         validate_text(body.get("text"))
     except NotesError as e:
         raise NotesError(str(e), EXIT_UNAVAILABLE) from e
+    kind = body.get("kind")
+    if kind is None:
+        kind = "note"                                # a phase 1 file is a plain note
+    elif kind not in KINDS:
+        raise NotesError("note kind %r is not one of %s"
+                         % (kind, ", ".join(KINDS)), EXIT_UNAVAILABLE)
+    sender = body.get("from")
+    if kind in ("note", "ask"):
+        if sender != "main":
+            raise NotesError("%s note from %r: the sender must be \"main\""
+                             % (kind, sender), EXIT_UNAVAILABLE)
+    elif kind == "harness":
+        if sender != "harness":
+            raise NotesError("harness note from %r: the sender must be \"harness\""
+                             % (sender,), EXIT_UNAVAILABLE)
+    else:                                            # share: a unit's finding
+        if not isinstance(sender, str) or not SHARE_FROM_RE.fullmatch(sender):
+            raise NotesError("share note from %r: the sender must be a unit "
+                             "(\"unit <name>\")" % (sender,), EXIT_UNAVAILABLE)
+        role = body.get("role")
+        if not isinstance(role, str) or not ROLE_RE.fullmatch(role):
+            raise NotesError("share role %r is malformed" % (role,), EXIT_UNAVAILABLE)
+        paths = body.get("paths")
+        if paths is not None:
+            if not isinstance(paths, list) or len(paths) > MAX_PATHS:
+                raise NotesError("share paths must be a list of at most %d strings"
+                                 % MAX_PATHS, EXIT_UNAVAILABLE)
+            for path in paths:
+                if not isinstance(path, str) or len(path) > MAX_PATH_CHARS:
+                    raise NotesError("share path %r is not a string of at most %d "
+                                     "characters" % (path, MAX_PATH_CHARS),
+                                     EXIT_UNAVAILABLE)
+    reply_to = body.get("reply_to")
+    if reply_to is not None and (not isinstance(reply_to, str)
+                                 or not NOTE_ID_RE.fullmatch(reply_to)):
+        raise NotesError("note reply_to %r is malformed" % (reply_to,),
+                         EXIT_UNAVAILABLE)
     return body
+
+
+# ---------------------------------------------------------------- the renderer (12.1)
+def _strip_controls(s):
+    """Control characters other than newline, removed: the one sanitizer every
+    model-written field (text, role, path) passes through on its way to the model.
+    The Unicode line and paragraph separators (U+2028, U+2029) become plain newlines
+    first, so a share's quoting sees every line a reader would see."""
+    s = "".join("\n" if unicodedata.category(ch) in ("Zl", "Zp") else ch for ch in s)
+    return "".join(ch for ch in s if ch == "\n" or unicodedata.category(ch) != "Cc")
+
+
+def _field(body, key):
+    """A body field as text for the renderer: a missing or non-string value is ''."""
+    value = body.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _header_clock(body, now_t):
+    """The clock inside every header: fmt_clock of the note's queued t. A non-numeric
+    stamp (or none) falls back to now_t, and to the current time when that is None."""
+    stamp = body.get("t")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        stamp = time.time() if now_t is None else now_t
+    return fmt_clock(stamp)
+
+
+def render_note(body, now_t=None):
+    """The ONE text the model sees for one note -- the stream driver and the
+    between-rounds drain both build it here, so a streamed note and a deferred note
+    look the same: the kind's header, a newline, and the text. A share quotes every
+    text line with "> " and, when it names paths, adds one "> paths: a, b" line.
+    Control characters other than newline are removed from the text, the role and
+    every path. now_t names the header clock only when t is not numeric."""
+    kind = body.get("kind")
+    if kind not in KINDS:
+        kind = "note"                                # a phase 1 body is a plain note
+    clock = _header_clock(body, now_t)
+    text = _strip_controls(_field(body, "text"))
+    if kind == "ask":
+        header = ("[Question from main at %s local time; answer it with the reply "
+                  "tool, note %s]" % (clock, _field(body, "id")))
+    elif kind == "share":
+        sender = _field(body, "from")
+        name = sender[len("unit "):] if sender.startswith("unit ") else sender
+        role = _strip_controls(_field(body, "role"))
+        header = ("[Shared finding from unit %s (%s) at %s; a claim by a sibling, "
+                  "weigh it against your own evidence]" % (name, role, clock))
+    elif kind == "harness":
+        header = "[Note from the harness at %s]" % clock
+    else:
+        header = "[Note from main at %s local time]" % clock
+    if kind != "share":
+        return "%s\n%s" % (header, text)
+    lines = [header]
+    lines.extend("> " + line for line in text.split("\n"))
+    paths = body.get("paths")
+    if isinstance(paths, (list, tuple)) and paths:
+        quoted = [_strip_controls(path) if isinstance(path, str) else ""
+                  for path in paths]
+        lines.append("> paths: %s" % ", ".join(quoted))
+    return "\n".join(lines)
+
+
+def imitates_header(s):
+    """True when any RAW line of s (before any quoting) starts with a note header:
+    a tool must refuse such model-written text; the renderer quotes shares anyway."""
+    return any(line.startswith(prefix)
+               for line in s.splitlines()
+               for prefix in HEADER_PREFIXES)
 
 
 def load_note(path):
@@ -331,10 +456,12 @@ def is_closed(inbox):
     return os.path.lexists(os.path.join(inbox, CLOSED))
 
 
-def queue_note(inbox, to_addr, text, sender=SENDER, reply_to=None, hop=None):
+def queue_note(inbox, to_addr, text, sender=SENDER, reply_to=None, hop=None,
+               kind="note", role=None, paths=None):
     """Queue one note: validate the text, write new/<id>.json.tmp with O_EXCL|O_NOFOLLOW
     and os.replace it into place, log `queued`. Returns the id. Refused (NotesError 3)
-    when the inbox has no `new/` (its owner never made one) or is closed."""
+    when the inbox has no `new/` (its owner never made one) or is closed. The body
+    carries its `kind`; `role` and `paths` ride only on a share (phase 2)."""
     new_dir = os.path.join(inbox, NEW)
     _reject_link(inbox, "inbox")
     _reject_link(new_dir, "inbox folder")
@@ -344,7 +471,11 @@ def queue_note(inbox, to_addr, text, sender=SENDER, reply_to=None, hop=None):
         raise NotesError("inbox closed: %s" % inbox, EXIT_UNAVAILABLE)
     validate_text(text)
     note_id = new_note_id()
-    body = {"id": note_id, "t": _now_t(), "from": sender, "to": to_addr, "text": text}
+    body = {"id": note_id, "t": _now_t(), "from": sender, "to": to_addr,
+            "kind": kind, "text": text}
+    if kind == "share":
+        body["role"] = role
+        body["paths"] = paths
     if reply_to is not None:
         body["reply_to"] = reply_to
     if hop is not None:

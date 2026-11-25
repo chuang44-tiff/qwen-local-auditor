@@ -215,7 +215,7 @@ def test_inbox_note_file_written_by_rename(tmp_path):
     assert notes.NOTE_ID_RE.match(nid), nid
     assert os.path.splitext(names[0])[0] == nid         # the stem is the id
     body = json.loads((new_dir / names[0]).read_text(encoding="utf-8"))
-    assert set(body) == {"id", "t", "from", "to", "text"}
+    assert set(body) == {"id", "t", "from", "to", "kind", "text"}
     assert body["id"] == nid and body["to"] == ADDR and body["from"] == "main"
     assert body["text"] == text
     assert isinstance(body["t"], float) and body["t"] == round(body["t"], 3)

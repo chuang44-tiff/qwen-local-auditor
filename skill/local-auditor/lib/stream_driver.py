@@ -396,16 +396,18 @@ class Driver:
         sys.stderr.flush()
 
     def _note_header_time(self, body):
+        """The driver's time source for the header: the note's queued t when numeric,
+        else right now (K10). Passed to render_note as now_t, which consults it only
+        when t is not numeric."""
         stamp = body.get("t")
-        return notes.fmt_clock(stamp if _numeric(stamp) else time.time())
+        return stamp if _numeric(stamp) else time.time()
 
     def forward_note(self, body, path, note_id):
-        """Queue one validated note: the stdin line is built ONLY from its text, with
-        the header carrying the time it was QUEUED (K10). No other key is forwarded."""
-        sender = body.get("from") if isinstance(body.get("from"), str) and body.get("from") \
-            else "main"
-        content = "[Note from %s at %s local time]\n%s" % (sender, self._note_header_time(body),
-                                                           body["text"])
+        """Queue one validated note: the model-facing text is built ONLY by
+        notes.render_note (one renderer for every kind, so a streamed note and a
+        deferred one look the same); the stdin line carries nothing else. No other
+        body key is forwarded."""
+        content = notes.render_note(body, now_t=self._note_header_time(body))
         line = json.dumps({"type": "user", "message": {"role": "user", "content": content}},
                           ensure_ascii=False)
         entry = {"content": content, "path": path, "body": body, "line": line}
