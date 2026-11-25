@@ -6,8 +6,11 @@ of flailing on: the loop writes an ask, the main session answers with a note
 (``qwen-agent --send``) or a task amendment (``qwen-agent --amend``). This module
 owns everything ask-shaped under the run folder, and the sender-side CLI the main
 session runs (``main`` with the ``next-ask`` and ``amend`` modes, the twin of
-lib/notes.py's ``send``/``notes``); the loop side -- the supervisor writing asks
-and applying amendments -- comes later.
+lib/notes.py's ``send``/``notes``), and the pure apply step the loop calls before a
+check run (``apply_pending``: claim ``amend/pending.md``, validate, apply or reject
+with an enum reason; ``leftover_pending`` moves an amendment nobody reached at run
+end); the rest of the loop side -- the supervisor writing asks and the wiring that
+calls these -- comes later.
 
 Run-folder layout (spec 4.1)::
 
@@ -16,8 +19,10 @@ Run-folder layout (spec 4.1)::
     <RUN>/asks/lease.json       {"pid","until","t"}: who may ask right now
     <RUN>/asks/log.jsonl        the asks event log, one JSON line per event
     <RUN>/amend/pending.md      the amendment --amend queued for the loop
+    <RUN>/amend/.applying.md    the amendment mid-claim by apply_pending (transient)
     <RUN>/amend/applied/        amendments the loop applied
-    <RUN>/amend/rejected/       amendments the loop rejected
+    <RUN>/amend/rejected/       amendments the loop rejected, one <time_ns>.md per rejection
+    <RUN>/amend/unapplied.md    a pending.md left over when the run ended
     <RUN>/amend/meta.json       {"has_test_cmd": <bool>}
     <RUN>/.ended                the supervisor's end-of-run sentinel
 
@@ -71,7 +76,10 @@ is refused in silence; log_event NEVER raises, so a missing or blocked asks/
 folder is refused the same way -- the log is never a reason to fail the round
 that wrote it.
 """
+from __future__ import annotations
+
 import contextlib
+import difflib
 import itertools
 import json
 import os
@@ -80,6 +88,7 @@ import signal
 import sys
 import threading
 import time
+from typing import NamedTuple
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -110,6 +119,8 @@ LEASE_FILE = "lease.json"
 LOG_FILE = "log.jsonl"
 META_FILE = "meta.json"
 PENDING_FILE = "pending.md"     # the amendment --amend queues for the loop
+APPLYING_FILE = ".applying.md"  # the amendment mid-claim by apply_pending (transient)
+UNAPPLIED_FILE = "unapplied.md"  # a pending.md left at run end, moved aside whole
 INBOX_DIR = "inbox"             # the loop's inbox: its .closed ends the run for us
 CLOSED_SENTINEL = ".closed"
 ENDED_FILE = ".ended"           # the supervisor's end-of-run sentinel under RUN
@@ -492,6 +503,173 @@ def log_event(run_dir, ev, **fields):
             os.write(fd, line)
         finally:
             os.close(fd)
+
+
+# ------------------------------------------------- applying an amendment (4.5, 9)
+class Applied(NamedTuple):
+    """The amendment the loop will run on: the new number (k+1), the normalised
+    task text, the parsed Task, the diff for the coder prompt, and the checklist
+    counts against the old checklist."""
+
+    k: int
+    text: str
+    task: object
+    diff: str
+    added: int
+    removed: int
+    changed: int
+
+
+class Rejected(NamedTuple):
+    """The amendment the loop will not run on: the enum reason (one of REASONS)
+    -- the only thing the rejection is ever allowed to say about itself."""
+
+    reason: str
+
+
+def _normalise(text):
+    """The one amendment normalisation (both directions): a Windows-edited task
+    file reads as LF to the loop, in the amendment and in the current text."""
+    return text.replace("\r\n", "\n")
+
+
+def checklist_counts(old_items, new_items) -> tuple[int, int, int]:
+    """(added, removed, changed) between two checklists, compared as (kind, arg,
+    text) tuples (the index is positional, so it never counts): SequenceMatcher
+    opcodes decide, with autojunk off so a long repeated checklist is not "..."
+    away. A replace pairs min(m, n) items as changed and counts the surplus of
+    the longer side as insertions or deletions; equal spans count nothing."""
+    old = [(item.kind, item.arg, item.text) for item in old_items]
+    new = [(item.kind, item.arg, item.text) for item in new_items]
+    added = removed = changed = 0
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        m, n = i2 - i1, j2 - j1
+        if tag == "insert":
+            added += n
+        elif tag == "delete":
+            removed += m
+        elif tag == "replace":
+            changed += min(m, n)
+            added += max(0, n - m)
+            removed += max(0, m - n)
+    return added, removed, changed
+
+
+def task_diff(old: str, new: str, k: int | None = None) -> str:
+    """The unified diff of the two (LF-normalised) task texts, n=2 lines of
+    context, headers naming task.md; the second header carries the amendment
+    number when the caller knows it (plain "amendment k" until then)."""
+    to = "task.md (amendment k)" if k is None else "task.md (amendment %d)" % k
+    return "".join(difflib.unified_diff(_normalise(old).splitlines(True),
+                                        _normalise(new).splitlines(True),
+                                        "task.md (before)", to, n=2))
+
+
+def coder_block(k: int, diff: str) -> str:
+    """The coder-prompt block: the line naming the amendment, then the diff cut
+    to its first DIFF_LINES lines -- a cut diff says so on a final line, so the
+    coder is never told it saw everything."""
+    head = "The main session changed the task's checklist (amendment %d):\n" % k
+    lines = diff.splitlines()
+    body = "\n".join(lines[:DIFF_LINES])
+    if len(lines) > DIFF_LINES:
+        body += ("\n" if body else "") + "... (diff cut at %d lines)" % DIFF_LINES
+    return head + body
+
+
+def _reject_amendment(run_dir, applying, reason, round_no, unlink=False):
+    """File one rejection: the bytes aside in amend/rejected/<time_ns>.md (the
+    symlink case only unlinks the link -- its target is not ours to move), the
+    enum reason on the log, and the Rejected. Never raises: a rejection that
+    cannot be filed is still a rejection, never a crash of the round that found
+    it. The parser's own message is not among what gets logged."""
+    if unlink:
+        with contextlib.suppress(OSError):
+            os.unlink(applying)
+    else:
+        with contextlib.suppress(OSError):
+            os.replace(applying, os.path.join(run_dir, AMEND_DIR, REJECTED,
+                                              "%d.md" % time.time_ns()))
+    log_event(run_dir, "amend_rejected", round=round_no, reason=reason)
+    return Rejected(reason)
+
+
+def apply_pending(run_dir: str, current_text: str, k: int, has_test_cmd: bool,
+                  round_no: int) -> Applied | Rejected | None:
+    """The pure apply step the loop runs BEFORE a check round (spec 4.5, 9):
+    claim amend/pending.md by rename onto .applying.md (None when there is
+    nothing to claim), then validate -- a symlink, an unreadable or over-cap
+    body, a text identical to the (LF-normalised) current one, a parse error,
+    or a `test` item in a run without a test command -- and reject with the
+    enum reason: the bytes go to amend/rejected/, the reason to the log, and a
+    rejection never raises and never repeats what the parser said. A good
+    amendment lands in amend/applied/<k+1>.md by safe_write, the claim goes,
+    the log says amend_applied, and the Applied names the new k, the
+    normalised text, the parsed Task, the diff and the checklist counts (the
+    old checklist is whatever taskfile.parse makes of current_text; a current
+    file that does not parse counts as no items at all)."""
+    amend_dir = os.path.join(run_dir, AMEND_DIR)
+    applying = os.path.join(amend_dir, APPLYING_FILE)
+    try:
+        os.replace(os.path.join(amend_dir, PENDING_FILE), applying)
+    except FileNotFoundError:
+        return None                                # no pending: nothing to apply
+    except OSError:
+        return _reject_amendment(run_dir, applying, "read_error", round_no)
+    if _is_link(applying):                         # claimed by rename, still a link
+        return _reject_amendment(run_dir, applying, "symlink", round_no, unlink=True)
+    try:
+        data = safe_read(applying, AMEND_MAX)
+    except AsksError as e:
+        return _reject_amendment(run_dir, applying, e.reason, round_no)
+    except OSError:
+        return _reject_amendment(run_dir, applying, "read_error", round_no)
+    new_text = _normalise(data.decode("utf-8", "replace"))
+    old_text = _normalise(current_text)
+    if new_text == old_text:
+        return _reject_amendment(run_dir, applying, "noop", round_no)
+    try:
+        task = taskfile.parse(new_text)
+    except ValueError:
+        # the enum reason and nothing else: the parser's message must not reach
+        # asks/log.jsonl (it is the coder's own text, not the log's)
+        return _reject_amendment(run_dir, applying, "parse_error", round_no)
+    if not has_test_cmd and any(item.kind == "test" for item in task.items):
+        return _reject_amendment(run_dir, applying, "test_without_cmd", round_no)
+    safe_write(os.path.join(amend_dir, APPLIED, "%d.md" % (k + 1)),
+               new_text.encode("utf-8"))
+    with contextlib.suppress(OSError):
+        os.unlink(applying)
+    log_event(run_dir, "amend_applied", k=k + 1, round=round_no)
+    try:
+        old_items = taskfile.parse(old_text).items
+    except ValueError:
+        old_items = []                             # an unparsable current file has
+    added, removed, changed = checklist_counts(old_items, task.items)  # no checklist
+    return Applied(k=k + 1, text=new_text, task=task, added=added,
+                   removed=removed, changed=changed,
+                   diff=task_diff(old_text, new_text, k + 1))
+
+
+def leftover_pending(run_dir: str) -> str | None:
+    """End-of-run housekeeping: a pending.md the loop never reached moves whole
+    to amend/unapplied.md (the path comes back so the end-of-run report can
+    name it); a symlinked pending is unlinked and nothing is returned, and a
+    missing one is None. Never raises -- housekeeping is never the end's problem."""
+    pending = os.path.join(run_dir, AMEND_DIR, PENDING_FILE)
+    if _is_link(pending):
+        with contextlib.suppress(OSError):
+            os.unlink(pending)
+        return None
+    if not os.path.lexists(pending):
+        return None
+    dest = os.path.join(run_dir, AMEND_DIR, UNAPPLIED_FILE)
+    try:
+        os.replace(pending, dest)
+    except OSError:
+        return None
+    return dest
 
 
 # ----------------------------------------------------------------- addressing (10.2)
