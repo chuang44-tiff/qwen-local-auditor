@@ -330,7 +330,7 @@ def test_listener_refreshes_lease(tmp_path, monkeypatch):
 def test_amend_valid_is_queued(tmp_path, monkeypatch, capsys):
     run = setup(tmp_path, monkeypatch, has_test_cmd=True)
     task = tmp_path / "task.md"
-    task.write_text(VALID_TASK, encoding="utf-8")
+    task.write_bytes(VALID_TASK.encode("utf-8"))      # bytes: no \r\n on Windows
     assert asks.main(["amend", RUN_ID, "-f", str(task)]) == 0
     cap = capsys.readouterr()
     assert cap.out == "amend queued\n"
@@ -339,7 +339,7 @@ def test_amend_valid_is_queued(tmp_path, monkeypatch, capsys):
         assert fh.read().decode("utf-8") == VALID_TASK   # the bytes, verbatim
     # a -f path with spaces is none of our business to mangle (edge: argv with gaps)
     spaced = tmp_path / "task with spaces.md"
-    spaced.write_text(VALID_TASK, encoding="utf-8")
+    spaced.write_bytes(VALID_TASK.encode("utf-8"))
     assert asks.main(["amend", RUN_ID, "-f", str(spaced)]) == 0
     with open(pending_path(run), "rb") as fh:
         assert fh.read().decode("utf-8") == VALID_TASK
@@ -399,7 +399,7 @@ def test_amend_too_large_is_2(tmp_path, monkeypatch, capsys):
     # parse skips; the two added characters here are the "#" and the newline)
     pad = asks.AMEND_MAX - len(VALID_TASK.encode("utf-8")) - 2
     edge = tmp_path / "edge.md"
-    edge.write_text(VALID_TASK + "#" + "x" * pad + "\n", encoding="utf-8")
+    edge.write_bytes((VALID_TASK + "#" + "x" * pad + "\n").encode("utf-8"))
     assert len(edge.read_bytes()) == asks.AMEND_MAX
     assert asks.main(["amend", RUN_ID, "-f", str(edge)]) == 0
     with open(pending_path(run), "rb") as fh:
@@ -517,8 +517,9 @@ def test_sh_amend_dispatch_stdin(tmp_path, monkeypatch):
     r = cli(tmp_path, env, "--amend", RUN_ID, "-f", "-", input=VALID_TASK)
     assert r.returncode == 0, r.stdout + r.stderr
     assert r.stdout.strip() == "amend queued"
-    with open(pending_path(run), "rb") as fh:
-        assert fh.read().decode("utf-8") == VALID_TASK
+    with open(pending_path(run), "rb") as fh:          # a text-mode pipe on Windows
+        got = fh.read().decode("utf-8")                # turns \n into \r\n; the loop
+    assert got.replace("\r\n", "\n") == VALID_TASK     # normalises it on apply
     # -f FILE reaches the dispatch too (native_path converts only on Windows)
     task = tmp_path / "task.md"
     task.write_text(VALID_TASK, encoding="utf-8")

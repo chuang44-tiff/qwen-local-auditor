@@ -112,7 +112,8 @@ def plant_during_checks(tmp, monkeypatch, text):
             run = next((tmp / "state").rglob("round-1.json")).parent
             d = amend_dir(run)
             os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, "pending.md"), "w", encoding="utf-8") as fh:
+            with open(os.path.join(d, "pending.md"), "w", encoding="utf-8",
+                      newline="\n") as fh:     # no \r\n on Windows
                 fh.write(text)
         return real(items, repo, **kw)
     monkeypatch.setattr(supervisor.checks, "run_checks", wrapper)
