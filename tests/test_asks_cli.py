@@ -187,7 +187,7 @@ def test_next_ask_exits_11_when_ended_appears(tmp_path, monkeypatch):
     box, th = start_listener("next-ask", RUN_ID, "--wait", "10")
     wait_for(lambda: os.path.lexists(lease_path(run)),
              message="the listener never stamped a lease")
-    open(os.path.join(run, asks.ENDED_FILE), "a").close()      # the loop ends mid-wait
+    open(asks.ended_path(run), "a").close()                    # the loop ends mid-wait
     th.join(timeout=JOIN_TIMEOUT)
     assert not th.is_alive()
     assert box["rc"] == 11
@@ -205,9 +205,9 @@ def test_next_ask_ended_before_start_writes_no_lease(tmp_path, monkeypatch, caps
     assert not os.path.lexists(lease_path(run))                # no lease was stamped
     assert os.path.isfile(asked)                               # nothing was claimed
     assert os.listdir(os.path.join(run, asks.ASKS_DIR, asks.CLAIMED)) == []
-    # RUN/.ended reads as ended the same way, before anything is written
+    # RUN/asks/.ended reads as ended the same way, before anything is written
     write_pointer(tmp_path, run, monkeypatch)                  # end cleared
-    open(os.path.join(run, asks.ENDED_FILE), "a").close()
+    open(asks.ended_path(run), "a").close()
     assert asks.main(["next-ask", RUN_ID]) == 11
     capsys.readouterr()
     assert not os.path.lexists(lease_path(run))
@@ -287,7 +287,7 @@ def test_release_deletes_lease(tmp_path, monkeypatch, capsys):
     assert asks.main(["next-ask", RUN_ID, "--release"]) == 0   # any pid's lease goes
     assert asks.read_lease(run) is None
     assert asks.main(["next-ask", RUN_ID, "--release"]) == 0   # no lease: still 0
-    open(os.path.join(run, asks.ENDED_FILE), "a").close()       # the run has ended...
+    open(asks.ended_path(run), "a").close()                     # the run has ended...
     asks.write_lease(run, 777)
     assert asks.main(["next-ask", RUN_ID, "--release"]) == 0   # ...and it still works
     capsys.readouterr()

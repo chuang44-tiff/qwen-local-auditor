@@ -6,6 +6,8 @@ process after every round. The model cannot tick an item, edit the checklist
 claiming success. A round that leaves work undone resumes the SAME Claude Code
 session with a precise "not done" prompt, so the server's prefix cache stays warm.
 """
+from __future__ import annotations
+
 import argparse
 import contextlib
 import hashlib
@@ -23,7 +25,7 @@ import time
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import (advisor_mcp, checks, decisions, notes, probe, taskfile,  # noqa: E402
+from lib import (advisor_mcp, asks, checks, decisions, notes, probe, taskfile,  # noqa: E402
                  testrun, watch)
 from lib.builders import history  # noqa: E402
 from lib.swarm_engine import events  # noqa: E402
@@ -726,6 +728,39 @@ def claude_tools_for(call):
     return call in scopes
 
 
+def _secret_exclude(repo, start):
+    """(secret-named changed paths, git pathspec) -- the no-secret-leaves-the-machine
+    rule every diff of this loop is cut by."""
+    # -z, not --name-only's lines: porcelain would octal-quote a non-ASCII name
+    # (core.quotePath), and an escaped pathspec matches nothing -- the secret it
+    # names would stay in the diff.
+    secrets = [p for p in _git(repo, "diff", "--name-only", "-z", start).split("\0")
+               if p and advisor_mcp.looks_secret(p)]
+    # A magic pathspec's body matches as a GLOB: without literal, a secret named
+    # key[1].pem would not match :(exclude)key[1].pem ([1] is a one-char class).
+    return secrets, (["--"] + [":(exclude,literal)%s" % p for p in secrets]
+                     if secrets else [])
+
+
+def _secrets_left(repo, start, spec):
+    """Trust but verify: bytes no text can carry (a name that is not valid UTF-8
+    reaches this process with replacements) defeat even a literal pathspec. True
+    when a secret-named changed path would still sit in the excluded diff."""
+    return any(advisor_mcp.looks_secret(p)
+               for p in _git(repo, "diff", "--name-only", "-z", start, *spec).split("\0")
+               if p)
+
+
+def _diffstat(repo, start):
+    """The ask's "changed files:" block (spec 4.3): git diff --stat from the start
+    commit, kept under the rescue's secret rule and cut to 40 lines. When a secret
+    path cannot be excluded the ask is handed the refusal line, never the stat."""
+    secrets, spec = _secret_exclude(repo, start)
+    if secrets and _secrets_left(repo, start, spec):
+        return "(diff stat omitted: a secret file could not be excluded)"
+    return "\n".join(_git(repo, "diff", "--stat", start, *spec).splitlines()[:40])
+
+
 def rescue_advice(model, state_dir, budget, log_path, repo, start, fails, task, check_files=()):
     """One rescue call through advisor_mcp.ask, on the rescue's OWN state dir and
     budget (the local model's and the advisor's count are never touched). (advice or None, info).
@@ -742,24 +777,12 @@ def rescue_advice(model, state_dir, budget, log_path, repo, start, fails, task, 
                                       or os.environ.get("QWEN_CLAUDE_BIN") or "claude")})
     env["QA_ADVISOR_TOOLS"] = "1" if claude_tools_for("rescue") else ""
     try:
-        # -z, not --name-only's lines: porcelain would octal-quote a non-ASCII name
-        # (core.quotePath), and an escaped pathspec matches nothing -- the secret it
-        # names would stay in the diff.
-        secrets = [p for p in _git(repo, "diff", "--name-only", "-z", start).split("\0")
-                   if p and advisor_mcp.looks_secret(p)]
-        # A magic pathspec's body matches as a GLOB: without literal, a secret named
-        # key[1].pem would not match :(exclude)key[1].pem ([1] is a one-char class).
-        spec = ["--"] + [":(exclude,literal)%s" % p for p in secrets] if secrets else []
+        secrets, spec = _secret_exclude(repo, start)
         diff = _git(repo, "diff", start, *spec)
-        if secrets:
-            # Trust but verify: bytes no text can carry (a name that is not valid
-            # UTF-8 reaches this process with replacements) defeat even a literal
-            # pathspec. If a secret-named file would still sit in the diff, no diff
-            # goes out at all rather than that file's content.
-            left = [p for p in _git(repo, "diff", "--name-only", "-z", start, *spec).split("\0")
-                    if p and advisor_mcp.looks_secret(p)]
-            if left:
-                diff = "(diff omitted: a changed file with a secret name could not be excluded)"
+        if secrets and _secrets_left(repo, start, spec):
+            # A secret-named file would still sit in the diff: no diff goes out
+            # at all rather than that file's content.
+            diff = "(diff omitted: a changed file with a secret name could not be excluded)"
         new = [p for p in _git(repo, "ls-files", "-z", "--others", "--exclude-standard").split("\0")
                if p and not advisor_mcp.looks_secret(p)]
         if new:
@@ -853,6 +876,75 @@ def _steering_rows(inbox):
     return rows
 
 
+# ------------------------------------------------------------- asks (stage 1.5)
+# A failing round of a loop the main session is listening to asks instead of
+# flailing on (spec 10.3): the ask lands in RUN/asks/new/ and the loop goes on at
+# once -- it never waits for an answer. lib/asks.py owns the storage; these are
+# the loop's own side of it: the layout gate, the end marker, and the report row.
+
+def _asks_init(run_dir, has_cmd) -> bool:
+    """Open the ask layout for this run (asks.init_run): True when RUN/asks/ and
+    RUN/amend/ stand. It follows the inbox -- False whenever run_inbox is None
+    (QWEN_STREAM=0, or an inbox that could not be built: the no-messaging baseline
+    creates no ask dirs at all, P5) -- and asks.init_run never raises: a layout
+    that cannot be built asks nothing of the run."""
+    if os.environ.get("QWEN_STREAM", "1") == "0":
+        return False
+    if not os.path.isdir(os.path.join(run_dir, "inbox")):
+        return False                      # no inbox of this run: no asks either
+    return asks.init_run(run_dir, has_cmd)
+
+
+def _write_ended(run_dir) -> None:
+    """Stamp RUN/asks/.ended (spec 4.1), the marker a --next-ask waiter reads as
+    "the loop is over". Idempotent, never raises, and it never creates asks/: with
+    the folder missing (stream off, or an init that refused) it writes nothing."""
+    if not run_dir:
+        return
+    with contextlib.suppress(OSError, asks.AsksError):
+        if not os.path.isdir(os.path.join(run_dir, asks.ASKS_DIR)):
+            return                        # _write_ended never makes asks/
+        asks.safe_write(asks.ended_path(run_dir), b"")
+
+
+def _ask_lines(run_dir) -> list[str]:
+    """report.md's ask-main row (spec 10.5): one line counting this run's ask
+    events off asks/log.jsonl -- written, claimed, amends applied, amends
+    rejected. The trigger is any EVENT, not any line: a record is an event only
+    as asks.log_event writes one (a JSON object with a string "ev"), so a torn
+    or planted line is a reporting gap, not a row for a run that never asked.
+    [] likewise when the log cannot be read: a gap, never a run failure."""
+    counts = {"written": 0, "claimed": 0, "amend_applied": 0, "amend_rejected": 0}
+    try:
+        with open(os.path.join(run_dir, asks.ASKS_DIR, asks.LOG_FILE),
+                  encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except (OSError, ValueError):    # ValueError: undecodable bytes -- the log is
+        return []                    # another process's file too (the `claimed`
+                                     # rows come from the answerer's CLI)
+    seen = False
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue                 # a torn write mid-append is not an event
+        # log_event's own shape: {"t","ev",...}. Anything else (a bare number,
+        # a list, a dict without a string "ev") is not a record of an event.
+        ev = rec.get("ev") if isinstance(rec, dict) else None
+        if not isinstance(ev, str):
+            continue
+        seen = True
+        if ev in counts:
+            counts[ev] += 1
+    if not seen:
+        return []
+    return ["ask-main: written %d, claimed %d, amends applied %d, rejected %d"
+            % (counts["written"], counts["claimed"],
+               counts["amend_applied"], counts["amend_rejected"])]
+
+
 def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, start, repo, denied=(),
             agent_err="", notes=(), tools=None, transcript_found=False, switches=(), depth=None,
             advisor=None, plan=None, rescue=None):
@@ -898,6 +990,10 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
                      "rescue skipped: %d" % (len(rescue_recs) - rescue_called),
                      "rescue cost_usd: %g" % sum(r.get("cost_usd") or 0 for r in rescue_recs)]
                     if rescue else [])
+    # The asks this run wrote and what the main session did with them (spec 10.5):
+    # their own rows, present whenever the asks log holds an event -- a run that
+    # asked gets the section even without --advisor or --rescue.
+    ask_rows = _ask_lines(run_dir)
     text = "\n".join([
         "# until-done report", "",
         "stop: %s (exit %d)" % (reason, code),
@@ -911,11 +1007,12 @@ def _report(run_dir, *, reason, code, rounds, session, tokens, results, log, sta
         *plan_head, "",
         "## Checklist", "", "| # | item | status | evidence |", "|---|---|---|---|", *rows, "",
         "## Tool use", "", *tool_lines, "",
-        # Only an --advisor or --rescue run gets the section: what the options spent, over
-        # every round. The rescue lines count its own calls from the run's record file; they
-        # never mix with the agent's counts above (a separate budget on a separate dir).
-        *(["## Claude calls", "", *(_advisor_lines(advisor) if advisor else []), *rescue_lines, ""]
-          if advisor or rescue else []),
+        # Only an --advisor or --rescue run (or one that wrote asks) gets the section:
+        # what the options spent, over every round. The rescue lines count its own calls
+        # from the run's record file; they never mix with the agent's counts above (a
+        # separate budget on a separate dir).
+        *(["## Claude calls", "", *(_advisor_lines(advisor) if advisor else []),
+           *rescue_lines, *ask_rows, ""] if advisor or rescue or ask_rows else []),
         *(["### Rescue after failing rounds", "",
            *["- round %d: %s\n\n  advice:\n\n  %s\n\n  next reply (start):\n\n  %s\n" % (
                h["round"], "asked" if h["called"] else "skipped (%s)" % h["skipped_reason"],
@@ -1142,6 +1239,9 @@ def _run(o):
                                       # or the loop never reached its folder)
     watch_id = None                   # this loop's watch pointer, once registered
     watch_code = None                 # the exit its finish() records (None: not reached)
+    asks_on = False                   # asks layout opened AND this loop on the page:
+                                      # the only state in which a round may ask (10.3)
+    amend_k = 0                       # amendments applied this run (Task 5 counts them)
     advisor_dir = None                # --advisor: this run's ONE advisor state dir (finally removes it)
     rescue_dir = None                 # --rescue: this run's ONE rescue state dir (finally removes it)
     pending = None                    # the rescue record waiting for the next round's reply
@@ -1262,6 +1362,13 @@ def _run(o):
                       encoding="utf-8") as fh:
                 fh.write(json.dumps(pending) + "\n")
             pending = None
+
+    def print_amend_line():
+        """The line every reporting exit says on stdout once the checklist has been
+        amended this run (k > 0): the session that started the loop must learn the
+        task changed without opening report.md. Task 5 counts the amendments."""
+        if amend_k > 0:
+            print("until-done: checklist amended %d time(s); see report" % amend_k)
     try:
         # The handler in _stop_on_signal is not enough on its own: a signal
         # landing between the mkdir and `mine = True` would run the cleanup
@@ -1304,11 +1411,18 @@ def _run(o):
         # the page registers it -- the registration is the address a note is sent to,
         # and the inbox must already answer when that address goes public.
         run_inbox = _run_inbox_init(run_dir)
+        # The ask layout opens with the inbox and before the page registers the
+        # folder an answerer is sent to (stage 1.5, spec 10.3): asks follow the
+        # inbox, so an un-inbox'd loop makes no ask dirs at all.
+        asks_ready = _asks_init(run_dir, has_cmd) if run_inbox is not None else False
         # The page shows the loop as soon as it has a folder to show: what the task
         # file asks for (its own first description) with its name kept at the end is
         # the title, the folder the progress (the round files under it), and
         # --max-rounds the denominator of that progress.
         watch_id = _watch_start(_watch_title(o.task), run_dir, o.max_rounds)
+        # Asks need both halves: an opened layout and a page that names this run
+        # (the ask tells the answerer which run id to address).
+        asks_on = bool(asks_ready) and watch_id is not None
         if o.advisor:
             # ONE state dir for the whole loop, handed to every coder round: the budget
             # and the call log are shared, so QWEN_ADVISOR_MAX_CALLS caps the run rather
@@ -1358,14 +1472,18 @@ def _run(o):
                 # (KeyboardInterrupt and SystemExit are BaseExceptions: they keep their
                 # own paths -- the interrupted report and 130 below.)
                 print("until-done: --probe: %s" % exc, file=sys.stderr)
+                flush_pending()
                 _close_run_inbox(run_inbox)       # K5: sweep before every report
+                asks.leftover_pending(run_dir)    # 10.1: housekeeping before the report
                 path = _report(run_dir, reason="error: %s: %s" % (type(exc).__name__, exc),
                                code=EXIT_HARNESS, rounds=rounds, session=session,
                                tokens=tokens, results=results, log=log, start=start,
                                repo=run_dir, denied=denied, switches=_switches(o),
                                depth=getattr(o, "depth", None), advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
                 report_path = path
+                _write_ended(run_dir)             # 10.1: the end marker after the report
                 print("report: %s" % path)
+                print_amend_line()
                 watch_code = EXIT_HARNESS
                 return EXIT_HARNESS
             repo = str(sb)
@@ -1610,6 +1728,28 @@ def _run(o):
                          "No shell is available this run; use Read, Grep and Glob.")
                 feedback += ("\n%d Bash calls were denied last round. %s"
                              % (len(r["denied"]), fence))
+            # Spec 10.3: a failing round of a loop the main session is listening to
+            # (page on, layout open, lease live) writes an ask instead of making the
+            # rescue call, and does not wait for an answer. Computed BEFORE the
+            # rescue branch: it is what the branch below records its skip with.
+            ask_ok = (asks_on and failing and rounds < o.max_rounds
+                      and asks.lease_live(run_dir))
+            ask_written = False
+            if ask_ok:
+                # The ask is the loop's only side of the conversation: the layout's
+                # own refusals (a symlinked asks/, a blocked write) are never the
+                # round's problem, and a written ask alone earns the log event --
+                # and alone stands the rescue down (a failed write keeps today's rescue).
+                with contextlib.suppress(Exception):
+                    asks.write_ask(run_dir, rounds, asks.ask_text(
+                        n=rounds, max_rounds=o.max_rounds,
+                        title=_watch_title(o.task), run_id=watch_id, repo=repo,
+                        probe=bool(o.probe),
+                        task_path=os.path.join(run_dir, "task.md"),
+                        next_started=time.strftime("%H:%M:%S"), start=start,
+                        diffstat=_diffstat(repo, start), fails=_fails_text(failing)))
+                    asks.log_event(run_dir, "written", round=rounds)
+                    ask_written = True
             if rescue_dir is not None and rounds < o.max_rounds:
                 # The last round follows this prompt, so ask Claude about its
                 # failure now: the advice rides into the next prompt, and the record
@@ -1624,6 +1764,15 @@ def _run(o):
                                "cost_usd": None,
                                "round": rounds, "advice": None, "reply": None}
                     notes.append("rescue after round %d skipped: %s" % (rounds, why))
+                elif ask_written:
+                    # The main session is listening: the rescue stands down in
+                    # favour of the ask just written, and says so like any skip.
+                    pending = {"call": "rescue", "called": False,
+                               "skipped_reason": "main session listening",
+                               "cost_usd": None,
+                               "round": rounds, "advice": None, "reply": None}
+                    notes.append("rescue after round %d skipped: main session listening"
+                                 % rounds)
                 else:
                     advice, info = rescue_advice(
                         o.rescue, rescue_dir,
@@ -1640,6 +1789,8 @@ def _run(o):
         patch = finish_probe()
         flush_pending()
         _close_run_inbox(run_inbox)               # K5: sweep before every report
+        asks.leftover_pending(run_dir)            # 10.1: an amendment nobody reached
+                                                  # moves aside before the report reads
         path = _report(run_dir, reason=reason, code=code, rounds=rounds, session=session,
                        tokens=tokens, results=results, log=log, start=start, repo=repo,
                        denied=denied, agent_err=agent_err, notes=notes,
@@ -1647,12 +1798,14 @@ def _run(o):
                        switches=_switches(o), depth=getattr(o, "depth", None),
                        advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
         report_path = path
+        _write_ended(run_dir)                     # 10.1: the end marker after the report
         print("until-done: %s after %d round(s); session %s" % (reason, rounds, session or "-"))
         if patch:
             print("patch: %s" % patch)
         if sb is not None and o.keep_sandbox:
             print("sandbox kept: %s" % sb)     # as --keep-sandbox's help promises
         print("report: %s" % path)
+        print_amend_line()
         watch_code = code
         return code
     except KeyboardInterrupt:
@@ -1671,6 +1824,7 @@ def _run(o):
                 notes.append("sandbox kept: %s" % sb)
             flush_pending()
             _close_run_inbox(run_inbox)           # K5: sweep before every report
+            asks.leftover_pending(run_dir)        # 10.1: housekeeping before the report
             path = _report(run_dir, reason="interrupted", code=EXIT_INTERRUPTED, rounds=rounds,
                            session=session, tokens=tokens, results=results, log=log, start=start,
                            repo=run_dir if (o.probe and sb is None) else repo,
@@ -1679,6 +1833,7 @@ def _run(o):
                            switches=_switches(o), depth=getattr(o, "depth", None),
                            advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
             report_path = path
+            _write_ended(run_dir)                 # 10.1: the end marker after the report
             # A dead terminal (the window closed under the run) must not turn
             # the interrupt into exit 1: an OSError escaping this handler would
             # skip the 130 below, so every print here swallows it.
@@ -1688,6 +1843,7 @@ def _run(o):
                     if o.keep_sandbox and sb is not None:
                         print("sandbox kept: %s" % sb)     # as --keep-sandbox's help promises
                 print("report: %s" % path)
+                print_amend_line()
         with contextlib.suppress(OSError):
             if session:
                 print('until-done: interrupted; continue by hand with: qwen-agent --resume %s "<prompt>"'
@@ -1722,9 +1878,11 @@ def _run(o):
             for d in (advisor_dir, rescue_dir, plan_dir):
                 if d is not None:
                     shutil.rmtree(d, ignore_errors=True)
-            # os._exit skips the finally, so the inbox sweep happens here too (K5):
-            # idempotent with the one before the interrupted report above.
+            # os._exit skips the finally, so the inbox sweep happens here too (K5),
+            # and with it the end marker (10.1): both idempotent with what the
+            # interrupted report above already did.
             _close_run_inbox(run_inbox)
+            _write_ended(run_dir)
             os._exit(EXIT_INTERRUPTED)
         return EXIT_INTERRUPTED
     except Exception as exc:
@@ -1749,6 +1907,7 @@ def _run(o):
             # not take the report (and the 8) down with it.
             flush_pending()
         _close_run_inbox(run_inbox)               # K5: sweep before every report
+        asks.leftover_pending(run_dir)            # 10.1: housekeeping before the report
         path = _report(run_dir, reason="error: %s: %s" % (type(exc).__name__, exc),
                        code=EXIT_HARNESS, rounds=rounds, session=session, tokens=tokens,
                        results=results, log=log, start=start,
@@ -1758,16 +1917,20 @@ def _run(o):
                        switches=_switches(o), depth=getattr(o, "depth", None),
                        advisor=advisor_info(), plan=plan_info(), rescue=o.rescue)
         report_path = path
+        _write_ended(run_dir)                     # 10.1: the end marker after the report
         with contextlib.suppress(OSError):
             if patch:
                 print("patch: %s" % patch)
             print("report: %s" % path)
+            print_amend_line()
         return EXIT_HARNESS
     finally:
         # K5: the sweep also happens here, so the exception path that re-raises
         # without reporting still closes its inbox (idempotent with the sweeps that
-        # ran before every report).
+        # ran before every report). The end marker rides with it (10.1): every way
+        # out of the loop stamps RUN/asks/.ended, this one included.
         _close_run_inbox(run_inbox)
+        _write_ended(run_dir)
         # A sandbox sweep that raises must not skip the lock removal: the next run
         # would be locked out (exit 14) by a run that already ended. A sweep that
         # cannot finish leaves a sandbox nobody chose to keep: say so -- stderr and

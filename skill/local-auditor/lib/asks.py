@@ -24,7 +24,7 @@ Run-folder layout (spec 4.1)::
     <RUN>/amend/rejected/       amendments the loop rejected, one <time_ns>.md per rejection
     <RUN>/amend/unapplied.md    a pending.md left over when the run ended
     <RUN>/amend/meta.json       {"has_test_cmd": <bool>}
-    <RUN>/.ended                the supervisor's end-of-run sentinel
+    <RUN>/asks/.ended           the supervisor's end-of-run sentinel
 
 The sender CLI (spec 10.2): ``python lib/asks.py next-ask ID [--wait SECONDS]
 [--release]`` stamps the lease and polls once a second -- the claimed ask's
@@ -123,7 +123,7 @@ APPLYING_FILE = ".applying.md"  # the amendment mid-claim by apply_pending (tran
 UNAPPLIED_FILE = "unapplied.md"  # a pending.md left at run end, moved aside whole
 INBOX_DIR = "inbox"             # the loop's inbox: its .closed ends the run for us
 CLOSED_SENTINEL = ".closed"
-ENDED_FILE = ".ended"           # the supervisor's end-of-run sentinel under RUN
+ENDED_FILE = ".ended"           # the supervisor's end-of-run sentinel under RUN/asks
 
 POLL = 1                 # seconds between --next-ask's polls of the ask queue
 WAIT_MIN, WAIT_MAX = 1, 3600    # --wait SECONDS bounds, like notes' --wait
@@ -698,11 +698,18 @@ def resolve_until_done(run_id):
     return run_path, pointer
 
 
+def ended_path(run_dir: str) -> str:
+    """The end-of-run marker's path (spec 4.1): RUN/asks/.ended -- under asks/,
+    beside the queue it closes. The supervisor writes it and never creates asks/
+    to do so; readers only look."""
+    return os.path.join(run_dir, ASKS_DIR, ENDED_FILE)
+
+
 def run_ended(run_dir: str, pointer: dict) -> bool:
-    """True when the loop is over: RUN/.ended exists, or the pointer -- RE-READ
+    """True when the loop is over: RUN/asks/.ended exists, or the pointer -- RE-READ
     here, so an `end` set while we wait counts -- has `end` set, or its pid is
     dead (notes.pid_alive judges, watch's _alive would answer True off posix)."""
-    if os.path.lexists(os.path.join(run_dir, ENDED_FILE)):
+    if os.path.lexists(ended_path(run_dir)):
         return True
     rec = pointer if isinstance(pointer, dict) else {}
     run_id = rec.get("id")

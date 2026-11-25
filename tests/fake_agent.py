@@ -7,6 +7,13 @@ $FAKE_AGENT_SCRIPT is a JSON list; call N uses entry N-1 (the last entry repeats
 With "tools", and QWEN_TRANSCRIPT_DIR set, one assistant tool_use line per listed
 tool is appended to $QWEN_TRANSCRIPT_DIR/<session_id>.jsonl (the file accumulates,
 like a resumed Claude Code session's transcript).
+With "run_write", the same {rel/path: content} mapping is written under
+dirname($QWEN_INBOX) -- the loop's RUN folder, NOT the round's repo -- creating
+parent dirs (a test plants asks/lease.json there). Needs a messaged round
+(QWEN_INBOX set); without one it is a loud KeyError.
+With "export_run" (true), the RUN path (dirname($QWEN_INBOX)) is appended to
+$FAKE_AGENT_RECORD.run as one JSON line, so a test learns where the run folder is
+without reading the watch pointer.
 With "advisor", one JSON line per entry is appended to the call's --advisor-state
 directory's calls.jsonl -- what lib/advisor_mcp.py writes for every ask call it
 serves, so a test can hand the supervisor the call log of a run that asked.
@@ -48,6 +55,19 @@ repo = argv[argv.index("-C") + 1]
 for rel, content in (step.get("write") or {}).items():
     with open(os.path.join(repo, rel), "w", encoding="utf-8") as fh:
         fh.write(content)
+if step.get("run_write") or step.get("export_run"):
+    # RUN is dirname($QWEN_INBOX): the loop's folder, which only a messaged round
+    # is given an inbox inside of. No QWEN_INBOX is a loud KeyError, on purpose.
+    rundir = os.path.dirname(os.environ["QWEN_INBOX"])
+    for rel, content in (step.get("run_write") or {}).items():
+        path = os.path.join(rundir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+    if step.get("export_run"):
+        with open(os.environ["FAKE_AGENT_RECORD"] + ".run", "a",
+                  encoding="utf-8") as fh:
+            fh.write(json.dumps(rundir) + "\n")
 if step.get("advisor"):
     # A round that asks lands its records in the ONE state dir the supervisor gave it.
     # No --advisor-state on this call means the script asked for calls the round could
