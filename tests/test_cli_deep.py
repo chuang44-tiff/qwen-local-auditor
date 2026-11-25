@@ -892,7 +892,10 @@ def test_until_done_probe_end_to_end(tmp_path, server, fake):
     assert r.returncode == 0, r.stdout + r.stderr
     (a1, c1), (a2, c2) = calls(tmp_path)
     assert c1 == c2 and "--restricted" in a1
-    assert flag(a2, "--allowed-tools") == "Bash,Read,Edit,Write,MultiEdit,Glob,Grep"
+    # The streamed round also carries the qla_msg reply grant (phase 2, spec 12.7:
+    # an agent with an inbox gets the message tools); everything else is the fence.
+    assert flag(a2, "--allowed-tools") == \
+        "Bash,Read,Edit,Write,MultiEdit,Glob,Grep,mcp__qla_msg__reply"
     assert tree_state(repo) == before
     patch = [ln for ln in r.stdout.splitlines() if ln.startswith("patch: ")][0][len("patch: "):]
     assert "+probe edit" in open(patch, encoding="utf-8").read()

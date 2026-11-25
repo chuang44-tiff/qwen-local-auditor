@@ -20,6 +20,13 @@ the `--output-format json` pair gone from its slot (the driver re-adds
 flags appended last in their one order. Equality of two lists is what says "no other
 flag added, removed or reordered".
 
+Phase 2 added one KNOWN mode difference (spec 12.7): the streamed launch also carries
+the qla_msg MCP config pair, the reply grant and the two env keys the launcher
+exports for the server. shared_core strips them for the equality (strip_qla_msg),
+golden_payload leaves the keys out of the pinned env list -- and their presence on
+the streamed side, absence on the unstreamed one, is asserted plainly by
+test_parity_single_shot_argv, so stripping cannot hide them.
+
 The golden (tests/data/stream_launch_golden.json) is that same normalised stream
 argv plus the sorted list of the env keys the launcher itself contributes, with
 placeholders for the values that name a run rather than a launch. It keeps its
@@ -50,6 +57,18 @@ REGENERATE = "QLA_UPDATE_GOLDEN=1 pytest -k golden"
 # an unstreamed launch.
 DRIVER_TAIL = ["--input-format", "stream-json", "--output-format", "stream-json",
                "--verbose", "--replay-user-messages"]
+
+# Phase 2 (spec 12.7): the streamed launch legitimately carries what the argv launch
+# must never see -- the qla_msg MCP config (as one more --mcp-config pair) and the
+# reply grant, plus the two env keys the launcher exports for the server. These are
+# THE mode difference: shared_core strips them from both sides (a config file under
+# TMPD names the run, so it could never be a verbatim pin), the comparison test
+# asserts presence on the streamed side and absence on the unstreamed one, and
+# golden_payload's env-key list leaves them out for the same presence-assert to
+# guard. QWEN_MSG_* are not in SCRUB_LIST (spec 4.1).
+QLA_MSG_CONFIG_FILE = "qla_msg.json"
+QLA_MSG_GRANT = ",mcp__qla_msg__reply"
+QLA_MSG_ENV_KEYS = ("QWEN_MSG_DIR", "QWEN_MSG_TOOLS")
 
 # argv flags whose VALUE names this run (or this machine's served model) rather than
 # this kind of launch, and what the golden writes in their place. The order matters:
@@ -286,6 +305,41 @@ def placeholderise(tokens, run_id, per_run, side):
     return out
 
 
+def strip_qla_msg(tokens, side):
+    """Remove the qla_msg additions from a launch's tokens BEFORE placeholdering
+    and the leak check: the --mcp-config pair naming the run's TMPD file, and the
+    reply-grant suffix on --allowed-tools (phase 2, spec 12.7 -- the streamed
+    launch's legitimate extras, shared_core's one known difference). Stripping
+    happens on both modes: an unstreamed launch has nothing to strip, and its
+    carrying the pair would be the real bug -- caught by the presence/absence
+    asserts in test_parity_single_shot_argv, not by silence here. A second pair
+    or a second --allowed-tools is not the known difference and says so."""
+    out = list(tokens)
+    at = [i for i, a in enumerate(out)
+          if a == "--mcp-config" and i + 1 < len(out)
+          and last_segment(out[i + 1]) == QLA_MSG_CONFIG_FILE]
+    assert len(at) <= 1, "%s: %d qla_msg --mcp-config pairs in one launch: %r" \
+        % (side, len(at), tokens)
+    for i in reversed(at):
+        del out[i:i + 2]
+    g = [i for i, a in enumerate(out) if a == "--allowed-tools"]
+    assert len(g) <= 1, "%s: %d --allowed-tools in one launch: %r" % (side, len(g), tokens)
+    if g and out[g[0] + 1].endswith(QLA_MSG_GRANT):
+        out[g[0] + 1] = out[g[0] + 1][:-len(QLA_MSG_GRANT)]
+    return out
+
+
+def mcp_values(tokens):
+    """Every --mcp-config VALUE in a raw launch argv."""
+    return [tokens[i + 1] for i, a in enumerate(tokens)
+            if a == "--mcp-config" and i + 1 < len(tokens)]
+
+
+def grants_of(tokens):
+    """The raw --allowed-tools value of a launch argv ("" when it passes none)."""
+    return tokens[tokens.index("--allowed-tools") + 1] if "--allowed-tools" in tokens else ""
+
+
 def shared_core(tokens, *, mode, prompt=None, run_id=None, per_run=()):
     """The one shape both launches must reduce to, in order.
 
@@ -318,6 +372,7 @@ def shared_core(tokens, *, mode, prompt=None, run_id=None, per_run=()):
         for flag in ("--input-format", "--replay-user-messages", "--verbose"):
             assert flag not in tokens, \
                 "the unstreamed launch gained the driver's flag %s: %r" % (flag, tokens)
+    tokens = strip_qla_msg(tokens, mode)
     return placeholderise(tokens, run_id, per_run, mode)
 
 
@@ -330,10 +385,12 @@ def normalise_stream_argv(tokens, *, run_id=None, per_run=()):
 
 def comparable_env(env):
     """An environment with only what the two launches must share: everything but the
-    keys whose value names a run (PER_RUN_ENV_KEYS) and the two that cannot be equal
-    across the modes by construction (MODE_ENV_KEYS)."""
+    keys whose value names a run (PER_RUN_ENV_KEYS), the two that cannot be equal
+    across the modes by construction (MODE_ENV_KEYS), and the qla_msg trio the
+    launcher exports for the streamed launch only (QLA_MSG_ENV_KEYS -- their
+    one-sided presence is asserted by the test that compares the modes)."""
     out = dict(env)
-    for key in list(PER_RUN_ENV_KEYS) + list(MODE_ENV_KEYS):
+    for key in list(PER_RUN_ENV_KEYS) + list(MODE_ENV_KEYS) + list(QLA_MSG_ENV_KEYS):
         out.pop(key, None)
     return out
 
@@ -360,6 +417,8 @@ def assert_parity(argv_rec, stream_rec, prompt, *, run_id=None, per_run=()):
     """
     argv, streamed = argv_rec["argv"], stream_rec["argv"]
     assert_same_run_values(argv, streamed)
+    # shared_core strips the qla_msg additions (phase 2's one known difference);
+    # what is left must be the same list, in the same order, for both modes.
     assert shared_core(streamed, mode="stream", run_id=run_id, per_run=per_run) \
         == shared_core(argv, mode="argv", prompt=prompt, run_id=run_id, per_run=per_run), \
         "the two launches do not reduce to the same claude argv\n" \
@@ -441,6 +500,21 @@ def test_parity_single_shot_argv(tmp_path, server):                       # noqa
     assert streamed.count("--output-format") == 1 \
         and streamed[streamed.index("--output-format") + 1] == "stream-json"
     assert "--" not in streamed and argv[-2:] == ["--", PROMPT]
+
+    # phase 2 (spec 12.7): the qla_msg server, its reply grant and the env the
+    # launcher exports for them ARE the streamed-mode addition -- and the whole
+    # point is that the unstreamed launch carries none of it (byte-identical).
+    assert any(last_segment(v) == QLA_MSG_CONFIG_FILE for v in mcp_values(streamed)), \
+        "the streamed launch carries no qla_msg --mcp-config: %r" % (streamed,)
+    assert not any(last_segment(v) == QLA_MSG_CONFIG_FILE for v in mcp_values(argv)), \
+        "the unstreamed launch carries a qla_msg --mcp-config: %r" % (argv,)
+    assert grants_of(streamed).endswith(QLA_MSG_GRANT), \
+        "the streamed launch's grants do not end on the reply grant: %r" % (streamed,)
+    assert not grants_of(argv).endswith(QLA_MSG_GRANT), \
+        "the unstreamed launch was granted mcp__qla_msg__reply: %r" % (argv,)
+    for key in QLA_MSG_ENV_KEYS:
+        assert key in stream_rec["env"], "%s is not in the streamed launch env" % key
+        assert key not in argv_rec["env"], "%s is in the unstreamed launch env" % key
 
     # the prompt went to stdin exactly once there, and to the argv exactly once here
     assert stream_rec["stdin_user_texts"] == [PROMPT]
@@ -658,9 +732,14 @@ def test_parity_until_done_rounds(tmp_path, server):                      # noqa
 
 
 def golden_payload(argv, env):
+    # QLA_MSG_ENV_KEYS leave the golden's list out: they are THE streamed-side
+    # addition (spec 12.7), and the comparison test asserts their presence where
+    # that is what is under test -- a golden that grows a key every time a feature
+    # exports one stops being a pinned picture of the launch.
     return {"argv": normalise_stream_argv(argv),
             "env_keys": sorted(k for k in env
-                               if k.startswith(OWN_ENV_PREFIXES) or k in OWN_ENV_KEYS_EXTRA)}
+                               if (k.startswith(OWN_ENV_PREFIXES) or k in OWN_ENV_KEYS_EXTRA)
+                               and k not in QLA_MSG_ENV_KEYS)}
 
 
 def golden_message(payload, golden):

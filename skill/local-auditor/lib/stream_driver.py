@@ -3,7 +3,8 @@
 `qwen-agent.sh` builds this instead of running claude directly (spec 4.3):
 
   ... "$QA_PY" lib/stream_driver.py --inbox DIR --prompt-file F --raw RAW
-      [--defer-on-end] [--bash BASH] -- <claude argv without the trailing -- PROMPT>
+      [--defer-on-end] [--bash BASH] [--msg-dir DIR]
+      -- <claude argv without the trailing -- PROMPT>
 
 The driver adds `--input-format stream-json --output-format stream-json --verbose
 --replay-user-messages`, writes the prompt (the prompt file's whole text) as the first
@@ -12,6 +13,13 @@ with the `[Note from <from> at HH:MM:SS local time]` header (K10: the time the n
 QUEUED). A forwarded note counts as delivered when its `isReplay` echo comes back; the
 echoes are matched FIFO and the first one (the initial prompt) is skipped (K6). Tool
 results (`type == "user"` without `isReplay`) are ignored.
+
+`--msg-dir` (phase 2, spec 12.2) makes the driver the delivery witness the
+qla_msg server reads: an `ask` note gets its `seen/ask-<id>` marker BEFORE its
+stdin line is queued (a marker that cannot be written sweeps the note
+`undelivered: marker_failed` and forwards nothing), and every delivered `note`
+or `ask` bumps `seen/main-count` at the echo. `share` and `harness` notes do
+neither. A driver without `--msg-dir` marks and counts nothing.
 
 Threads, not select (Windows-safe): a reader drains claude's stdout continuously and
 keeps ONLY the allowlist -- `result` events, `system/init` (the session id) and the
@@ -64,7 +72,7 @@ import time
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import notes  # noqa: E402
+from lib import msgdir, notes  # noqa: E402
 
 STREAM_FLAGS = ["--input-format", "stream-json", "--output-format", "stream-json",
                 "--verbose", "--replay-user-messages"]
@@ -240,12 +248,19 @@ if os.name == "nt":                                          # ctypes only on Wi
 
 
 class Driver:
-    def __init__(self, inbox, prompt, raw_path, defer_on_end=False, bash=None):
+    # Defaults for an instance built without __init__ (an in-process test stubs
+    # one up): a driver with no msg dir marks nothing and counts nothing.
+    msg_dir = None
+    _main_warned = False
+
+    def __init__(self, inbox, prompt, raw_path, defer_on_end=False, bash=None,
+                 msg_dir=None):
         self.inbox = str(inbox)
         self.prompt = prompt
         self.raw_path = str(raw_path)
         self.defer_on_end = bool(defer_on_end)
         self.bash = bash
+        self.msg_dir = str(msg_dir) if msg_dir else None
         self.cap = self._env_int("QWEN_NOTE_MAX_PER_RUN", DEFAULT_NOTE_MAX_PER_RUN)
         self.poll_interval = self._env_float("QWEN_NOTE_POLL", DEFAULT_POLL)
         self.grace = self._env_float("QWEN_NOTE_GRACE", 0.0)
@@ -406,7 +421,21 @@ class Driver:
         """Queue one validated note: the model-facing text is built ONLY by
         notes.render_note (one renderer for every kind, so a streamed note and a
         deferred one look the same); the stdin line carries nothing else. No other
-        body key is forwarded."""
+        body key is forwarded.
+
+        An ask gets its `seen/ask-<id>` marker BEFORE its line is queued (spec
+        12.2): the reply tool only answers a question whose marker exists, so a
+        note the agent never received must never look answered. A marker that
+        cannot be written means the ask is NOT forwarded: the note is swept
+        undelivered: marker_failed and None comes back -- the caller must
+        tolerate it."""
+        if self.msg_dir and body.get("kind") == "ask":
+            try:
+                msgdir.mark_ask_seen(self.msg_dir, note_id)
+            except (msgdir.MsgError, OSError) as e:
+                self._warn("cannot mark ask %s seen (%s): not forwarded" % (note_id, e))
+                notes.sweep_undelivered(self.inbox, note_id, "marker_failed", path)
+                return None
         content = notes.render_note(body, now_t=self._note_header_time(body))
         line = json.dumps({"type": "user", "message": {"role": "user", "content": content}},
                           ensure_ascii=False)
@@ -438,7 +467,10 @@ class Driver:
                 self.seen_ids.add(note_id)
                 touched += 1
                 continue
-            self.forward_note(body, path, note_id)
+            if self.forward_note(body, path, note_id) is None:
+                # the ask's seen marker could not be written: it was swept
+                # undelivered: marker_failed -- seen so the poll never retries it
+                self.seen_ids.add(note_id)
             touched += 1
         return touched
 
@@ -472,8 +504,23 @@ class Driver:
             self._deliver(note_id, entry)
 
     def _deliver(self, note_id, entry):
-        """The delivered log line, the activity line and the move to delivered/."""
+        """The delivered log line, the main-note count, the activity line and the
+        move to delivered/. At this echo a `note` or `ask` from main bumps
+        `seen/main-count` (spec 12.2 -- a missing kind is a phase 1 note); a
+        `share` or `harness` note counts for nothing. The count is the driver's
+        own bookkeeping: a failed bump warns once and never fails the delivery."""
         body = entry.get("body") or {}
+        if self.msg_dir:
+            kind = body.get("kind")
+            if kind is None:
+                kind = "note"
+            if kind == "note" or kind == "ask":
+                try:
+                    msgdir.bump_main_count(self.msg_dir)
+                except (msgdir.MsgError, OSError) as e:
+                    if not self._main_warned:
+                        self._main_warned = True
+                        self._warn("main-count not bumped (%s)" % e)
         to_addr = body.get("to") if isinstance(body.get("to"), str) else ""
         sender = body.get("from") if isinstance(body.get("from"), str) else "main"
         text_len = len(body.get("text") or "")
@@ -737,7 +784,7 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--" not in argv:
         sys.stderr.write("usage: stream_driver.py --inbox DIR --prompt-file F --raw RAW "
-                         "[--defer-on-end] [--bash BASH] -- <claude argv...>\n")
+                         "[--defer-on-end] [--bash BASH] [--msg-dir DIR] -- <claude argv...>\n")
         return 2
     split = argv.index("--")
     parser = argparse.ArgumentParser(prog="stream_driver.py", add_help=False)
@@ -746,6 +793,7 @@ def main(argv=None):
     parser.add_argument("--raw", required=True)
     parser.add_argument("--defer-on-end", action="store_true")
     parser.add_argument("--bash")
+    parser.add_argument("--msg-dir")
     parser.add_argument("--dry-run", action="store_true")
     opts = parser.parse_args(argv[:split])
     claude_argv = argv[split + 1:]
@@ -768,7 +816,7 @@ def main(argv=None):
         sys.stderr.write("stream_driver: cannot read the prompt file (%s)\n" % e)
         return 2
     driver = Driver(opts.inbox, prompt, opts.raw, defer_on_end=opts.defer_on_end,
-                    bash=getattr(opts, "bash", None))
+                    bash=getattr(opts, "bash", None), msg_dir=getattr(opts, "msg_dir", None))
     return driver.run(claude_argv)
 
 

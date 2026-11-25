@@ -3497,6 +3497,112 @@ PY
   [ -n "$CTX" ] && export QWEN_WATCH_CTX_WINDOW="$CTX"
 fi
 
+# ------------------------------------------------------------------ qla_msg
+# Phase 2 (spec 12.2/12.7): every agent the stream driver streams for also has a
+# message dir beside its inbox, the qla_msg MCP server (lib/msg_mcp.py) and one
+# grant per tool in QWEN_MSG_TOOLS. Activation is the spec's pair of conditions
+# -- QWEN_STREAM not 0 AND QWEN_INBOX set at argv-build time -- minus
+# --interactive: an interactive session exec's claude above the runner and can
+# never reach run_claude_once, so even with an inherited QWEN_INBOX it must see
+# nothing of this task. That keeps the gate what the spec's governing clause
+# demands -- exactly when the launcher will use the stream driver -- and an
+# unstreamed or interactive run gets today's argv byte for byte and nothing on
+# disk beyond the run's own folder.
+# A failure here costs the run only qla_msg: one warning on stderr, no server.
+MSG_MCP=""
+MSG_DIR_READY=0
+if [ "${QWEN_STREAM:-1}" != 0 ] && [ -n "${QWEN_INBOX:-}" ] && [ "$INTERACTIVE" -eq 0 ]; then
+  # A real run installs the cleanup trap here: this block can die (the clash below,
+  # a failed mktemp) AFTER the watch registration -- the finished pointer is the
+  # same cleanup the runner's own trap at the bottom takes care of. A --dry-run
+  # registers nothing and must NOT trap: it leaves the config file's folder behind
+  # on purpose so its caller can read the JSON the argv names.
+  [ "$DRY_RUN" -eq 0 ] && trap cleanup EXIT
+  # A caller's --mcp-config that defines qla_msg itself would leave two servers by
+  # one name: refuse it, exactly as the --advisor check does for qla_advisor.
+  if [ -n "$MCP_CONFIG" ] && [ "$BROWSER" -eq 0 ] && "$QA_PY" - "$(native_path "$MCP_CONFIG")" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and "qla_msg" in (d.get("mcpServers") or {}) else 1)
+PY
+  then
+    die "qla_msg: your --mcp-config already defines a server named qla_msg; rename it"; exit $QA_USAGE
+  fi
+  # The run folder, made early for this one config file; the runner below keeps a
+  # TMPD that is already set (prompt.txt and raw.json must join it).
+  if [ -z "${TMPD:-}" ]; then
+    TMPD="$(mktemp -d "${TMPDIR:-/tmp}/qwen-agent.XXXXXXXX")" || { die "mktemp failed"; exit $QA_HARNESS; }
+  fi
+  # The message dir: the caller's QWEN_MSG_DIR when a parent (the until-done
+  # supervisor, the swarm runner) passes one, else the single-shot folder beside the
+  # inbox -- its .inbox suffix becomes .msg (msgdir.single_msgdir's shape).
+  # init_msgdir is idempotent, so this is also the parent's dir's last chance to
+  # exist; one failure, one warning, and the run launches without qla_msg.
+  if [ -z "${QWEN_MSG_DIR:-}" ]; then
+    QWEN_MSG_DIR="${QWEN_INBOX%.inbox}.msg"
+    export QWEN_MSG_DIR
+  fi
+  if [ -z "${QWEN_MSG_TOOLS:-}" ]; then
+    QWEN_MSG_TOOLS=reply
+    export QWEN_MSG_TOOLS
+  fi
+  # QWEN_MSG_* and QWEN_ASKS_DIR are deliberately NOT in SCRUB_LIST: the server
+  # reads them from the inherited environment, and they name only the agent's own
+  # dir and the run's asks/ folder (spec 4.1).
+  if MSYS2_ARG_CONV_EXCL='*' PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" - \
+       "$(native_path "$QWEN_MSG_DIR")" <<'PY'
+import sys
+from lib import msgdir
+msgdir.init_msgdir(sys.argv[1])
+PY
+  then
+    _msg_self="${QWEN_MSG_SELF:-}" _msg_phase="${QWEN_MSG_PHASE:-}"
+    _msg_asks="" _msg_max="${QWEN_SHARE_MAX:-}"
+    [ -n "${QWEN_ASKS_DIR:-}" ] && _msg_asks="$(native_path "$QWEN_ASKS_DIR")"
+    MSG_MCP="$TMPD/qla_msg.json"
+    # One server, named qla_msg, run by THIS python; identity rides in the env block
+    # (never in tool args), and only the variables the run actually has are written.
+    if ! MSYS2_ARG_CONV_EXCL='*' "$QA_PY" - "$(native_path "$MSG_MCP")" "$(native_path "$QA_PY")" \
+         "$(native_path "$SKILL_DIR/lib/msg_mcp.py")" "$(native_path "$QWEN_MSG_DIR")" \
+         "$QWEN_MSG_TOOLS" "$_msg_self" "$_msg_phase" "$_msg_asks" "$_msg_max" <<'PY'
+import json, sys
+out, py, mod, mdir, tools, self_, phase, asks_dir, share_max = sys.argv[1:10]
+env = {"QWEN_MSG_DIR": mdir, "QWEN_MSG_TOOLS": tools, "PYTHONIOENCODING": "utf-8"}
+for name, value in (("QWEN_MSG_SELF", self_), ("QWEN_MSG_PHASE", phase),
+                    ("QWEN_ASKS_DIR", asks_dir), ("QWEN_SHARE_MAX", share_max)):
+    if value:
+        env[name] = value
+with open(out, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump({"mcpServers": {"qla_msg": {"command": py, "args": [mod], "env": env}}}, fh, indent=2)
+    fh.write("\n")
+PY
+    then
+      die "qla_msg: could not write the MCP config: $MSG_MCP (launching without it)"
+      MSG_MCP=""
+    fi
+    unset _msg_self _msg_phase _msg_asks _msg_max
+  else
+    die "qla_msg: the message dir $QWEN_MSG_DIR could not be created (launching without it)"
+  fi
+  # Grants: mcp__qla_msg__<t> for every name in QWEN_MSG_TOOLS that is one of the
+  # three tools -- the same allowlist lib/msg_mcp.py's tools/list narrows to -- and
+  # only when the server was actually wired in above.
+  if [ -n "$MSG_MCP" ]; then
+    MSG_DIR_READY=1
+    IFS=',' read -r -a _msg_tools <<< "$QWEN_MSG_TOOLS"
+    for _t in "${_msg_tools[@]}"; do
+      _t="${_t//[[:space:]]/}"
+      case "$_t" in
+        share|reply|ask_main) TOOLS="${TOOLS:+$TOOLS,}mcp__qla_msg__$_t" ;;
+      esac
+    done
+    unset _msg_tools _t
+  fi
+fi
+
 # --------------------------------------------------- build the claude argv
 if [ "$INTERACTIVE" -eq 1 ]; then
   # No -p/--print, and none of the flags a headless run needs a fence for: no
@@ -3544,6 +3650,9 @@ else
     fi
   fi
   [ -n "$ADVISOR_MCP" ] && CLAUDE_ARGV+=(--mcp-config "$(native_path "$ADVISOR_MCP")")
+  # qla_msg (phase 2): one more --mcp-config beside the advisor's -- claude merges
+  # them all. Before CLAUDE_BASE_N, so the review round reuses it too.
+  [ -n "$MSG_MCP" ] && CLAUDE_ARGV+=(--mcp-config "$(native_path "$MSG_MCP")")
   # ONE settings file, ever: the watch hook's, which carries the plan hook's entries as
   # well when both are on; the plan's own file only when the page has nothing to record.
   [ -n "${WATCH_SETTINGS:-$PLAN_SETTINGS}" ] \
@@ -3669,7 +3778,11 @@ if [ "$INTERACTIVE" -eq 1 ]; then
 fi
 
 # ------------------------------------------------------------------- runner
-TMPD="$(mktemp -d "${TMPDIR:-/tmp}/qwen-agent.XXXXXXXX")" || { die "mktemp failed"; exit $QA_HARNESS; }
+# The qla_msg block above may already have made the folder (for its config file);
+# keeping that TMPD is the whole point of the guard -- the driver's prompt.txt and
+# raw.json must live in the same folder the config line names.
+[ -n "${TMPD:-}" ] || TMPD="$(mktemp -d "${TMPDIR:-/tmp}/qwen-agent.XXXXXXXX")" \
+  || { die "mktemp failed"; exit $QA_HARNESS; }
 
 # claude runs as a BACKGROUND job and is joined with `wait`, because a trap
 # cannot interrupt a foreground command: with `timeout ... claude` in the
@@ -3738,6 +3851,11 @@ run_claude_once() {
            --inbox "$(native_path "$QWEN_INBOX")"
            --prompt-file "$(native_path "$TMPD/prompt.txt")"
            --raw "$(native_path "$RAW")")
+    # Phase 2 (spec 12.2): the driver marks the asks it delivers and counts main
+    # notes in the run's message dir -- only when the wiring above made that dir.
+    if [ "$MSG_DIR_READY" = 1 ] && [ -n "${QWEN_MSG_DIR:-}" ] && [ -d "$QWEN_MSG_DIR" ]; then
+      _drv+=(--msg-dir "$(native_path "$QWEN_MSG_DIR")")
+    fi
     # P2: --defer-on-end is the supervisor's between-rounds marker and nothing else;
     # the launcher only ever turns it into the driver's flag.
     [ "${QWEN_INBOX_DEFER:-}" = 1 ] && _drv+=(--defer-on-end)

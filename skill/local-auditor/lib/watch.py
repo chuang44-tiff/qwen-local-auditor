@@ -270,12 +270,15 @@ def activity_path(run_id):
 def _drop_activity(run_id):
     """Remove a run's activity file with its pointer (the prune and `dismiss`): a file
     nobody will ever read again must not sit in the registry forever. The single-shot
-    run's inbox (spec 4.2: <watch_dir>/<id>.inbox/) goes with it -- it belongs to this
-    pointer and outlives nothing; RUN-folder inboxes live and die with the RUN folder."""
+    run's inbox (spec 4.2: <watch_dir>/<id>.inbox/) and its message dir (phase 2,
+    spec 4.1: <watch_dir>/<id>.msg/, lib/msgdir.py) go with it -- both belong to this
+    pointer and outlive nothing; RUN-folder inboxes and msg dirs live and die with
+    the RUN folder."""
     if isinstance(run_id, str) and ID_RE.fullmatch(run_id):
         with contextlib.suppress(OSError):
             os.unlink(activity_path(run_id))
         shutil.rmtree(os.path.join(watch_dir(), "%s.inbox" % run_id), ignore_errors=True)
+        shutil.rmtree(os.path.join(watch_dir(), "%s.msg" % run_id), ignore_errors=True)
 
 
 def _server_path():
