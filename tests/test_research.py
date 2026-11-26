@@ -166,9 +166,12 @@ def test_role_fences(tmp_path, env):
         assert a[a.index("--toolset") + 1] == "none"
         assert "--web" not in a and "--mcp-config" not in a and "-t" not in a
     assert "--web" not in seen["searcher"] and "--mcp-config" in seen["searcher"]
-    for r in ("reader", "verifier"):
+    # the fetch fan-out is opted into sharing (share=True), so the reader carries
+    # the share tool grant beside the search server's two tools; the verifier does not
+    for r, want in (("reader", "mcp__search__search,mcp__search__page,mcp__qla_msg__share"),
+                    ("verifier", "mcp__search__search,mcp__search__page")):
         a = seen[r]
-        assert "--web" in a and a[a.index("-t") + 1] == "mcp__search__search,mcp__search__page"
+        assert "--web" in a and a[a.index("-t") + 1] == want
     for a in seen.values():
         assert a[a.index("--permission-mode") + 1] == "dontAsk"
 

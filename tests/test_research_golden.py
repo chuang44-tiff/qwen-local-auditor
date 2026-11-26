@@ -19,6 +19,7 @@ import sys
 import pytest
 
 import lib.research as rs
+from lib.swarm_engine import api
 from test_research import FAKE, env  # noqa: F401  (the fixture is used by name)
 
 # events.jsonl is the one addition since the release: the engine's progress stream
@@ -123,9 +124,20 @@ def test_one_round_run_folder_matches_the_released_one(tmp_path, env, capsys, de
     assert sorted(p.name for p in agents.iterdir() if p.is_dir()) == g["units"]
     for f, h in g["phase"].items():
         assert _canon(run / f) == h, f
-    prompts = {p.name[:-len(".prompt.md")]: hashlib.sha256(
-        p.read_text(encoding="utf-8").encode("utf-8")).hexdigest()[:16]
-        for p in sorted(agents.glob("*.prompt.md"))}
+    # the fetch fan-out is opted into sharing (spec 4.2): the engine appends its
+    # share rule to those units' prompts. The suffix itself is an exact assert; the
+    # pinned hash covers the workflow-authored bytes, unchanged by the opt-in.
+    suffix = "\n\n" + api.SHARE_RULE
+    prompts = {}
+    for p in sorted(agents.glob("*.prompt.md")):
+        text = p.read_text(encoding="utf-8")
+        if p.name.startswith("fetch-"):
+            assert text.endswith(suffix), p.name
+            text = text[:-len(suffix)]
+        else:
+            assert not text.endswith(suffix), p.name
+        prompts[p.name[:-len(".prompt.md")]] = hashlib.sha256(
+            text.encode("utf-8")).hexdigest()[:16]
     allp = hashlib.sha256("".join(prompts[k] for k in sorted(prompts)).encode()).hexdigest()[:16]
     assert allp == g["prompts"]
     totals = json.loads((run / "totals.json").read_text(encoding="utf-8"))
@@ -152,7 +164,7 @@ def test_one_round_cache_keys_match_the_released_ones(tmp_path, env):  # noqa: F
     mcp_text = (run / "mcp.json").read_text(encoding="utf-8")
     fences = {"scope": ("scoper", "none", "", False, "", None),
               "search": ("searcher", "none", "mcp__search__search", False, mcp_text, "medium"),
-              "fetch": ("reader", "none", "mcp__search__search,mcp__search__page", True, mcp_text, "medium"),
+              "fetch": ("reader", "none", "mcp__search__search,mcp__search__page,mcp__qla_msg__share", True, mcp_text, "medium"),
               "verify": ("verifier", "none", "mcp__search__search,mcp__search__page", True, mcp_text, "medium"),
               "synth": ("synthesizer", "none", "", False, "", None)}
     for rec in sorted(agents.glob("*.json")):

@@ -379,7 +379,7 @@ def run(wf):
         res = wf.fan_out("probe", "prober", hyps, lambda batch: PROBE_P.format(
             symptom=symptom, repro=repro, id=batch[0]["id"], location=batch[0]["location"],
             mechanism=batch[0]["mechanism"], evidence=batch[0]["evidence_needed"]),
-            parse_probe, max_items=1, label="round %d: probe" % r)
+            parse_probe, max_items=1, label="round %d: probe" % r, share=True)
         state["probes"] += res.rows
         new = []
         for row in res.rows:

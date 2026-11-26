@@ -1,6 +1,6 @@
 """The watch page, part 1: a run registry, the events.jsonl fold, and the stdlib viewer.
 
-A launcher (Task 2) registers a run before starting it and finishes it on the way out:
+A launcher registers a run before starting it and finishes it on the way out:
 
     run_id = watch.register("swarm", title, run_path=run, timeout=t, start_server=True)
     ...
@@ -270,8 +270,8 @@ def activity_path(run_id):
 def _drop_activity(run_id):
     """Remove a run's activity file with its pointer (the prune and `dismiss`): a file
     nobody will ever read again must not sit in the registry forever. The single-shot
-    run's inbox (spec 4.2: <watch_dir>/<id>.inbox/) and its message dir (phase 2,
-    spec 4.1: <watch_dir>/<id>.msg/, lib/msgdir.py) go with it -- both belong to this
+    run's inbox (spec 4.2: <watch_dir>/<id>.inbox/) and its message dir
+    (spec 4.1: <watch_dir>/<id>.msg/, lib/msgdir.py) go with it -- both belong to this
     pointer and outlive nothing; RUN-folder inboxes and msg dirs live and die with
     the RUN folder."""
     if isinstance(run_id, str) and ID_RE.fullmatch(run_id):

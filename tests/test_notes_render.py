@@ -1,4 +1,4 @@
-"""One note schema and one renderer (phase 2, lib/notes.py).
+"""One note schema and one renderer (spec 12.1, lib/notes.py).
 
 Every note kind renders one exact header, a share quotes every text line and names
 its paths on one more line, control characters never reach the model, and both
@@ -82,7 +82,7 @@ def test_render_share_quotes_every_line_and_paths():
 
 
 def test_queue_note_body_carries_kind_and_share_extras(tmp_path):
-    """The stored file: kind on every note, role/paths only on a share (phase 2)."""
+    """The stored file: kind on every note, role/paths only on a share (spec 12.1)."""
     inbox = str(tmp_path / "inbox")
     notes.init_inbox(inbox)
 

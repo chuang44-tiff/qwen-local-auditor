@@ -552,7 +552,8 @@ def _ideas(wf, b, bl, st):
 def _implement_and_measure(wf, b, bl, st, ideas, bar):
     res = wf.fan_out("implement", "implementer", ideas, lambda batch: IMPL_P.format(
         goal=wf.goal, bench=_bench_text(b), passed=_count(bl["m1"]), base=bl["base"], fence=FENCE,
-        **batch[0]), parse_impl, max_items=1, label="round %d: implement" % wf.round)
+        **batch[0]), parse_impl, max_items=1, label="round %d: implement" % wf.round,
+        share=True)
     by_id = {i["id"]: i for i in ideas}
     new = []
     for row in res.rows:

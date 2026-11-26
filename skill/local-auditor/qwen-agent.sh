@@ -1239,7 +1239,7 @@ while [ $# -gt 0 ]; do
     --notes)              MSG_MODE=notes;  MSG_ARGS=("${@:2}"); shift $# ;;
     --ask)                MSG_MODE=ask;    MSG_ARGS=("${@:2}"); shift $# ;;
     --answer)             MSG_MODE=answer; MSG_ARGS=("${@:2}"); shift $# ;;
-    # The asks CLI (stage 1.5, 10.2): the same verbatim takeover for --next-ask/
+    # The asks CLI (spec 10.2): the same verbatim takeover for --next-ask/
     # --amend; the grammar is lib/asks.py's to enforce, so the launcher parses
     # nothing after the sub-command here either.
     --next-ask)           MSG_MODE=next-ask; MSG_ARGS=("${@:2}"); shift $# ;;
@@ -1638,14 +1638,14 @@ if [ -n "$RECORD" ] && [ -z "$SCENARIOS" ]; then
   exit $QA_USAGE
 fi
 
-# ------ --send / --notes / --ask / --answer (phases 1-2), --next-ask / --amend (1.5)
+# ------ --send / --notes / --ask / --answer, --next-ask / --amend
 # The sender side of messaging talks to the watch registry and the target's inbox:
 # no model, no preflight, no argv, no role -- dispatched early, like --replay
 # (spec 4.4). lib/notes.py owns the --send/--notes/--ask/--answer grammar and every
 # exit code (K9, and 11.2 for the ask): 0 queued (or delivered, with --wait; the
 # reply printed, for --ask/--answer), 2 usage, 3 unavailable, and 10/11/12 for
 # the --wait outcomes (10 no answer yet, 11 the agent ended without answering);
-# lib/asks.py owns --next-ask/--amend (stage 1.5, spec 10.2):
+# lib/asks.py owns --next-ask/--amend (spec 10.2):
 # 0 claimed/queued, 2 usage, 3 unavailable, 10 no ask yet, 11 run ended. They are
 # this run's exit codes, passed through untouched.
 if [ -n "$MSG_MODE" ]; then
@@ -3594,13 +3594,13 @@ PY
 fi
 
 # ------------------------------------------------------------------ qla_msg
-# Phase 2 (spec 12.2/12.7): every agent the stream driver streams for also has a
+# Spec 12.2/12.7: every agent the stream driver streams for also has a
 # message dir beside its inbox, the qla_msg MCP server (lib/msg_mcp.py) and one
 # grant per tool in QWEN_MSG_TOOLS. Activation is the spec's pair of conditions
 # -- QWEN_STREAM not 0 AND QWEN_INBOX set at argv-build time -- minus
 # --interactive: an interactive session exec's claude above the runner and can
 # never reach run_claude_once, so even with an inherited QWEN_INBOX it must see
-# nothing of this task. That keeps the gate what the spec's governing clause
+# none of this. That keeps the gate what the spec's governing clause
 # demands -- exactly when the launcher will use the stream driver -- and an
 # unstreamed or interactive run gets today's argv byte for byte and nothing on
 # disk beyond the run's own folder.
@@ -3746,7 +3746,7 @@ else
     fi
   fi
   [ -n "$ADVISOR_MCP" ] && CLAUDE_ARGV+=(--mcp-config "$(native_path "$ADVISOR_MCP")")
-  # qla_msg (phase 2): one more --mcp-config beside the advisor's -- claude merges
+  # qla_msg (spec 12.2): one more --mcp-config beside the advisor's -- claude merges
   # them all. Before CLAUDE_BASE_N, so the review round reuses it too.
   [ -n "$MSG_MCP" ] && CLAUDE_ARGV+=(--mcp-config "$(native_path "$MSG_MCP")")
   # ONE settings file, ever: the --settings-extra merge above, which carries the watch
@@ -3949,7 +3949,7 @@ run_claude_once() {
            --inbox "$(native_path "$QWEN_INBOX")"
            --prompt-file "$(native_path "$TMPD/prompt.txt")"
            --raw "$(native_path "$RAW")")
-    # Phase 2 (spec 12.2): the driver marks the asks it delivers and counts main
+    # Spec 12.2: the driver marks the asks it delivers and counts main
     # notes in the run's message dir -- only when the wiring above made that dir.
     if [ "$MSG_DIR_READY" = 1 ] && [ -n "${QWEN_MSG_DIR:-}" ] && [ -d "$QWEN_MSG_DIR" ]; then
       _drv+=(--msg-dir "$(native_path "$QWEN_MSG_DIR")")

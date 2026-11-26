@@ -60,7 +60,7 @@ never-swept inbox reports `undelivered: closed`). `notes` prints one row per not
 exit 0 for a run whose pointer exists (running or ended), exit 3 for none; the preview
 is the first 80 characters with control characters shown as spaces.
 
-`ask` (phase 2, spec 11.2) is `send` with kind `ask`: the same grammar and the same
+`ask` (spec 11.2) is `send` with kind `ask`: the same grammar and the same
 refusals, but it queues `kind="ask"`, prints `asked <id>`, and --wait SECONDS (1..3600;
 absent means 600) polls the agent's msg dir (single-shot `<watch_dir>/<id>.msg`,
 until-done `<RUN>/msg`, swarm/research unit `<RUN>/msg/units/<unit>`) once a second
@@ -91,7 +91,7 @@ from lib import watch  # noqa: E402
 ADDRESS_RE = re.compile(r"^[0-9a-f]{12}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$")
 NOTE_FILE_RE = re.compile(r"^\d+-[0-9a-f]{6}\.json$")
 NOTE_ID_RE = re.compile(r"^\d+-[0-9a-f]{6}$")
-KINDS = ("note", "ask", "share", "harness")          # phase 2: every note names one
+KINDS = ("note", "ask", "share", "harness")          # every note names exactly one
 SHARE_FROM_RE = re.compile(r"^unit [A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 MAX_PATHS = 10                                       # a share carries at most 10 ...
@@ -482,7 +482,7 @@ def queue_note(inbox, to_addr, text, sender=SENDER, reply_to=None, hop=None,
     """Queue one note: validate the text, write new/<id>.json.tmp with O_EXCL|O_NOFOLLOW
     and os.replace it into place, log `queued`. Returns the id. Refused (NotesError 3)
     when the inbox has no `new/` (its owner never made one) or is closed. The body
-    carries its `kind`; `role` and `paths` ride only on a share (phase 2)."""
+    carries its `kind`; `role` and `paths` ride only on a share (spec 12.1)."""
     new_dir = os.path.join(inbox, NEW)
     _reject_link(inbox, "inbox")
     _reject_link(new_dir, "inbox folder")

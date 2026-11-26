@@ -86,6 +86,8 @@ local-only default so another machine can view it; `QWEN_WATCH=0` switches the p
 qwen-agent --send <run id> "check the retry path too"      # queues a note, prints its id
 qwen-agent --send <id>/<unit> --wait 60 -f note.md          # queue and wait for the outcome
 qwen-agent --notes <run id>                                  # what that agent received or missed
+qwen-agent --ask <run id> "how far along are you?"           # asks it, prints the reply (0 answered · 10 no answer yet · 11 ended without answering)
+qwen-agent --answer <id>/<unit> NOTE_ID                      # fetches the reply later, also after the run ended
 ```
 
 A note reaches one running agent as a plain user message at its next model call; it keeps its
@@ -103,6 +105,8 @@ An `--until-done` loop can ask the main session when a round fails, and it keeps
 does. Run `qwen-agent --next-ask ID` in the background; on exit 0 it prints the claimed ask's
 path — hand that file to a helper subagent on any model you pick. `--amend ID -f FILE` sends a
 corrected task file. The recipe and the helper brief are in `reference/ask-main.md`.
+The units of a running swarm or research run may ask the main session too: the same `--next-ask`
+claims their question asks (`reference/ask-main.md`).
 
 ## Running tests and reproduction tests
 

@@ -194,7 +194,7 @@ def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", tes
         extra["QWEN_INBOX"] = str(inbox)
         if defer:
             extra["QWEN_INBOX_DEFER"] = "1"
-    # The loop's msg env (phase 2, task 7): where the qla_msg server keeps this
+    # The loop's msg env (spec 11.3, 12.2): where the qla_msg server keeps this
     # loop's messages, who the loop is called there, which tools it may offer, and
     # (only with ask_main) the asks dir the tool reads the lease from. _run builds
     # the dict once per loop and hands it to every coder round; the deviation
@@ -832,7 +832,7 @@ def _run_inbox_init(run_dir):
     return inbox
 
 
-# ------------------------------------------------------- the question relay (task 7)
+# ------------------------------------------ the question relay (spec 11.3, 12.3)
 # While a round runs, its ask_main questions wait in RUN/msg/out/new/ -- the tool
 # queued them there and refused or accepted nothing else (spec 12.4). A daemon
 # relay thread turns them into asks for the main session (asks.admit_question owns
@@ -910,7 +910,7 @@ def _stop_relay():
     gives it 5 s, then runs one final pass in the calling thread: every question
     still in out/new/ is dropped as run_ended (spec 12.3). Admitted questions
     nobody claimed stay in asks/new/ -- the .ended marker the loop stamps makes
-    --next-ask answer 11 for them, as stage 1.5 does."""
+    --next-ask answer 11 for them, as it does for failing-round asks."""
     global _RELAY
     with _RELAY_LOCK:
         handle = _RELAY
@@ -944,7 +944,7 @@ def _drain_inbox(inbox, reason, msg_dir=None):
     per note, under the heading the agent sees. '' only when nothing was pending
     at all: taken notes always leave the heading, so a round whose every ask was
     marker-refused still reads differently from one that had no notes. With a
-    msg_dir (phase 2, task 7) the drain marks and counts the way the stream driver does
+    msg_dir (spec 12.2) the drain marks and counts the way the stream driver does
     (spec 12.2): an `ask` body gets its seen/ask-<id> marker BEFORE it is rendered
     into the prompt -- a marker that cannot be written keeps the ask OUT of the
     prompt, swept `undelivered: marker_failed` with notes' own sweeper (the same
@@ -1002,7 +1002,7 @@ def _close_run_inbox(inbox):
     new/ to undelivered/ and log each `undelivered: loop_ended`. close_inbox is the one
     place `.closed` is written and it is idempotent, so every reporting exit, the
     finally and the os._exit path all call it and only the first one sweeps. The
-    question relay goes FIRST (task 7): it is stopped, joined and drained before
+    question relay goes FIRST (spec 12.3): it is stopped, joined and drained before
     the sweep, so no pass queues a note the closed inbox will never deliver."""
     _stop_relay()
     if inbox is None:
@@ -1032,7 +1032,7 @@ def _steering_rows(inbox):
     return rows
 
 
-# ------------------------------------------------------------- asks (stage 1.5)
+# ------------------------------------------------------------- asks (spec 10)
 # A failing round of a loop the main session is listening to asks instead of
 # flailing on (spec 10.3): the ask lands in RUN/asks/new/ and the loop goes on at
 # once -- it never waits for an answer. lib/asks.py owns the storage; these are
@@ -1064,10 +1064,10 @@ def _write_ended(run_dir) -> None:
 
 
 def _ask_lines(run_dir) -> list[str]:
-    """report.md's ask-main row (spec 10.5, phase 2 12.8): one line counting this
+    """report.md's ask-main row (spec 10.5, 12.8): one line counting this
     run's ask events off asks/log.jsonl -- written, claimed, amends applied,
     amends rejected. `claimed` counts the FAILING-ROUND asks only: a `claimed`
-    event whose `kind` is absent (stage 1.5 wrote none) or "round"; a
+    event whose `kind` is absent (pre-question logs wrote none) or "round"; a
     `claimed kind="question"` is an answered question and rides on the second
     line -- `questions: admitted N, dropped N, answered N` -- present whenever
     any question_admitted or question_dropped event exists. The trigger is any
@@ -1101,7 +1101,7 @@ def _ask_lines(run_dir) -> list[str]:
         if ev == "claimed":
             kind = rec.get("kind")
             if kind is None or kind == "round":
-                counts["claimed"] += 1        # stage 1.5's statistic: round asks
+                counts["claimed"] += 1        # the report's claimed row: round asks
             elif kind == "question":
                 q_counts["answered"] += 1     # an answered question ask
         elif ev in counts:
@@ -1664,10 +1664,10 @@ def _run(o):
         # and the inbox must already answer when that address goes public.
         run_inbox = _run_inbox_init(run_dir)
         # The ask layout opens with the inbox and before the page registers the
-        # folder an answerer is sent to (stage 1.5, spec 10.3): asks follow the
+        # folder an answerer is sent to (spec 10.3): asks follow the
         # inbox, so an un-inbox'd loop makes no ask dirs at all.
         asks_ready = _asks_init(run_dir, has_cmd) if run_inbox is not None else False
-        # The loop's msg dir (phase 2, task 7): RUN/msg, the loop as one agent --
+        # The loop's msg dir (spec 12.2): RUN/msg, the loop as one agent --
         # its seen/ markers and replies persist across rounds (spec 11.2), so an
         # ask answered in round N stays answered after round N+1 starts. It
         # follows the inbox (a QWEN_STREAM=0 loop has neither), and it is never a
@@ -1837,7 +1837,7 @@ def _run(o):
                            # inbox is set); deferral only while a next round can
                            # still follow this one (P2); and every messaged round
                            # carries the loop's msg env -- its qla_msg folder,
-                           # name and tools (task 7, spec 12.7)
+                           # name and tools (spec 12.7)
                            inbox=run_inbox, defer=(rounds < o.max_rounds),
                            msg_env=msg_env)
             take_plan(r["result"], rounds, r["rc"])

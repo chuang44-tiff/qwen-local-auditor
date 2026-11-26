@@ -1,4 +1,4 @@
-"""One agent's message folder (phase 2, spec 12.2/12.5/11.4): what the agent
+"""One agent's message folder (spec 12.2/12.5/11.4): what the agent
 sends, what it published in answer, and what the driver marked delivered.
 
 Layout (every path under the agent's msg dir M -- ``RUN/msg/units/<unit>`` for

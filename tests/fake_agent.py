@@ -83,7 +83,7 @@ def _do_run_write():
 
 
 if step.get("record_env"):
-    # What the loop handed this round's environment (the qla_msg vars, task 7):
+    # What the loop handed this round's environment (the qla_msg vars, spec 12.7):
     # one JSON line per call to a SIDE file -- the argv record stays a pure argv log.
     with open(os.environ["FAKE_AGENT_RECORD"] + ".env", "a", encoding="utf-8") as fh:
         fh.write(json.dumps({name: os.environ.get(name)
@@ -92,7 +92,7 @@ if step.get("record_env"):
 
 def _plant_question():
     """The "plant_question" work: what the ask_main tool of lib/msg_mcp.py writes
-    when the model asks (task 7) -- the queued question record and the
+    when the model asks (spec 11.3) -- the queued question record and the
     open-question stamp naming it. No QWEN_MSG_DIR is a loud KeyError, on purpose,
     like run_write without QWEN_INBOX."""
     _lib_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

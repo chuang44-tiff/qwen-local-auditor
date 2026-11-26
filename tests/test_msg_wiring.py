@@ -1,4 +1,4 @@
-"""Phase 2, task 4: the qla_msg wiring -- driver markers, launcher server, cleanup.
+"""The qla_msg wiring (spec 12.2): driver markers, launcher server, cleanup.
 
 Covers the two halves of "every streamed agent has a message dir and the reply
 tool": the DRIVER marks delivered asks and counts main notes in it (spec 12.2),
@@ -266,8 +266,8 @@ def test_dry_run_has_qla_msg_config_and_reply_grant(tmp_path, fake):
 
 def test_no_inbox_no_qla_msg(tmp_path, fake):
     """QWEN_STREAM=0: no driver, so no message dir, no server, no grants -- the
-    printed argv equals the constant snapshot taken on the base tree (26f995f +
-    tasks 1-3, before this task's launcher block existed), argv[0] excepted: it
+    printed argv equals the constant snapshot taken on the base tree (26f995f,
+    before the qla_msg launcher block existed), argv[0] excepted: it
     names the claude binary the caller handed in."""
     r = run(tmp_path, ["--dry-run", "--no-timeout", "--no-autocompact", "hi"],
             None, fake,

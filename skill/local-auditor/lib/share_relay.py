@@ -1,9 +1,9 @@
-"""The swarm run's message relay (phase 2, spec 11.4/12.4/12.5): ONE
+"""The swarm run's message relay (spec 11.4/12.4/12.5): ONE
 ``RunRelay`` per run reads every running unit's ``out/new/`` and moves what
 the units sent onward -- a ``share`` becomes an admitted finding that reaches
 the sender's running siblings of the same phase as notes, a ``question`` goes
-to ``asks.admit_question``. Built and tested on its own; Task 8b wires it
-into ``lib/swarm.py`` and ``lib/swarm_engine/api.py``.
+to ``asks.admit_question``. The swarm runner builds one per run (its callers
+are ``lib/swarm.py`` and ``lib/swarm_engine/api.py``).
 
 The relay is the ONLY writer of share notes: each note is queued with
 ``kind="share"`` and ``sender="unit <name>"``, and the sender is stamped from
@@ -11,7 +11,7 @@ the DIRECTORY the file was read in -- any ``from`` or sender-like field
 inside the file is ignored, so a unit cannot put words in a sibling's mouth
 (the spec's forged-file defence). The note text is the finding itself; the
 body carries the sender's ``role`` and ``paths``, and the renderer
-(``notes.render_note``, Task 1) is the one that quotes it.
+(``notes.render_note``, spec 12.1) is the one that quotes it.
 
 Everything hangs off one ``threading.Lock`` (spec 11.4: one lock over the
 findings list and the started set, so a unit gets each finding exactly once
@@ -57,8 +57,8 @@ biggest-first, then the ev truncated), 0600, ONE os.write on an O_APPEND fd.
 Lines carry ids and reasons only -- ``unit``/``sender``, ``to``, ``pid``,
 ``finding`` (an id), ``attempt`` ("a<k>"), ``reason`` -- NEVER a finding's or
 a question's text; the full text lives only in ``findings.jsonl`` and in the
-notes. ``emit(kind, **fields)`` (Task 8b passes the engine's event writer)
-reports one admitted share as ``emit("share", unit=, role=, share_id=,
+notes. ``emit(kind, **fields)`` (the swarm runner passes the engine's
+event writer) reports one admitted share as ``emit("share", unit=, role=, share_id=,
 to_count=, len=)`` -- no text either.
 
 ``start()`` runs a daemon thread calling ``poll_once()`` every
@@ -150,7 +150,7 @@ def _event_line(rec):
 class RunRelay:
     """The relay of one swarm run. ``run_dir`` is RUN, ``run_id`` the watch
     id the addresses are built from, ``asks_ready`` whether a main session
-    can listen for this run at all (Task 8b: the run made its asks layout);
+    can listen for this run at all (the run made its asks layout);
     ``emit(kind, **fields)`` is the optional event callback."""
 
     def __init__(self, run_dir, run_id, asks_ready, emit=None):

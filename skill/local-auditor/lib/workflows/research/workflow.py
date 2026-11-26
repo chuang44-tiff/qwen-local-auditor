@@ -361,7 +361,7 @@ def _first_round(wf):
         res = wf.fan_out("fetch", "reader", urls,
                          lambda batch: FETCH_P.format(q=q, items=_source_items(batch)),
                          lambda text, batch: parse_fetch({s["id"] for s in batch})(text),
-                         label="research: fetch")
+                         label="research: fetch", share=True)
         # the url is added after parsing, as the released command did: a cached answer
         # stays exactly the row it cached
         rows = [dict(d, url=by_id[d["source"]]["url"]) for d in res.rows]
@@ -618,7 +618,7 @@ def _later_round(wf, st):
         res = wf.fan_out("fetch", "reader", urls,
                          lambda batch: FETCH_P.format(q=q, items=_source_items(batch)),
                          lambda text, batch: parse_fetch({s["id"] for s in batch})(text),
-                         label="research: fetch (round %d)" % wf.round)
+                         label="research: fetch (round %d)" % wf.round, share=True)
         rows = [dict(d, url=by_id[d["source"]]["url"]) for d in res.rows]
         fetched = sum(1 for d in rows if not d["error"] and d["claims"])
         rows.sort(key=lambda d: int(d["source"][1:]))

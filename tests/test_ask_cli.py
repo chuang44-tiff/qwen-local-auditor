@@ -1,4 +1,4 @@
-"""The main session's side of asking an agent (phase 2, task 5): lib/notes.py's
+"""The main session's side of asking an agent (spec 11.2): lib/notes.py's
 ask and answer modes and the qwen-agent.sh --ask/--answer dispatch.
 
 The CLI runs as a child, exactly the way test_notes.py drives --send: a watch

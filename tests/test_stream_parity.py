@@ -20,7 +20,7 @@ the `--output-format json` pair gone from its slot (the driver re-adds
 flags appended last in their one order. Equality of two lists is what says "no other
 flag added, removed or reordered".
 
-Phase 2 added one KNOWN mode difference (spec 12.7): the streamed launch also carries
+One KNOWN mode difference is settled (spec 12.7): the streamed launch also carries
 the qla_msg MCP config pair, the reply grant and the two env keys the launcher
 exports for the server. shared_core strips them for the equality (strip_qla_msg),
 golden_payload leaves the keys out of the pinned env list -- and their presence on
@@ -58,7 +58,7 @@ REGENERATE = "QLA_UPDATE_GOLDEN=1 pytest -k golden"
 DRIVER_TAIL = ["--input-format", "stream-json", "--output-format", "stream-json",
                "--verbose", "--replay-user-messages"]
 
-# Phase 2 (spec 12.7): the streamed launch legitimately carries what the argv launch
+# Spec 12.7: the streamed launch legitimately carries what the argv launch
 # must never see -- the qla_msg MCP config (as one more --mcp-config pair) and the
 # reply grant, plus the two env keys the launcher exports for the server. These are
 # THE mode difference: shared_core strips them from both sides (a config file under
@@ -69,7 +69,7 @@ DRIVER_TAIL = ["--input-format", "stream-json", "--output-format", "stream-json"
 QLA_MSG_CONFIG_FILE = "qla_msg.json"
 QLA_MSG_GRANT = ",mcp__qla_msg__reply"
 QLA_MSG_ENV_KEYS = ("QWEN_MSG_DIR", "QWEN_MSG_TOOLS")
-# Phase 2 task 7: an until-done round is additionally handed its loop's msg address
+# Spec 11.3: an until-done round is additionally handed its loop's msg address
 # (QWEN_MSG_SELF) and, when the loop is registered with the asks layout open, the
 # asks dir (QWEN_ASKS_DIR) -- the streamed side only, and only for until-done rounds
 # (the single-shot launcher exports just the QLA_MSG_ENV_KEYS pair, which the
@@ -315,7 +315,7 @@ def placeholderise(tokens, run_id, per_run, side):
 def strip_qla_msg(tokens, side):
     """Remove the qla_msg additions from a launch's tokens BEFORE placeholdering
     and the leak check: the --mcp-config pair naming the run's TMPD file, and the
-    reply-grant suffix on --allowed-tools (phase 2, spec 12.7 -- the streamed
+    reply-grant suffix on --allowed-tools (spec 12.7 -- the streamed
     launch's legitimate extras, shared_core's one known difference). Stripping
     happens on both modes: an unstreamed launch has nothing to strip, and its
     carrying the pair would be the real bug -- caught by the presence/absence
@@ -426,7 +426,7 @@ def assert_parity(argv_rec, stream_rec, prompt, *, run_id=None, per_run=()):
     """
     argv, streamed = argv_rec["argv"], stream_rec["argv"]
     assert_same_run_values(argv, streamed)
-    # shared_core strips the qla_msg additions (phase 2's one known difference);
+    # shared_core strips the qla_msg additions (spec 12.7's one known difference);
     # what is left must be the same list, in the same order, for both modes.
     assert shared_core(streamed, mode="stream", run_id=run_id, per_run=per_run) \
         == shared_core(argv, mode="argv", prompt=prompt, run_id=run_id, per_run=per_run), \
@@ -510,7 +510,7 @@ def test_parity_single_shot_argv(tmp_path, server):                       # noqa
         and streamed[streamed.index("--output-format") + 1] == "stream-json"
     assert "--" not in streamed and argv[-2:] == ["--", PROMPT]
 
-    # phase 2 (spec 12.7): the qla_msg server, its reply grant and the env the
+    # spec 12.7: the qla_msg server, its reply grant and the env the
     # launcher exports for them ARE the streamed-mode addition -- and the whole
     # point is that the unstreamed launch carries none of it (byte-identical).
     assert any(last_segment(v) == QLA_MSG_CONFIG_FILE for v in mcp_values(streamed)), \

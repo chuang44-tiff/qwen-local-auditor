@@ -1,5 +1,5 @@
 """Asks for running until-done loops: the run-folder layout, safe IO, the lease,
-the ask text, the claim and the asks log (stage 1.5).
+the ask text, the claim and the asks log (spec 10).
 
 An until-done round that fails in the same way twice asks the MAIN session instead
 of flailing on: the loop writes an ask, the main session answers with a note
@@ -12,7 +12,7 @@ with an enum reason; ``leftover_pending`` moves an amendment nobody reached at r
 end); the rest of the loop side -- the supervisor writing asks and the wiring that
 calls these -- comes later.
 
-Run-folder layout (spec 4.1, phase 2 spec 11.3)::
+Run-folder layout (spec 4.1 and 11.3)::
 
     <RUN>/asks/new/<n>.md       the failing-round asks, written by the loop
     <RUN>/asks/new/q<n>.md      an agent's ask_main question, admitted by the relay
@@ -43,8 +43,8 @@ or a missing amend folder. The ask's text is never printed. qwen-agent.sh
 dispatches --next-ask/--amend here and exports QWEN_ASK_LEASE for the dispatch.
 --next-ask (and --release) resolve their run through ``resolve_asks_run``: an
 until-done loop or a swarm/research run; --amend keeps ``resolve_until_done``
-(until-done only). Admission (``admit_question``, the relays' side, phase 2
-spec 11.3) is the only writer of ``q<n>.md``, the counter and the lock.
+(until-done only). Admission (``admit_question``, the relays' side, spec
+11.3) is the only writer of ``q<n>.md``, the counter and the lock.
 
 Directories are 0700 and files 0600 on POSIX, like lib/notes.py; every write goes
 through safe_write (a unique temp name in the destination's own directory, pid plus
@@ -807,7 +807,7 @@ def admit_question(run_dir, asker_address, msg_dir, rec, limit) -> tuple[str, st
 
 
 def drop_question(run_dir, asker_address, msg_dir, rec, reason) -> None:
-    """The drop half, bare (the loop-end drain, Task 7): the same
+    """The drop half, bare (for the loop-end drain): the same
     question_dropped logging and open-question clearing as a refused admission,
     with no lock and no checks -- whoever calls it has already decided."""
     _log_drop(run_dir, asker_address, msg_dir, rec, reason)
@@ -1018,7 +1018,7 @@ def resolve_until_done(run_id):
 
 def resolve_asks_run(run_id):
     """The registry pointer and run folder of a run that HOLDS asks: an
-    until-done loop or a swarm/research run (phase 2 spec 11.3 -- both swarm
+    until-done loop or a swarm/research run (spec 11.3 -- both swarm
     pointer kinds ask, a single-shot never does). The same grammar, errors and
     asks-folder checks as resolve_until_done; any other pointer kind (an
     `agent` single-shot) is AsksError code 3. --next-ask and --release use

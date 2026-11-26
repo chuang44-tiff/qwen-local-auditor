@@ -14,7 +14,7 @@ QUEUED). A forwarded note counts as delivered when its `isReplay` echo comes bac
 echoes are matched FIFO and the first one (the initial prompt) is skipped (K6). Tool
 results (`type == "user"` without `isReplay`) are ignored.
 
-`--msg-dir` (phase 2, spec 12.2) makes the driver the delivery witness the
+`--msg-dir` (spec 12.2) makes the driver the delivery witness the
 qla_msg server reads: an `ask` note gets its `seen/ask-<id>` marker BEFORE its
 stdin line is queued (a marker that cannot be written sweeps the note
 `undelivered: marker_failed` and forwards nothing), and every delivered `note`

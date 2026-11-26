@@ -1,4 +1,4 @@
-"""Phase 2 Task 8a: the swarm message relay, lib/share_relay.RunRelay.
+"""The swarm message relay, lib/share_relay.RunRelay (spec 11.4, 12.4, 12.5).
 
 Every test builds a run folder under tmp_path (XDG_CACHE_HOME too, so the
 watch registry is never touched), one inbox per unit (notes.init_inbox at

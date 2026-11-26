@@ -1,4 +1,4 @@
-"""The `qla_msg` MCP server (phase 2, spec 12.4): share, reply and ask_main.
+"""The `qla_msg` MCP server (spec 12.4): share, reply and ask_main.
 
 One stdlib server over stdio with the lib/advisor_mcp.py protocol shape:
 newline-delimited JSON-RPC 2.0, methods `initialize`, `ping`, `tools/list`

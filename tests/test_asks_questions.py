@@ -1,4 +1,4 @@
-"""Phase 2: question asks in lib/asks.py -- the q<seq> grammar, the mixed
+"""Question asks in lib/asks.py (spec 11.3): the q<seq> grammar, the mixed
 claim order, the claimed event kinds, the swarm/research asks resolver, the
 question text, admission (lock, reasons, counter, drops) and the report line.
 
@@ -405,7 +405,7 @@ def test_report_questions_line(tmp_path, monkeypatch):
     assert lines[0] == ("ask-main: written 1, claimed 1, "
                         "amends applied 0, rejected 0")       # round claims only
     assert lines[1] == "questions: admitted 2, dropped 1, answered 1"
-    # a round-only log keeps the one line, byte-identical to stage 1.5
+    # a round-only log keeps the one line, byte-identical to the original
     run2 = make_run(tmp_path / "round-only", monkeypatch)
     asks.log_event(run2, "written", n=1)
     asks.log_event(run2, "claimed", round=1, pid=7)

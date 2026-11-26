@@ -1,6 +1,6 @@
 # ruff: noqa: F811
-"""Phase 2, task 7: an until-done coder can ask the main session a question while
-its round runs, and answers to questions survive across rounds.
+"""An until-done coder can ask the main session a question while its round runs
+(spec 11.3, 12.3), and answers to questions survive across rounds.
 
 Three pieces, one file (spec 12.3, 12.4, 12.2, 11.2, 12.7):
   * the msg env: every messaged round is handed RUN/msg as its qla_msg folder, its

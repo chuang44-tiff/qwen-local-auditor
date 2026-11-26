@@ -23,12 +23,11 @@ For research, load `local-deep-research` instead: it covers that workflow fully.
 
     qwen-swarm debug "SYMPTOM" --target REPO --out RUN_DIR [--set repro="CMD"] [--set tests="CMD"] [--depth quick|standard|deep|overnight]
 
-`RUN_DIR` is outside `REPO`: a run folder inside the target (or the reverse) is refused (exit 2).
-`repro` must exit non-zero while the bug is there. Without it the triager proposes one (logged
-in `run.log` as the triager's; it runs only in a sandbox). The debug workflow never writes REPO:
-probers work in throwaway copies, every candidate patch is checked in a fresh copy (repro, then
-tests), a patch that edits test files cannot win, and reviewers vote on root cause vs symptom
-suppression. Patches land in `RUN/patches/<n>.diff`; the user applies one with `git apply`.
+`RUN_DIR` is outside `REPO`: a run folder inside the target (or the reverse) is refused (exit 2). `repro` must exit
+non-zero while the bug is there. Without it the triager proposes one (logged in `run.log` as the triager's; it runs
+only in a sandbox). The debug workflow never writes REPO: probers work in throwaway copies, every candidate patch
+is checked in a fresh copy (repro, then tests), a patch that edits test files cannot win, and reviewers vote on
+root cause vs symptom suppression. Patches land in `RUN/patches/<n>.diff`; the user applies one with `git apply`.
 
 For a UI suite the scenario file is the `scenarios` knob (the same `# Suite:` markdown `qwen-agent
 --scenarios` takes; its format is in `reference/qwen-agent.md`), and the goal only names the run:
@@ -47,20 +46,18 @@ tester gets its own copy and each file's absolute path. A link pointing outside 
 keep it non-secret -- the confirmer can read the fixtures and every tester's evidence, and a
 hostile page could prompt-inject a tester into posting what it can read.
 
-Every FAIL or BLOCKED is re-checked before it counts, on the local model by default
-(`--set confirm=local`; `--set confirm=none` skips it). Claude does it only when the config file's QWEN_CONFIRM names
-a model or `--set confirm=claude` says so (`confirm_model`, at most `confirm_max` = 10 calls):
-then the scenario, the tester's report and screenshots and a browser session on the app leave
-this machine. A row ends CONFIRMED, FALSE_ALARM (listed apart) or NEEDS_HUMAN. A local
-FALSE_ALARM is advisory: the row still counts; only a Claude or `--record-verdict` one clears it.
+Every FAIL or BLOCKED is re-checked before it counts, on the local model by default (`--set confirm=local`; `--set
+confirm=none` skips it). Claude does it only when the config file's QWEN_CONFIRM names a model or `--set
+confirm=claude` says so (`confirm_model`, at most `confirm_max` = 10 calls): then the scenario, the tester's
+report and screenshots and a browser session on the app leave this machine. A row ends CONFIRMED, FALSE_ALARM
+(listed apart) or NEEDS_HUMAN. A local FALSE_ALARM is advisory: the row still counts; only a Claude or `--record-verdict` one clears it.
 
 ## 2. Otherwise write a workflow
 
 Ask the user where the folder should live, then copy the closest built-in and change it:
 `skill/local-auditor/lib/workflows/debug` is the model for a workflow that edits a target
-(sandbox roles, `run_cmd` checks, patches), `.../research` the model for a web workflow
-(search roles, fan-out, votes). The API is in
-`skill/local-auditor/reference/swarm.md` — read it before writing `workflow.py`.
+(sandbox roles, `run_cmd` checks, patches), `.../research` the model for a web workflow (search roles,
+fan-out, votes). The API is in `skill/local-auditor/reference/swarm.md` — read it before writing `workflow.py`.
 Rules that keep a workflow resumable:
 
 - `run(wf)` must make the same calls in the same order given the same answers: no clock,
@@ -83,6 +80,12 @@ Rules that keep a workflow resumable:
 Before launching (step 3), run `qwen-swarm --check ./my-workflow` until it passes: it validates the manifest
 and dry-runs `run(wf)` twice against fake agents (a `check.py` beside the workflow can supply realistic fake answers).
 
+Debug's `probe`, optimize's `implement` and research's `fetch` units share findings with their
+phase siblings (a custom workflow opts in with `share=True` on `wf.fan_out`); report.md lists them
+under `## Shared findings`. Units may also ask the main session: run `qwen-agent --next-ask ID` to
+claim their questions. Bash units are confined (sandbox plus edit grants scoped to the unit's
+sandbox); when the host cannot, the report says `bash not confined: <reason>`; more in `skill/local-auditor/reference/messaging.md`.
+
 ## 3. Show the manifest, sign off Claude, then run in the background
 
 Sign-off, before EVERY launch: run `qwen-swarm WORKFLOW --show-claude` with the intended
@@ -104,8 +107,8 @@ The run also prints `watch: <url>` on stderr, the line after the run folder: its
 phase, and per agent its name, role, state and timings, the last events, the goal or title and event
 why/attention text, and the tool it is on right now with a trimmed INPUT (a path, a pattern, or the start
 of its command) — never prompts, transcripts, model reasoning or what a tool returned. Pass that link to the
-user when the run starts. The viewer keeps running between runs; run `python lib/watch.py stop` only when
-the user asks. `QWEN_WATCH_HOST` and `QWEN_WATCH_PORT` move the page off its local-only default; `QWEN_WATCH=0` switches it off.
+user when the run starts. The viewer keeps running between runs; run `python lib/watch.py stop` only when the user asks.
+`QWEN_WATCH_HOST` and `QWEN_WATCH_PORT` move the page off its local-only default; `QWEN_WATCH=0` switches it off.
 
 Then watch the run's events, not the process:
 
@@ -154,17 +157,14 @@ Agreeing with the confirmer needs no command. While the run is live the verdict 
 the workflow applies it (exit 0); afterwards the command rewrites results.json and report.md
 and exits with the run's new code. Its exit 5 means the run never finished: the verdict is
 applied by `qwen-swarm --resume RUN`. Its exit 8 means the verdict was saved but not applied
-(the render lock is busy): run the same command again. Neither re-render -- this one or the
-runner's post-run one -- emits `verdict` events.
+(the render lock is busy): run the same command again. Neither re-render -- this one or the runner's post-run one -- emits `verdict` events.
 
 Gate on the process exit code (or the exit of the last `--record-verdict`), never on the
-`exit` in `run_end`: a verdict that lands at the very end can change the exit after `run_end`
-was written.
+`exit` in `run_end`: a verdict that lands at the very end can change the exit after `run_end` was written.
 
-Offline, or with the claude login unusable, the first failed confirm call (a connection error
-included) trips the breaker: the remaining rows are NEEDS_HUMAN with no further call, and the
-run's local half is unaffected. That breaker trips only on claude's own login/network failures;
-words from the page under test fail only that row. Settle those rows yourself as above.
+Offline, or with the claude login unusable, the first failed confirm call (a connection error included) trips the breaker:
+the remaining rows are NEEDS_HUMAN with no further call, and the run's local half is unaffected. That breaker trips
+only on claude's own login/network failures; words from the page under test fail only that row. Settle those rows yourself as above.
 
 | Exit | Meaning |
 |---|---|
