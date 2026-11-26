@@ -1,4 +1,4 @@
-"""Phase 2, Task 6: question asks in lib/asks.py -- the q<seq> grammar, the mixed
+"""Phase 2: question asks in lib/asks.py -- the q<seq> grammar, the mixed
 claim order, the claimed event kinds, the swarm/research asks resolver, the
 question text, admission (lock, reasons, counter, drops) and the report line.
 

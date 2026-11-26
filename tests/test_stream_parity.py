@@ -69,6 +69,13 @@ DRIVER_TAIL = ["--input-format", "stream-json", "--output-format", "stream-json"
 QLA_MSG_CONFIG_FILE = "qla_msg.json"
 QLA_MSG_GRANT = ",mcp__qla_msg__reply"
 QLA_MSG_ENV_KEYS = ("QWEN_MSG_DIR", "QWEN_MSG_TOOLS")
+# Phase 2 task 7: an until-done round is additionally handed its loop's msg address
+# (QWEN_MSG_SELF) and, when the loop is registered with the asks layout open, the
+# asks dir (QWEN_ASKS_DIR) -- the streamed side only, and only for until-done rounds
+# (the single-shot launcher exports just the QLA_MSG_ENV_KEYS pair, which the
+# presence assertion above pins). They drop from the environment comparison like the
+# trio, and like it they are one mode's legitimate addition, never a parity drift.
+UD_MSG_ENV_KEYS = ("QWEN_MSG_SELF", "QWEN_ASKS_DIR")
 
 # argv flags whose VALUE names this run (or this machine's served model) rather than
 # this kind of launch, and what the golden writes in their place. The order matters:
@@ -386,11 +393,13 @@ def normalise_stream_argv(tokens, *, run_id=None, per_run=()):
 def comparable_env(env):
     """An environment with only what the two launches must share: everything but the
     keys whose value names a run (PER_RUN_ENV_KEYS), the two that cannot be equal
-    across the modes by construction (MODE_ENV_KEYS), and the qla_msg trio the
-    launcher exports for the streamed launch only (QLA_MSG_ENV_KEYS -- their
-    one-sided presence is asserted by the test that compares the modes)."""
+    across the modes by construction (MODE_ENV_KEYS), the qla_msg trio the launcher
+    exports for the streamed launch only (QLA_MSG_ENV_KEYS -- their one-sided
+    presence is asserted by the test that compares the modes), and the two the
+    until-done supervisor adds to its own streamed rounds (UD_MSG_ENV_KEYS)."""
     out = dict(env)
-    for key in list(PER_RUN_ENV_KEYS) + list(MODE_ENV_KEYS) + list(QLA_MSG_ENV_KEYS):
+    for key in (list(PER_RUN_ENV_KEYS) + list(MODE_ENV_KEYS) + list(QLA_MSG_ENV_KEYS)
+                + list(UD_MSG_ENV_KEYS)):
         out.pop(key, None)
     return out
 

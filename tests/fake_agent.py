@@ -19,6 +19,20 @@ directory's calls.jsonl -- what lib/advisor_mcp.py writes for every ask call it
 serves, so a test can hand the supervisor the call log of a run that asked.
 With "advisor_count" (an int), that number is written to the --advisor-state directory's
 `count` file: the agent has spent that many asks.
+With "plant_question" ({"question": str, "options": [str, ...]}), what the ask_main
+tool of lib/msg_mcp.py writes when the model asks: the queued record
+$QWEN_MSG_DIR/out/new/<id>.json (body {"id","t","kind":"question","question",
+"options"}, the id from notes.new_note_id()) and the $QWEN_MSG_DIR/open-question.json
+stamp naming it ({"q_id","main_seq":0}); the id is also appended as one JSON line to
+$FAKE_AGENT_RECORD.qids. It runs BEFORE "sleep", so a round can ask and then wait.
+Needs a messaged round of a loop with a msg dir (QWEN_MSG_DIR set); without one it is
+a loud KeyError.
+With "run_write_then_sleep" (true), the "run_write"/"export_run" work is done BEFORE
+the "sleep" instead of after it -- a round that plants a lease (or anything else
+under RUN) and then waits leaves it for the loop to find while it sleeps.
+With "record_env": [names], one JSON line {name: os.environ.get(name)} is appended
+to $FAKE_AGENT_RECORD.env -- what the loop handed this round's environment (the argv
+record file itself is not touched, so calls() stays a pure argv log).
 With "advisor_lock" (true/false), one JSON line {"found": .., "left": ..} is appended
 to $FAKE_AGENT_RECORD.locks: "found" is whether that state directory held the
 advisor's lock when the call started, and true also leaves one behind (what a round
@@ -49,13 +63,11 @@ counter = os.environ["FAKE_AGENT_RECORD"] + ".n"
 n = int(open(counter).read()) if os.path.exists(counter) else 0
 open(counter, "w").write(str(n + 1))
 step = script[min(n, len(script) - 1)]
-if step.get("sleep"):          # holds the round open so a test can interrupt it
-    time.sleep(step["sleep"])
-repo = argv[argv.index("-C") + 1]
-for rel, content in (step.get("write") or {}).items():
-    with open(os.path.join(repo, rel), "w", encoding="utf-8") as fh:
-        fh.write(content)
-if step.get("run_write") or step.get("export_run"):
+
+
+def _do_run_write():
+    """The "run_write"/"export_run" work, factored so the sleep can be ordered
+    either side of it ("run_write_then_sleep")."""
     # RUN is dirname($QWEN_INBOX): the loop's folder, which only a messaged round
     # is given an inbox inside of. No QWEN_INBOX is a loud KeyError, on purpose.
     rundir = os.path.dirname(os.environ["QWEN_INBOX"])
@@ -68,6 +80,62 @@ if step.get("run_write") or step.get("export_run"):
         with open(os.environ["FAKE_AGENT_RECORD"] + ".run", "a",
                   encoding="utf-8") as fh:
             fh.write(json.dumps(rundir) + "\n")
+
+
+if step.get("record_env"):
+    # What the loop handed this round's environment (the qla_msg vars, task 7):
+    # one JSON line per call to a SIDE file -- the argv record stays a pure argv log.
+    with open(os.environ["FAKE_AGENT_RECORD"] + ".env", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({name: os.environ.get(name)
+                             for name in step["record_env"]}) + "\n")
+
+
+def _plant_question():
+    """The "plant_question" work: what the ask_main tool of lib/msg_mcp.py writes
+    when the model asks (task 7) -- the queued question record and the
+    open-question stamp naming it. No QWEN_MSG_DIR is a loud KeyError, on purpose,
+    like run_write without QWEN_INBOX."""
+    _lib_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "skill", "local-auditor")
+    if _lib_root not in sys.path:
+        sys.path.insert(0, _lib_root)
+    from lib import notes                    # noqa: E402  (the path insert above)
+    _spec = step["plant_question"]
+    q_id = notes.new_note_id()
+    _body = {"id": q_id, "t": round(time.time(), 3), "kind": "question",
+             "question": _spec.get("question", ""),
+             "options": _spec.get("options", [])}
+    _mdir = os.environ["QWEN_MSG_DIR"]
+    _new = os.path.join(_mdir, "out", "new")
+    os.makedirs(_new, exist_ok=True)
+    with open(os.path.join(_new, "%s.json" % q_id), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(_body) + "\n")
+    with open(os.path.join(_mdir, "open-question.json"), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"q_id": q_id, "main_seq": 0}) + "\n")
+    with open(os.environ["FAKE_AGENT_RECORD"] + ".qids", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(q_id) + "\n")
+
+
+if step.get("run_write_then_sleep"):
+    # The RUN files land BEFORE anything else of this round (a planted lease must
+    # be live for a relay pass during the sleep, and before the question so a pass
+    # can never see a question with no lease and drop it as no_listener); then the
+    # question, then the wait. Without the key the order is the old one.
+    if step.get("run_write") or step.get("export_run"):
+        _do_run_write()
+if step.get("plant_question"):                # before the sleep: ask, then wait
+    _plant_question()
+if step.get("run_write_then_sleep"):
+    if step.get("sleep"):
+        time.sleep(step["sleep"])
+elif step.get("sleep"):          # holds the round open so a test can interrupt it
+    time.sleep(step["sleep"])
+repo = argv[argv.index("-C") + 1]
+for rel, content in (step.get("write") or {}).items():
+    with open(os.path.join(repo, rel), "w", encoding="utf-8") as fh:
+        fh.write(content)
+if (step.get("run_write") or step.get("export_run")) and not step.get("run_write_then_sleep"):
+    _do_run_write()
 if step.get("advisor"):
     # A round that asks lands its records in the ONE state dir the supervisor gave it.
     # No --advisor-state on this call means the script asked for calls the round could

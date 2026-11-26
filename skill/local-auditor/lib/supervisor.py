@@ -20,13 +20,14 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import (advisor_mcp, asks, checks, decisions, notes, probe, taskfile,  # noqa: E402
-                 testrun, watch)
+from lib import (advisor_mcp, asks, checks, decisions, msgdir, notes, probe,  # noqa: E402
+                 taskfile, testrun, watch)
 from lib.builders import history  # noqa: E402
 from lib.swarm_engine import events  # noqa: E402
 
@@ -139,7 +140,7 @@ def _backoff():
 
 def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", test=True,
                probe_here=False, test_cmd=True, advisor=None, plan=None, plan_round=None,
-               timeout_extra=0, activity=None, inbox=None, defer=False):
+               timeout_extra=0, activity=None, inbox=None, defer=False, msg_env=None):
     # --shallow goes on the command line, not only into the environment below:
     # qwen-agent reads its config file AFTER the environment, so a QWEN_DEPTH=deep
     # sitting in the config would otherwise re-imply depth (a review round, a
@@ -193,6 +194,13 @@ def call_agent(agent, repo, prompt_path, session, passthrough, role="coder", tes
         extra["QWEN_INBOX"] = str(inbox)
         if defer:
             extra["QWEN_INBOX_DEFER"] = "1"
+    # The loop's msg env (phase 2, task 7): where the qla_msg server keeps this
+    # loop's messages, who the loop is called there, which tools it may offer, and
+    # (only with ask_main) the asks dir the tool reads the lease from. _run builds
+    # the dict once per loop and hands it to every coder round; the deviation
+    # audit and every un-inboxed call come without it: today's env, unchanged.
+    if msg_env:
+        extra.update(msg_env)
     extra_env = extra or None
     for delay in [0] + _backoff():
         time.sleep(delay)
@@ -824,13 +832,128 @@ def _run_inbox_init(run_dir):
     return inbox
 
 
-def _drain_inbox(inbox, reason):
-    """The between-rounds drain (K5): every pending note (fresh or deferred by the last
-    round) is validated with lib/notes.py, moved to delivered/ and logged `delivered:
-    <reason>`; each one rides into the round prompt as notes.render_note(body) -- the
-    same text the stream driver forwards, so a deferred note and a streamed note look
-    the same -- in time order, one block per note, under the heading the agent sees.
-    '' when none."""
+# ------------------------------------------------------- the question relay (task 7)
+# While a round runs, its ask_main questions wait in RUN/msg/out/new/ -- the tool
+# queued them there and refused or accepted nothing else (spec 12.4). A daemon
+# relay thread turns them into asks for the main session (asks.admit_question owns
+# the lease / open-question / run-limit checks, spec 11.3) once a second, and a
+# relay-side refusal answers the asker with a harness note back into the loop's
+# inbox (spec 12.4). _close_run_inbox owns its end: stop, join, and one final pass
+# that drops everything still queued (spec 12.3). The handle is module-level
+# because _close_run_inbox -- called by every exit path, the finally and the
+# os._exit included -- must reach it without threading it through any signature.
+
+RELAY_POLL = 1.0                    # seconds between relay passes (a test hook)
+_RELAY_LOCK = threading.Lock()
+_RELAY = None                       # the live loop's relay handle, or None
+
+
+def _relay_pass(run_dir, msg_dir, loop_id):
+    """One relay pass: every queued out/new item is taken; questions go to
+    asks.admit_question, a run_limit or no_listener drop (the lease expired
+    between the tool call and admission) answers the asker with a harness note --
+    an open_question drop sends none, spec 12.4 -- and any other kind is taken and
+    ignored: an until-done loop has no shares. Errors are per item: one broken
+    file never costs the rest of the pass."""
+    try:
+        ids = msgdir.list_out(msg_dir)
+    except Exception:
+        return
+    inbox = os.path.join(run_dir, "inbox")
+    for note_id in ids:
+        try:
+            rec = msgdir.take_out(msg_dir, note_id)
+            if rec is None or rec.get("kind") != "question":
+                continue
+            status, reason = asks.admit_question(run_dir, loop_id, msg_dir, rec,
+                                                 asks.ask_main_max())
+            if status == "dropped" and reason in ("run_limit", "no_listener"):
+                notes.queue_note(inbox, loop_id,
+                                 "your question was not sent (%s); decide yourself "
+                                 "and say what you assumed." % reason,
+                                 sender="harness", kind="harness")
+        except Exception:
+            continue
+
+
+def _question_relay(run_dir, msg_dir, loop_id, stop_event):
+    """The relay thread's body: one pass a second until asked to stop. An
+    exception inside a pass is swallowed -- a relay never kills the loop."""
+    while not stop_event.wait(RELAY_POLL):
+        try:
+            _relay_pass(run_dir, msg_dir, loop_id)
+        except Exception:
+            pass
+
+
+def _start_relay(run_dir, msg_dir, loop_id):
+    """Open the loop's relay handle and start its daemon thread. Called at loop
+    start, once the msg dir, the asks layout and the page registration all stand:
+    the loop needs a folder to ask from, a layout to ask into and an address. A
+    handle left live by a loop that never reached its close is stopped and drained
+    first: one handle names one relay, so an orphaned thread must never keep
+    polling an ended run beside this one."""
+    global _RELAY
+    _stop_relay()
+    stop = threading.Event()
+    th = threading.Thread(target=_question_relay,
+                          args=(run_dir, msg_dir, loop_id, stop), daemon=True)
+    with _RELAY_LOCK:
+        _RELAY = {"thread": th, "stop": stop, "run_dir": run_dir,
+                  "msg_dir": msg_dir, "loop_id": loop_id}
+    th.start()
+
+
+def _stop_relay():
+    """The relay's end, claimed once: the first caller takes the handle (a second
+    _close_run_inbox finds none and does nothing more), asks the thread to stop,
+    gives it 5 s, then runs one final pass in the calling thread: every question
+    still in out/new/ is dropped as run_ended (spec 12.3). Admitted questions
+    nobody claimed stay in asks/new/ -- the .ended marker the loop stamps makes
+    --next-ask answer 11 for them, as stage 1.5 does."""
+    global _RELAY
+    with _RELAY_LOCK:
+        handle = _RELAY
+        _RELAY = None
+    if handle is None:
+        return
+    handle["stop"].set()
+    with contextlib.suppress(Exception):
+        handle["thread"].join(timeout=5)
+    try:
+        ids = msgdir.list_out(handle["msg_dir"])
+    except Exception:
+        return
+    for note_id in ids:
+        try:
+            rec = msgdir.take_out(handle["msg_dir"], note_id)
+            if rec is None or rec.get("kind") != "question":
+                continue
+            asks.drop_question(handle["run_dir"], handle["loop_id"],
+                               handle["msg_dir"], rec, "run_ended")
+        except Exception:
+            continue
+
+
+def _drain_inbox(inbox, reason, msg_dir=None):
+    """The between-rounds drain (K5): every pending note (fresh or deferred by the
+    last round) is validated with lib/notes.py, moved to delivered/ and logged
+    `delivered: <reason>`; each one rides into the round prompt as
+    notes.render_note(body) -- the same text the stream driver forwards, so a
+    deferred note and a streamed note look the same -- in time order, one block
+    per note, under the heading the agent sees. '' only when nothing was pending
+    at all: taken notes always leave the heading, so a round whose every ask was
+    marker-refused still reads differently from one that had no notes. With a
+    msg_dir (phase 2, task 7) the drain marks and counts the way the stream driver does
+    (spec 12.2): an `ask` body gets its seen/ask-<id> marker BEFORE it is rendered
+    into the prompt -- a marker that cannot be written keeps the ask OUT of the
+    prompt, swept `undelivered: marker_failed` with notes' own sweeper (the same
+    logging the driver's forward uses) and a stderr warning -- and every `note`
+    or `ask` body (a missing kind is a note) bumps seen/main-count, the counter
+    that closes an open ask_main question; `share` and `harness` bodies are
+    rendered but neither marked nor counted. Neither the marker nor the counter
+    can fail the drain: an error there costs a line of reporting, never the
+    round."""
     if inbox is None:
         return ""
     try:
@@ -841,7 +964,34 @@ def _drain_inbox(inbox, reason):
     if not taken:
         return ""
     parts = ["", "", "Notes from the main session", ""]
+    warned = False
     for body in taken:
+        kind = body.get("kind")
+        if kind is None:
+            kind = "note"                   # a phase 1 body is a plain note
+        if msg_dir is not None and kind == "ask":
+            note_id = body["id"]
+            try:
+                msgdir.mark_ask_seen(msg_dir, note_id)
+            except (msgdir.MsgError, OSError) as e:
+                with contextlib.suppress(OSError):    # a dead terminal takes the
+                    print("until-done: ask %s not delivered: the seen marker could "
+                          "not be written (%s); it stays out of the prompt"
+                          % (note_id, e), file=sys.stderr)   # warning, not the drain
+                with contextlib.suppress(Exception):
+                    notes.sweep_undelivered(inbox, note_id, "marker_failed",
+                                            os.path.join(inbox, notes.DELIVERED,
+                                                         "%s.json" % note_id))
+                continue
+        if msg_dir is not None and kind in ("note", "ask"):
+            try:
+                msgdir.bump_main_count(msg_dir)
+            except (msgdir.MsgError, OSError) as e:
+                if not warned:              # the counter is bookkeeping: one warning
+                    warned = True
+                    with contextlib.suppress(OSError):
+                        print("until-done: main-count not bumped (%s)" % e,
+                              file=sys.stderr)
         parts.append(notes.render_note(body))
         parts.append("")
     return "\n".join(parts)
@@ -851,7 +1001,10 @@ def _close_run_inbox(inbox):
     """The loop's end-of-run sweep (4.7): write `.closed`, move what still waits in
     new/ to undelivered/ and log each `undelivered: loop_ended`. close_inbox is the one
     place `.closed` is written and it is idempotent, so every reporting exit, the
-    finally and the os._exit path all call it and only the first one sweeps."""
+    finally and the os._exit path all call it and only the first one sweeps. The
+    question relay goes FIRST (task 7): it is stopped, joined and drained before
+    the sweep, so no pass queues a note the closed inbox will never deliver."""
+    _stop_relay()
     if inbox is None:
         return
     try:
@@ -1514,6 +1667,20 @@ def _run(o):
         # folder an answerer is sent to (stage 1.5, spec 10.3): asks follow the
         # inbox, so an un-inbox'd loop makes no ask dirs at all.
         asks_ready = _asks_init(run_dir, has_cmd) if run_inbox is not None else False
+        # The loop's msg dir (phase 2, task 7): RUN/msg, the loop as one agent --
+        # its seen/ markers and replies persist across rounds (spec 11.2), so an
+        # ask answered in round N stays answered after round N+1 starts. It
+        # follows the inbox (a QWEN_STREAM=0 loop has neither), and it is never a
+        # reason to fail: a folder that cannot be built leaves msg_dir None and
+        # the loop runs exactly as before -- no msg env, no relay.
+        msg_dir = None
+        if run_inbox is not None:
+            cand = msgdir.loop_msgdir(run_dir)
+            try:
+                msgdir.init_msgdir(cand)
+                msg_dir = cand
+            except (msgdir.MsgError, OSError):
+                msg_dir = None
         # The page shows the loop as soon as it has a folder to show: what the task
         # file asks for (its own first description) with its name kept at the end is
         # the title, the folder the progress (the round files under it), and
@@ -1522,6 +1689,21 @@ def _run(o):
         # Asks need both halves: an opened layout and a page that names this run
         # (the ask tells the answerer which run id to address).
         asks_on = bool(asks_ready) and watch_id is not None
+        # The relay admits this loop's ask_main questions while a round runs
+        # (spec 12.3) -- it needs all three: a msg dir to read, an asks layout to
+        # write into and a registered id to address. The rounds' msg env carries
+        # the same gate: ask_main rides only where the relay does; every messaged
+        # round gets the reply tool and its own folder, however (spec 12.7).
+        relay_on = msg_dir is not None and bool(asks_ready) and watch_id is not None
+        if relay_on:
+            _start_relay(run_dir, msg_dir, watch_id)
+        msg_env = None
+        if msg_dir is not None:
+            msg_env = {"QWEN_MSG_DIR": msg_dir,
+                       "QWEN_MSG_SELF": watch_id or "loop",
+                       "QWEN_MSG_TOOLS": "reply,ask_main" if relay_on else "reply"}
+            if relay_on:
+                msg_env["QWEN_ASKS_DIR"] = os.path.join(run_dir, asks.ASKS_DIR)
         if o.advisor:
             # ONE state dir for the whole loop, handed to every coder round: the budget
             # and the call log are shared, so QWEN_ADVISOR_MAX_CALLS caps the run rather
@@ -1617,7 +1799,8 @@ def _run(o):
             # REVIEW_ROUND, `unusable` feedback alike. Round 1 logs `before_round_1`,
             # later rounds `next_round`.
             prompt += _drain_inbox(run_inbox,
-                                   "before_round_1" if rounds == 1 else "next_round")
+                                   "before_round_1" if rounds == 1 else "next_round",
+                                   msg_dir=msg_dir)
             ppath = os.path.join(run_dir, "round-%d.prompt.md" % rounds)
             _write(ppath, prompt)
             sig_before = _tree_sig(repo)
@@ -1652,8 +1835,11 @@ def _run(o):
                                      if watch_id else None),
                            # every round is steerable (the driver streams when the
                            # inbox is set); deferral only while a next round can
-                           # still follow this one (P2)
-                           inbox=run_inbox, defer=(rounds < o.max_rounds))
+                           # still follow this one (P2); and every messaged round
+                           # carries the loop's msg env -- its qla_msg folder,
+                           # name and tools (task 7, spec 12.7)
+                           inbox=run_inbox, defer=(rounds < o.max_rounds),
+                           msg_env=msg_env)
             take_plan(r["result"], rounds, r["rc"])
             if pending is not None:
                 # This round is the answer the pending rescue was waiting for:
