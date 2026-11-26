@@ -21,6 +21,17 @@ from lib.swarm_engine import events, fences, manifest, staging, steps
 MIN_UNIT_TIMEOUT = 300
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _UNIT_ID = re.compile(r"[A-Za-z0-9._-]+")   # an item id fan_out(unit_ids=True) names a unit by
+# what an opted-in unit may do with the share tool (fan_out(share=True)) and how it reads
+# the findings that arrive: one text, appended to every opted unit's prompt so the rule
+# rides in the cache key whatever the streaming state (spec 11.5).
+SHARE_RULE = ("You may share a finding with the other agents of this phase with the "
+              "share tool: only a finding that would change what they do (a hypothesis "
+              "proven or ruled out, with evidence; a broken shared fixture; a "
+              "constraint you hit). Do not share progress or opinions. Shared findings "
+              "from others arrive as notes; weigh them against your own evidence and "
+              "keep working on your own item. A shared finding does not change the "
+              "format your final answer must follow.")
+SHARE_GRANT = "mcp__qla_msg__share"         # the unit's own tool grant for that rule
 
 
 def claude_for(m, cfg, role):
@@ -162,6 +173,11 @@ class Workflow:
         self.claude_cost_usd = 0.0        # and what claude reported they cost
         self._in_loop = False
         self._converged = None
+        # names the opted-in fan_out phases for this run ("p1", "p2", ...; spec 12.5):
+        # one increment per fan_out call that passed share=True, in call order -- and
+        # run(wf) is replayed from the start on a resume, so the same calls repeating
+        # in the same order lands every phase on the same id it had before.
+        self._share_seq = 0
         totals = self._load_path(self.run_dir / "totals.json")
         self._baseline = totals if isinstance(totals, dict) else {}
         self._target_fp = None
@@ -316,6 +332,12 @@ class Workflow:
                        **f)
         u.cache = cache
         u.repair_text = repair
+        if r.fence in fences.WEB_FENCES or r.fence in fences.BROWSER_FENCES:
+            # ask_main is withheld by FENCE, not by role (spec 12.6): a session that
+            # reaches the web -- or drives a browser -- never asks the main session.
+            # Env-gated (the swarm drops ask_main from QWEN_MSG_TOOLS on this flag),
+            # so it moves no unit's cache key.
+            u.ask_main = False
         if r.fence == "read":
             u.cwd = self.target
             u.key_extra = "target:%s" % self._fingerprint()
@@ -387,7 +409,7 @@ class Workflow:
         return None
 
     def fan_out(self, name, role, items, prompt, parse, *, item_id=None, max_items=None,
-                stage=None, repair=None, unit_ids=False, label=None):
+                stage=None, repair=None, unit_ids=False, label=None, share=False):
         """Deal `items` over groups of at most --max-agents agents x --max-items items
         (max_items= lowers the per-agent cap for this call) and run EVERY unit of the call
         in one phase: --max-agents and --max-items shape the deal, seats alone limit how
@@ -404,6 +426,12 @@ class Workflow:
         [A-Za-z0-9._-]+, not end in '.' (Windows strips it, so 'a.' and 'a' would
         collide) and differ by more than case (they name files, and Windows and macOS
         fold case), else ValueError.
+        share=True opts this call's phase into the run's share relay (spec 12.5): the
+        phase gets a run-wide id p<seq> (one per opted call, in call order, so a resumed
+        run lands every phase on the id it had), every unit of the call gets the share
+        tool grant and the share rule appended to its prompt -- both whatever the
+        streaming state, so they sit in the cache key -- and the relay moves their
+        admitted findings between the running siblings and records them in the report.
 
         Past the run's deadline a cached unit is still served and its rows count, as the
         first group's always were; only an uncached unit is kept from starting (as the
@@ -432,6 +460,12 @@ class Workflow:
 
         def uname(k, w, batch):
             return self._unit_name(name, k, w, ident(batch[0]) if unit_ids else None)
+        # One run-wide id per opted call (spec 12.5): the counter advances once per
+        # fan_out call that asked for sharing, in call order.
+        pid = None
+        if share:
+            self._share_seq += 1
+            pid = "p%d" % self._share_seq
         # Every unit of the call runs in ONE phase: a group w of the deal (at most ma
         # batches of at most mi items -- w only ever names the units) no longer waits for
         # the slowest unit of group w-1; seats alone decides how many are live. A unit
@@ -442,8 +476,18 @@ class Workflow:
                 p = self._bind(parse, batch, self._role(role).fence == "sandbox")
                 un = uname(k, w, batch)
                 text = prompt(batch) if stage is None else prompt(batch, str(self.stage_dir(un)))
-                units.append(self._unit(un, role, text, self._timeout(role, len(batch)), p,
-                                        batch, stage=stage, repair=repair))
+                u = self._unit(un, role, text, self._timeout(role, len(batch)), p,
+                               batch, stage=stage, repair=repair)
+                if pid is not None:
+                    # the opted unit's two changes, applied whatever the streaming state
+                    # (spec 11.5): the share grant and the share rule ride into the cache
+                    # key, and the phase id tells the swarm's relay which phase this unit
+                    # shares within. A non-opted unit is untouched: same prompt, same
+                    # grants, same key, byte for byte.
+                    u.grants = "%s,%s" % (u.grants, SHARE_GRANT) if u.grants else SHARE_GRANT
+                    u.prompt = "%s\n\n%s" % (u.prompt, SHARE_RULE)
+                    u.share_phase = pid
+                units.append(u)
                 batches.append(batch)
         rows, units_res, dropped, not_run = [], [], [], []
         if units:

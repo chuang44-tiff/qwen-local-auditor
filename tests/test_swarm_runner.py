@@ -810,7 +810,7 @@ def test_wf_event_writes_workflow_kinds_and_refuses_engine_kinds(tmp_path, fake)
 def run(wf):
     wf.event("attention", item="S1", reason="confirmed", detail="the canvas did not change")
     for kind in ("run_start", "unit_done", "unit_dropped", "claude_call", "run_end",
-                 "phase_start", "unit_start", ""):
+                 "phase_start", "unit_start", "share", ""):
         try:
             wf.event(kind)
         except ValueError:

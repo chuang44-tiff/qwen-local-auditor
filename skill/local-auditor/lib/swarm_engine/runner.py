@@ -27,7 +27,7 @@ import time
 import traceback
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from lib import search_mcp, swarm, watch  # noqa: E402
+from lib import asks, search_mcp, share_relay, swarm, watch  # noqa: E402
 from lib.swarm_engine import api, events, fences, manifest, runlock, steps  # noqa: E402
 
 EXIT_OK, EXIT_USAGE, EXIT_PREFLIGHT, EXIT_PARTIAL, EXIT_EMPTY = 0, 2, 3, 4, 5
@@ -1014,6 +1014,7 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
     # 4, 5, 8, 130); the exits before run_start (2 and 3) never get that far
     started, rc, wf = False, EXIT_HARNESS, None
     watch_id = None                         # this run's pointer, once registered
+    relay = None                            # this run's share relay, once built
     try:
         # inside the try, so a raise here still reaches the finally that releases a
         # lock a --resume was already holding on entry
@@ -1060,6 +1061,25 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
         sw = swarm.Swarm(o.agent, run, seats=seats, timeout=cfg["timeout_per_item"],
                          backoff=env_int(env, "BACKOFF", 30), max_unit_seconds=max_unit,
                          deadline=deadline_epoch(cfg))
+        # the run's one share relay and its one asks folder (spec 11.4/12.5): a
+        # streaming run gets the relay the swarm streams its units through and the
+        # asks/ layout the relay admits their questions into. The watch id is the
+        # address the notes and questions are addressed from, so asks_ready (and with
+        # it ask_main) needs the registration to have succeeded. A relay that cannot
+        # be built costs one warning line and never the run: the units then keep
+        # today's inbox-only path.
+        if os.environ.get("QWEN_STREAM", "1") != "0":
+            try:
+                asks_ready = watch_id is not None and asks.init_asks_only(str(run))
+                relay = share_relay.RunRelay(str(run), watch_id or "", asks_ready,
+                                             emit=lambda kind, **fields:
+                                             events.emit(run, kind, **fields))
+                relay.start()
+                sw.relay, sw.run_id = relay, watch_id
+            except Exception as e:
+                relay = None
+                sw.relay = None
+                err("the share relay could not start (%s); the run goes on without it" % e)
         swarm.install_stop_signals()
         start = time.time()
         wf = api.Workflow(m, cfg, run, sw, goal=cfg[prof["goal_key"]], mcp=mcp,
@@ -1092,6 +1112,25 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
             with contextlib.suppress(Exception):
                 sandbox.cleanup(run, target)
         if started:
+            # the relay goes BEFORE the run's end is announced: its last drain admits
+            # what the exiting units planted, then report.md gains the shared-findings
+            # section and the ask rows, and RUN/asks/.ended tells every --next-ask
+            # waiter the run is over -- none of it may ever fail the run
+            if relay is not None:
+                with contextlib.suppress(Exception):
+                    relay.close()
+                if wf is not None and wf.report_path is not None \
+                        and os.path.isfile(str(wf.report_path)):
+                    try:
+                        _append_shared_findings(run, wf.report_path)
+                    except Exception as e:
+                        err("the report's shared-findings section could not be "
+                            "written (%s)" % e)
+            try:
+                from lib import supervisor            # the one .ended stamp rule
+                supervisor._write_ended(str(run))
+            except Exception:
+                pass                                  # never the run's problem
             report = wf.report_path if wf is not None and rc in (EXIT_OK, EXIT_PARTIAL) else None
             events.emit(run, "run_end", exit=rc, report=None if report is None else str(report))
             # the pointer's end and exit, alongside the run_end event: the page calls the
@@ -1100,6 +1139,32 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
         if locked:
             with contextlib.suppress(OSError):
                 runlock.release(run)
+
+
+def _append_shared_findings(run, report_path):
+    """Append the run's shared findings to report.md (spec 11.4): a
+    `## Shared findings` section with one entry per admitted finding (the sender,
+    its phase, its receivers off the relay's own log, the finding quoted line by
+    line, its paths), then the ask-main rows -- the questions line among them
+    (lib/supervisor.py, the until-done report's own rows). A run with no findings
+    and no ask events gets NO section at all. Written as wf.report writes: the
+    bytes a text-mode write produced (newlines as os.linesep), atomically; the
+    workflow's own text stays byte-for-byte in front."""
+    entries = share_relay.shared_findings_lines(str(run))
+    from lib import supervisor                        # the one ask-rows rule
+    ask_rows = supervisor._ask_lines(str(run))
+    if not entries and not ask_rows:
+        return
+    lines = ["", "## Shared findings", ""] + list(entries)
+    if ask_rows:
+        lines += [""] + list(ask_rows)
+    blob = ("\n".join(lines) + "\n").replace("\n", os.linesep).encode("utf-8")
+    path = pathlib.Path(report_path)
+    with open(path, "rb") as fh:
+        old = fh.read()
+    if old and not old.endswith(b"\n"):
+        blob = os.linesep.encode() + blob    # the section starts on a line of its own
+    api.atomic_write(path, old + blob)
 
 
 def finish(wf, cfg, run, start):

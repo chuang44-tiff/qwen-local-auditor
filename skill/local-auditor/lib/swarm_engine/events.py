@@ -24,6 +24,7 @@ Every line has "kind" and "t" (unix time). The engine's own kinds are ENGINE_KIN
                for a review-round unit -- so the page's per-agent bar divides by it)
   unit_done    unit, role, ok, cached, seconds, why (only when not ok)   (swarm.py)
   unit_dropped unit, role, why                              (swarm.py)
+  share        unit, role, share_id, to_count, len  (share_relay, per admitted finding)
   claude_call  name, item, state, seconds, cost_usd         (claude_check)
   claude_probe name, state, why                             (claude_check)
   run_end      exit, report (path or null)                  (runner._start, every exit
@@ -44,7 +45,7 @@ import time
 
 FILE = "events.jsonl"
 ENGINE_KINDS = frozenset({"run_start", "phase_plan", "phase_start", "unit_start", "unit_done",
-                          "unit_dropped", "claude_call", "claude_probe", "run_end"})
+                          "unit_dropped", "share", "claude_call", "claude_probe", "run_end"})
 MAX_LINE = 4096                       # bytes, newline included: every line stays below it
 _LOCK = threading.Lock()
 _FLAGS = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)

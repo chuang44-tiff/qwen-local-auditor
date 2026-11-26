@@ -13,6 +13,12 @@ else, printing "fake preflight failed" to stderr when non-zero (the research pre
 $FAKE_SWARM_RC_RECORD ("6,7"): also print the JSON record when the behaviour returns one
 of those non-zero rcs (with "result": "" for 6). Without a record, stdout stays empty:
 a swarm that finds no session_id there has nothing to repair.
+$FAKE_SWARM_DIR/<role-stem>.note_ids.json, when present, is a JSON list of note ids this
+call "delivered" (a behaviour file that moved notes from its inbox new/ to delivered/,
+the way the stream driver does): the printed record then carries stream=True,
+notes_delivered=len(ids) and note_ids=ids, exactly the streamed shape lib/swarm.py reads.
+The behaviour file owns the file: it rewrites it per call (or removes it) -- a printed
+record is the only thing that consumes it.
 """
 import json
 import os
@@ -79,10 +85,25 @@ try:
             rc, text = ns["answer"](prompt, opt("--resume") is not None)
 finally:
     me.unlink()
+# the delivered-notes witness (see the docstring): a behaviour file that moved notes
+# into its inbox's delivered/ names their ids here, and the record gains the streamed
+# shape -- with no file, the record is byte-identical to what this fake always printed.
+streamed = {}
+nfile = d / ("%s.note_ids.json" % role)
+if nfile.exists():
+    try:
+        ids = json.loads(nfile.read_text(encoding="utf-8"))
+    except ValueError:
+        ids = None
+    if isinstance(ids, list):
+        ids = [i for i in ids if isinstance(i, str)]
+        streamed = {"stream": True, "notes_delivered": len(ids), "note_ids": ids}
 if rc == 0 or str(rc) in os.environ.get("FAKE_SWARM_RC_RECORD", "").split(","):
-    print(json.dumps({"type": "result", "is_error": False, "result": "" if rc == 6 else text,
-                      "session_id": "sess-" + uuid.uuid4().hex[:8],
-                      "usage": {"input_tokens": 100, "output_tokens": 10}}))
+    rec = {"type": "result", "is_error": False, "result": "" if rc == 6 else text,
+           "session_id": "sess-" + uuid.uuid4().hex[:8],
+           "usage": {"input_tokens": 100, "output_tokens": 10}}
+    rec.update(streamed)
+    print(json.dumps(rec))
 else:
     sys.stderr.write("fake failure rc=%d\n" % rc)
 sys.exit(rc)

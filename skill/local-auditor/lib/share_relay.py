@@ -33,7 +33,10 @@ and registration cannot race a relay iteration):
   (``QWEN_SHARE_IN_MAX``, default 10, clamped 0..15, non-integer -> 10)
   share notes; a receiver at its budget logs ``share_dropped`` with reason
   ``receiver_cap`` and ``to``; a receiver whose inbox refuses (NotesError,
-  closed) is skipped in silence. Only RUNNING units of the phase receive; a
+  closed) is skipped in silence. Every note that does land logs
+  ``share_queued`` (``finding`` id and ``to`` receiver, no text) -- that log
+  is who received what, and ``shared_findings_lines`` builds report.md's
+  section from it. Only RUNNING units of the phase receive; a
   late starter gets the phase's findings as backlog at ``register``, and a
   retry attempt gets the backlog again under a fresh budget, skipping every
   finding still pending in its inbox ``new/`` (the relay tracks its own
@@ -153,7 +156,11 @@ class RunRelay:
     def __init__(self, run_dir, run_id, asks_ready, emit=None):
         self._run_dir = run_dir
         self._run_id = run_id
-        self._asks_ready = bool(asks_ready)
+        # the engine reads asks_ready to gate the ask_main grant (spec 12.5's
+        # activation matrix): the run made its asks layout AND a main session
+        # can listen for it.
+        self.asks_ready = bool(asks_ready)
+        self._asks_ready = self.asks_ready
         self._emit = emit
         self._lock = threading.Lock()
         self._units = {}      # unit -> {unit, role, inbox, M, pid, attempt,
@@ -274,10 +281,10 @@ class RunRelay:
 
     def _queue(self, u, f):
         """One finding into one receiver's inbox, under its attempt budget:
-        True when the note landed. Skipped (False, silently) when the finding
-        is already queued in this attempt, still pending in ``new/``, or the
-        inbox refuses it; budget spent logs ``receiver_cap`` naming both
-        sides."""
+        True when the note landed (logged ``share_queued``, ids only). Skipped
+        (False, silently) when the finding is already queued in this attempt,
+        still pending in ``new/``, or the inbox refuses it; budget spent logs
+        ``receiver_cap`` naming both sides."""
         fid = f["id"]
         if fid in u["delivered"] or fid in self._pending(u):
             return False
@@ -296,6 +303,8 @@ class RunRelay:
         u["budget"] += 1
         u["delivered"].add(fid)
         u["note_ids"][note_id] = fid
+        self._log("share_queued", unit=f["sender"], to=u["unit"], pid=u["pid"],
+                  finding=fid, attempt=_attempt(u))
         return True
 
     # ------------------------------------------------------------- the poll
@@ -528,3 +537,86 @@ class RunRelay:
 def _attempt(u):
     """The attempt tag the log uses: ``a<k>``."""
     return "a%d" % u["attempt"]
+
+
+# ------------------------------------------------------------- the report
+def _relay_records(run_dir):
+    """The relay log's lines as records (an unreadable or missing log reads as
+    none; a torn line is skipped, never raised): the report's reader."""
+    path = os.path.join(run_dir, msgdir.MSG_DIR, RELAY_LOG)
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return []
+    out = []
+    for raw in data.decode("utf-8", "replace").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def shared_findings_lines(run_dir):
+    """report.md's ``## Shared findings`` entries (spec 11.4): one per admitted
+    finding, in ``findings.jsonl`` order over every phase folder (the
+    ``_phases/<pid>`` dirs sorted by their ``p<seq>`` number), the receivers
+    read off the relay's own ``share_queued`` lines -- never from the notes and
+    never with any text::
+
+        - 13:45:02 unit a (prober), phase p1, to b, c
+        > the finding, every line quoted, control characters stripped
+        Paths: src/a.py, src/b.py
+
+    The finding is quoted the way the renderer quotes a share note (the
+    ``> `` prefix on every line of the stripped text); a ``Paths:`` line
+    follows when the finding names any paths. A finding nobody got reads
+    ``to nobody``. Junk findings records (no id, sender or text) replay
+    nothing. [] when the run admitted nothing (the section is then absent)."""
+    root = os.path.join(run_dir, msgdir.MSG_DIR, msgdir.PHASES_DIR)
+    if _is_link(root) or not os.path.isdir(root):
+        return []
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return []
+    pids = [n for n in names if not _is_link(os.path.join(root, n))
+            and os.path.isdir(os.path.join(root, n))]
+
+    def _pid_sort(n):
+        return (0, int(n[1:]), "") if n[:1] == "p" and n[1:].isdigit() else (1, 0, n)
+    pids.sort(key=_pid_sort)
+    queued = {}
+    for rec in _relay_records(run_dir):
+        if rec.get("ev") == "share_queued" and isinstance(rec.get("finding"), str) \
+                and isinstance(rec.get("to"), str):
+            receivers = queued.setdefault(rec["finding"], [])
+            if rec["to"] not in receivers:
+                receivers.append(rec["to"])
+    lines = []
+    for pid in pids:
+        for f in msgdir.findings_read(run_dir, pid):
+            fid, sender, text = f.get("id"), f.get("sender"), f.get("text")
+            if not isinstance(fid, str) or not isinstance(sender, str) \
+                    or not isinstance(text, str):
+                continue                      # junk lines land in no report
+            role = f.get("role")
+            role = role if isinstance(role, str) else ""
+            receivers = queued.get(fid) or []
+            lines.append("- %s unit %s (%s), phase %s, to %s"
+                         % (notes.fmt_clock(f.get("t")), sender, role, pid,
+                            ", ".join(receivers) if receivers else "nobody"))
+            lines.extend("> " + one
+                         for one in notes._strip_controls(text).split("\n"))
+            paths = f.get("paths")
+            paths = [notes._strip_controls(p) for p in paths if isinstance(p, str)] \
+                if isinstance(paths, (list, tuple)) else []
+            if paths:
+                lines.append("Paths: %s" % ", ".join(paths))
+    return lines

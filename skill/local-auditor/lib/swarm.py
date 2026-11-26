@@ -37,7 +37,7 @@ import subprocess
 import threading
 import time
 
-from lib import notes
+from lib import asks, msgdir, notes
 from lib.swarm_engine import events
 
 AGENT_PREFLIGHT, AGENT_APIERR = 3, 4
@@ -217,6 +217,14 @@ class Unit:
         # the repair round's text, "{why}" replaced by the parse's reason; None = REPAIR.
         # Not part of the cache key: it only re-asks for an answer the key already names
         self.repair_text = repair_text
+        # the run-wide id of the opted-in phase this unit belongs to ("p1", ...; set by
+        # swarm_engine.api's fan_out(share=True)); None = the unit shares nothing. Not
+        # in the cache key: what makes an opted unit's key differ from the same unit's
+        # unopted one is the share rule in the prompt and the share in its grants.
+        self.share_phase = None
+        # False for a unit whose fence is a web or browser fence (spec 12.6: ask_main
+        # is withheld by fence). Not in the key: it travels in the unit's env only.
+        self.ask_main = True
 
 
 NOTICE_HEAD = "qwen-agent: Claude settings changed"
@@ -263,6 +271,12 @@ class Swarm:
         self._live = set()
         self._stopping = threading.Event()
         self._phase_no = 0            # names a phase the workflow never labelled ("phase N")
+        # the run's share relay (lib/share_relay.py) and the watch id its addresses are
+        # built from (spec 11.4); the swarm runner sets both after constructing the
+        # Swarm. Every other caller leaves them None, and a Swarm without a relay is
+        # exactly the Swarm it always was: inboxes only, no message dirs.
+        self.relay = None
+        self.run_id = None
 
     # ------------------------------------------------------------ one process
     def _argv(self, u, prompt_path, timeout, resume=None):
@@ -354,7 +368,7 @@ class Swarm:
                 # the same well-formed record shape a real call returns: the caller
                 # reads rec["tokens"]/rec["result"] without guarding for a bare string
                 return -1, {"result": "", "session": "", "tokens": tokens,
-                            "notes_delivered": 0}, "interrupted"
+                            "notes_delivered": 0, "note_ids": []}, "interrupted"
             # env is None for every unit that names no extra variables: those keep the
             # plain one-argument spawn call, the shape a caller that swaps _spawn out
             # for its own replaces
@@ -372,12 +386,50 @@ class Swarm:
             time.sleep(self.backoff)
         result = rec.get("result") if isinstance(rec.get("result"), str) else ""
         # P6: the additive notes_delivered comes along for K3's steered tracking (0 on
-        # the old un-streamed path, where the record never carries the key).
+        # the old un-streamed path, where the record never carries the key). The driver
+        # names the note ids it delivered too (_steer_flags reads their bodies; [] on
+        # any record that does not know the key).
         nd = rec.get("notes_delivered")
         if not isinstance(nd, int) or isinstance(nd, bool) or nd < 0:
             nd = 0
+        nids = rec.get("note_ids")
+        if not isinstance(nids, list):
+            nids = []
         return rc, {"result": result, "session": rec.get("session_id") or "",
-                    "tokens": tokens, "notes_delivered": nd}, err
+                    "tokens": tokens, "notes_delivered": nd,
+                    "note_ids": [i for i in nids if isinstance(i, str)]}, err
+
+    def _steer_flags(self, unit_inbox, rec):
+        """(steered_by_this_call, got_a_share) for one qwen-agent call, from the ids
+        the driver says it delivered (spec 12.4/12.5). Their bodies are the files the
+        driver moved into the inbox's delivered/: a ``share`` note (the relay's only
+        writer) marks the answer shared for good -- never cached, and steered in every
+        attempt from here on; a ``harness`` note carries no steering content and never
+        marks the answer steered. A record that names no ids (the pre-stream shape,
+        where only the count exists) is judged by that count alone, exactly as today;
+        an id whose body cannot be read counts as steering -- a note the swarm cannot
+        name is never grounds to hand its answer to a later run as the unsteered one."""
+        nd = bool(rec.get("notes_delivered"))
+        ids = rec.get("note_ids")
+        if unit_inbox is None or not isinstance(ids, list) or not ids:
+            return nd, False
+        steered = shared = False
+        for nid in ids:
+            kind = None
+            if isinstance(nid, str) and notes.NOTE_ID_RE.fullmatch(nid):
+                try:
+                    with open(os.path.join(unit_inbox, "delivered", "%s.json" % nid),
+                              "rb") as fh:
+                        body = json.loads(fh.read().decode("utf-8", "replace"))
+                    if isinstance(body, dict):
+                        kind = body.get("kind")
+                except (OSError, ValueError):
+                    kind = None
+            if kind == "share":
+                shared = True
+            if kind != "harness":
+                steered = True
+        return steered, shared
 
     def stop_all(self):
         self._stopping.set()
@@ -500,6 +552,23 @@ class Swarm:
                 unit_inbox = candidate
             except (notes.NotesError, OSError):
                 unit_inbox = None
+        # The relay's per-unit message dir (spec 12.5): made, and the unit registered
+        # with the relay, BEFORE the unit_start event names it running -- the backlog
+        # is queued under the relay's lock before the first spawn, so a share cannot
+        # land in the gap between the event and the registration. A cache hit returned
+        # above and is never registered (it receives nothing and shares nothing); a
+        # msg dir that cannot be made leaves the unit on today's inbox-only path. No
+        # relay (every caller but the swarm runner): nothing here runs at all.
+        msg_dir = None
+        if unit_inbox is not None and self.relay is not None:
+            candidate = msgdir.unit_msgdir(str(self.run_dir), u.name)
+            try:
+                msgdir.init_msgdir(candidate)
+                self.relay.register(u.name, pathlib.Path(u.role_file).stem,
+                                    unit_inbox, pid=u.share_phase)
+                msg_dir = candidate
+            except Exception:
+                msg_dir = None
         self._event("unit_start", u, timeout=_deep_cut(timeout, u.deep) if u.deep else timeout)
         start = time.time()
         rc, tokens, status = -1, 0, "ok"
@@ -527,10 +596,30 @@ class Swarm:
         # one-argument _spawn(argv) (K3).
         if unit_inbox is not None:
             extra["QWEN_INBOX"] = unit_inbox
+        # The qla_msg server's own env (lib/msg_mcp.py, spec 12.5's activation matrix):
+        # where the unit sends, who it is, which of its three tools this unit may use.
+        # Env only -- no QWEN_MSG_* variable reaches any unit's cache key or argv; the
+        # share grant and share rule an opted unit carries were added by the api.
+        if msg_dir is not None:
+            extra["QWEN_MSG_DIR"] = msg_dir
+            extra["QWEN_MSG_SELF"] = "%s/%s" % (
+                self.run_id if self.run_id is not None else "swarm", u.name)
+            tools = ["reply"]
+            if u.ask_main and self.relay.asks_ready:
+                tools.append("ask_main")
+                extra["QWEN_ASKS_DIR"] = str(self.run_dir / asks.ASKS_DIR)
+            if u.share_phase is not None:
+                extra["QWEN_MSG_PHASE"] = u.share_phase
+                tools.append("share")
+            extra["QWEN_MSG_TOOLS"] = ",".join(tools)
         env = None if not extra else dict(os.environ, **extra)
-        # REPAIR runs get no inbox (spec 4.6): the repair only re-asks for an answer in
-        # the right shape -- it is a continuation of the attempt, not a session to steer.
-        _repair_extra = {k: v for k, v in extra.items() if k != "QWEN_INBOX"}
+        # REPAIR runs get no inbox (spec 4.6) and none of the messaging env (the matrix's
+        # repair row: no share, no ask_main, no reply -- the repair only re-asks for an
+        # answer in the right shape; it is a continuation of the attempt, not a session
+        # to steer or a voice in the phase).
+        _repair_extra = {k: v for k, v in extra.items()
+                         if k != "QWEN_INBOX" and k != "QWEN_ASKS_DIR"
+                         and not k.startswith("QWEN_MSG_")}
         env_repair = None if not _repair_extra else dict(os.environ, **_repair_extra)
         set_up = False
         try:
@@ -543,6 +632,11 @@ class Swarm:
             # (a non-UTF-8 byte carried in a patch) into '?' instead of raising.
             prompt_path.write_bytes(u.prompt.encode("utf-8", "replace"))
             why, data, attempt, retryable = "", None, 0, False
+            # a share delivered in ANY attempt marks this unit's answer steered for
+            # good (spec 11.4: the flag never resets per attempt for shares -- a unit
+            # that heard its phase may not be handed to a later run as the unsteered
+            # answer, whatever attempt the note arrived in)
+            shared_in = False
             while True:
                 # K3: does THIS attempt's answer depend on a note? Reset by every fresh
                 # retry; the repair inherits the attempt it repairs (it ORs in below).
@@ -553,7 +647,9 @@ class Swarm:
                 t_start, tokens_before = time.time(), tokens
                 rc, rec, err = self._call(self._argv(u, prompt_path, timeout), env)
                 tokens += rec["tokens"]
-                steered = steered or bool(rec.get("notes_delivered"))
+                st, sh = self._steer_flags(unit_inbox, rec)
+                steered = steered or st
+                shared_in = shared_in or sh
                 status = "ok"
                 with self._lock:
                     self.agents_run += 1
@@ -591,7 +687,9 @@ class Swarm:
                             tokens += rec2["tokens"]   # on any rc, count the repair record's usage
                             # the repair continues this attempt: it inherits steered and
                             # adds any note its own (un-inboxed) call somehow saw
-                            steered = steered or bool(rec2.get("notes_delivered"))
+                            st, sh = self._steer_flags(unit_inbox, rec2)
+                            steered = steered or st
+                            shared_in = shared_in or sh
                             if rc == 0:
                                 (self.agents_dir / ("%s.repair.out" % u.name)).write_bytes(
                                     rec2["result"].encode("utf-8", "surrogateescape"))
@@ -622,6 +720,13 @@ class Swarm:
                     break
                 attempt += 1
                 timeout = min(timeout * 2, self.max_unit_seconds)
+                # the new attempt gets the phase backlog again under its fresh delivery
+                # budget before its call starts (spec 12.5; the relay logs attempts 1-based,
+                # and it skips everything still pending in new/ or queued in THIS attempt,
+                # so nothing arrives twice)
+                if msg_dir is not None:
+                    with contextlib.suppress(Exception):    # a relay never fails a unit
+                        self.relay.retry(u.name, attempt + 1)
                 # every retried attempt gets its own line, reporting its own tokens and
                 # seconds; only the last failure is a drop
                 self._log(u, rc, tokens - tokens_before, time.time() - t_start,
@@ -641,11 +746,13 @@ class Swarm:
             else:
                 # K3: a session that received a note answered that note -- its answer is
                 # not the answer the unsteered cache key asks for, so it must never be
-                # handed to a later run as if it were. An unsteered answer caches
+                # handed to a later run as if it were. A share the unit received in ANY
+                # attempt marks it too (shared_in is sticky across the retry reset); a
+                # harness note marks nothing. An unsteered answer caches
                 # exactly as always (bytes through surrogateescape: parsed data may
                 # carry a non-UTF-8 byte of a patch as a lone surrogate, and the cache
                 # must hold the exact bytes).
-                if not steered:
+                if not (steered or shared_in):
                     out_path = self.agents_dir / ("%s.json" % u.name)
                     tmp_path = self.agents_dir / ("%s.json.tmp" % u.name)
                     tmp_path.write_bytes(json.dumps({"data": data, "key": self._key(u)},
@@ -663,6 +770,12 @@ class Swarm:
             # session's end and here is never silently left queued. Only an inbox that
             # really exists is swept; close_inbox itself is the idempotent owner sweep.
             if unit_inbox is not None:
+                if msg_dir is not None:
+                    # the unit's last pass over its outbox BEFORE its inbox closes:
+                    # what it shared on its way out is admitted and queued to the
+                    # siblings that are still running (spec 11.4)
+                    with contextlib.suppress(Exception):
+                        self.relay.unit_done(u.name)
                 try:
                     notes.close_inbox(unit_inbox, "run_ended")
                 except (notes.NotesError, OSError):
@@ -741,6 +854,16 @@ class Swarm:
 
         threads = [threading.Thread(target=worker, daemon=True)
                    for _ in range(min(seats, len(units)))]
+        # The relay's phase brackets (spec 11.4): with a relay and any opted unit, the
+        # phase is (re)loaded from disk before the first unit starts -- a resumed run
+        # finds its findings, its senders' counts and its seen texts waiting -- and the
+        # end drains what the exiting units planted last, then closes the phase. The
+        # finally covers the Ctrl-C path: the phase of an interrupted run ends too.
+        pids = sorted({u.share_phase for u in units if u.share_phase}) \
+            if self.relay is not None else []
+        for pid in pids:
+            with contextlib.suppress(Exception):    # messaging never fails the phase
+                self.relay.start_phase(pid)
         for t in threads:
             t.start()
         try:
@@ -750,6 +873,10 @@ class Swarm:
         except KeyboardInterrupt:
             self.stop_all()
             raise
+        finally:
+            for pid in pids:
+                with contextlib.suppress(Exception):
+                    self.relay.end_phase(pid)
         if self._stopping.is_set():
             raise KeyboardInterrupt   # stopped after stop_all: results are not complete
         return results
