@@ -172,6 +172,10 @@ WATCH_ID=""         # this session's watch pointer id (lib/watch.py); "" = not o
 WATCH_TMPD=""       # the folder holding the id the registration handed back and the settings file
 WATCH_SETTINGS=""   # the --settings file naming the activity hook (lib/watch_hook.py), which
                     # also holds the plan hook's entries when both are on (claude takes one)
+SETTINGS_EXTRA=""   # --settings-extra FILE: a JSON object to merge into the session's ONE
+                    # --settings file (internal: a swarm Bash unit's confinement block)
+SETTINGS_MERGED=""  # FILE merged onto the settings above, written under the run's TMPD;
+                    # once set it is the one --settings file the argv names
 DESKTOP=""          # --desktop APP: drive one desktop application through qla-desktop (lib/desktop.py)
 DESKTOP_ROOT=""     # where desktop run folders go (QWEN_DESKTOP_DIR), absolute before the -C chdir
 DESKTOP_DIR=""      # this run's folder: screenshots, the saved window size, bin/qla-desktop
@@ -631,6 +635,7 @@ BROWSER  (opt-in: give the run a real browser through the Playwright MCP server)
                        run is the one held. The digest leaves this machine.
       --plan-state DIR internal: used by --until-done (the supervisor hands its one shared
                        plan dir to each coder round)
+      --settings-extra FILE  (internal) merge FILE's JSON into the session's settings
       --show-claude    Print the claude: line (what plan, advisor and rescue resolved to for
                        this run, and why one was skipped) and exit 0; no model is called.
       --scenarios FILE Scripted UI suite for the tester: implies --browser and
@@ -1181,6 +1186,11 @@ while [ $# -gt 0 ]; do
                           # the flag.
                           [ -n "$2" ] || { die "--mcp-config needs a file path, not an empty string"; exit $QA_USAGE; }
                           MCP_CONFIG="$2"; shift 2 ;;
+    --settings-extra)     need_arg "$1" $(($#-1))
+                          # the JSON object the ONE settings file is merged with
+                          # (internal: the swarm's Bash-unit confinement block)
+                          [ -n "$2" ] || { die "--settings-extra needs a file path, not an empty string"; exit $QA_USAGE; }
+                          SETTINGS_EXTRA="$2"; shift 2 ;;
     --browser)            BROWSER=1; shift ;;
     --headed)             HEADED=1; BROWSER=1; shift ;;
     --browser-eval)       BROWSER_EVAL=1; BROWSER=1; shift ;;
@@ -3449,11 +3459,14 @@ fi
 # One file holds both hooks when --plan is on too: claude takes one --settings, so the
 # plan hook's entry is read in and the four watch entries are appended to it (its matcher
 # and command unchanged). With no activity file to fill -- the page off, or a run that
-# registered nothing -- nothing is written and no --settings is passed at all, and a
-# --dry-run or --interactive run writes nothing either: like --plan's hook, this one is for
-# a headless run that actually starts (both leave the script below, before any trap could
-# have taken the folder away).
-if [ -n "${QWEN_WATCH_ACTIVITY:-}" ] && [ "$DRY_RUN" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ]; then
+# registered nothing -- nothing is written and no --settings is passed at all, and an
+# --interactive run writes nothing either: like --plan's hook, this one is for a headless
+# run that actually starts (both leave the script below, before any trap could have taken
+# the folder away). The one exception: with --settings-extra on, a --dry-run merges here
+# too -- its caller reads the settings file the argv names, the way it reads the qla_msg
+# config the dry-run block below leaves behind.
+if [ -n "${QWEN_WATCH_ACTIVITY:-}" ] && [ "$INTERACTIVE" -eq 0 ] \
+   && { [ "$DRY_RUN" -eq 0 ] || [ -n "$SETTINGS_EXTRA" ]; }; then
   [ -n "$WATCH_TMPD" ] || WATCH_TMPD="$(mktemp -d "${TMPDIR:-/tmp}/qwen-watch.XXXXXXXX")" \
     || WATCH_TMPD=""
   if [ -n "$WATCH_TMPD" ] && ! MSYS2_ARG_CONV_EXCL='*' "$QA_PY" - \
@@ -3506,6 +3519,78 @@ PY
   # known -- no preflight, a server that does not report one -- and nothing is exported:
   # the hook then writes no `win`, and the page shows no meter.
   [ -n "$CTX" ] && export QWEN_WATCH_CTX_WINDOW="$CTX"
+fi
+
+# ------------------------------------------------------------------ --settings-extra
+# INTERNAL flag, like --advisor-state and --plan-state: the swarm hands each Bash unit
+# its confinement settings (lib/swarm_engine/fences.py confine_settings) as one JSON
+# file, and this merges that object into the ONE settings file the session gets --
+# claude takes exactly one --settings. Dicts deep-merge, lists concatenate (both sides'
+# permissions.deny survive), FILE's scalars win. With neither a plan nor a watch file to
+# merge onto, FILE's content alone becomes the session's settings file, under the run's
+# temp folder. A --dry-run reaches here too (the watch block above merged into
+# WATCH_SETTINGS when the activity was on) and leaves the file for its caller to read --
+# the trap only ever belongs to a run that starts. A FILE that cannot be read or does
+# not hold one JSON object is the caller's error: die with the usage exit.
+if [ -n "$SETTINGS_EXTRA" ] && [ "$INTERACTIVE" -eq 0 ]; then
+  case "$SETTINGS_EXTRA" in /*|[A-Za-z]:*) ;; *) SETTINGS_EXTRA="$PWD/$SETTINGS_EXTRA" ;; esac
+  # the run folder, made early the way the qla_msg block below makes it; every later
+  # maker keeps a TMPD that is already set. A real run installs the cleanup trap here
+  # (the qla_msg block's own line, made idempotent by bash): this block can die AFTER
+  # the folder exists. A --dry-run must NOT trap: it leaves the folder behind on purpose
+  # so its caller can read the file the argv names -- the same convention as the config
+  # file the qla_msg block leaves.
+  [ "$DRY_RUN" -eq 0 ] && trap cleanup EXIT
+  if [ -z "${TMPD:-}" ]; then
+    TMPD="$(mktemp -d "${TMPDIR:-/tmp}/qwen-agent.XXXXXXXX")" || { die "mktemp failed"; exit $QA_HARNESS; }
+  fi
+  _sx_out="$TMPD/settings.json"
+  _sx_base="${WATCH_SETTINGS:-$PLAN_SETTINGS}"
+  MSYS2_ARG_CONV_EXCL='*' "$QA_PY" - "$(native_path "$_sx_out")" \
+    "$(native_path "${_sx_base:-}")" "$(native_path "$SETTINGS_EXTRA")" <<'PY'
+import json, sys
+out, base, extra = sys.argv[1:4]
+try:
+    with open(extra, encoding="utf-8") as fh:
+        add = json.load(fh)
+except (OSError, ValueError):
+    sys.exit(2)                         # the caller's FILE: unreadable, or not JSON...
+if not isinstance(add, dict):
+    sys.exit(2)                         # ... or JSON that is not one object
+cfg = {}
+if base:                                # the plan/watch file is the base to merge onto
+    try:
+        with open(base, encoding="utf-8") as fh:
+            loaded = json.load(fh)
+    except (OSError, ValueError):
+        sys.exit(1)
+    if not isinstance(loaded, dict):
+        sys.exit(1)
+    cfg = loaded
+def _deep(dst, src):                    # dicts deep-merge, lists concatenate, src wins
+    for k, v in src.items():
+        d = dst.get(k)
+        if isinstance(d, dict) and isinstance(v, dict):
+            _deep(d, v)
+        elif isinstance(d, list) and isinstance(v, list):
+            dst[k] = d + v
+        else:
+            dst[k] = v
+_deep(cfg, add)
+with open(out, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump(cfg, fh, indent=2)
+    fh.write("\n")
+PY
+  case "$?" in
+    0) SETTINGS_MERGED="$_sx_out" ;;
+    2) rm -f "$_sx_out"
+       die "--settings-extra: $SETTINGS_EXTRA is unreadable or not one JSON object"
+       exit $QA_USAGE ;;
+    *) rm -f "$_sx_out"
+       die "--settings-extra: could not merge $SETTINGS_EXTRA into the settings"
+       exit $QA_HARNESS ;;
+  esac
+  unset _sx_out _sx_base
 fi
 
 # ------------------------------------------------------------------ qla_msg
@@ -3664,10 +3749,12 @@ else
   # qla_msg (phase 2): one more --mcp-config beside the advisor's -- claude merges
   # them all. Before CLAUDE_BASE_N, so the review round reuses it too.
   [ -n "$MSG_MCP" ] && CLAUDE_ARGV+=(--mcp-config "$(native_path "$MSG_MCP")")
-  # ONE settings file, ever: the watch hook's, which carries the plan hook's entries as
-  # well when both are on; the plan's own file only when the page has nothing to record.
-  [ -n "${WATCH_SETTINGS:-$PLAN_SETTINGS}" ] \
-    && CLAUDE_ARGV+=(--settings "$(native_path "${WATCH_SETTINGS:-$PLAN_SETTINGS}")")
+  # ONE settings file, ever: the --settings-extra merge above, which carries the watch
+  # hook's (and through it the plan hook's) entries when both are on; the watch hook's
+  # alone when the page has a file to fill; the plan's own file when only --plan is on.
+  _sx_final="${SETTINGS_MERGED:-${WATCH_SETTINGS:-$PLAN_SETTINGS}}"
+  [ -n "$_sx_final" ] && CLAUDE_ARGV+=(--settings "$(native_path "$_sx_final")")
+  unset _sx_final
   [ "$STRICT_MCP" -eq 1 ] && CLAUDE_ARGV+=(--strict-mcp-config)
   [ -n "$SYSTEM" ]    && CLAUDE_ARGV+=(--append-system-prompt "$SYSTEM")
   [ -n "$PERM_MODE" ] && CLAUDE_ARGV+=(--permission-mode "$PERM_MODE")

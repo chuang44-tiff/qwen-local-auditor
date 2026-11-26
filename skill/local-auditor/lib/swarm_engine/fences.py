@@ -33,7 +33,10 @@ plain browser unit's.
 import json
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
 
 SEARCH_TOOL = "mcp__search__search"
 PAGE_TOOL = "mcp__search__page"             # the web fence's second search-server tool
@@ -92,6 +95,96 @@ def can_write(fence):
 
 def needs_search(manifest):
     return any(r.fence in WEB_FENCES for r in manifest.roles.values())
+
+
+# --------------------------------------------------------------------------- confinement
+# A unit whose grants include Bash (today: the `sandbox` fence) runs under Claude Code's
+# Bash sandbox with scoped edit grants and deny rules, so it cannot forge notes, message
+# files or asks for other units, the main session or the harness (spec 13). When the host
+# cannot confine, the unit still gets the scoped grants and the deny rules, and the run's
+# report says why. The sandbox always allows writes to TMPDIR, so a run folder inside
+# TMPDIR buys no confinement and is reported as unconfined.
+
+_DENY_DIRS = ("inbox", "msg", "asks", "agents")   # the run's coordination files
+
+
+def confine_settings(run_dir, unit, sandbox=True):
+    """The Claude Code settings block a Bash unit's session merges into its ONE --settings
+    file (qwen-agent --settings-extra). `R` is the run folder's real path; every deny rule
+    is an `Edit(//...)` absolute rule for one of the run's coordination dirs, so a confined
+    unit edits none of them (`Write(...)` path rules do not match -- Edit covers both
+    tools). sandbox=False drops the sandbox block: the deny rules and, with them, the run
+    of a host that cannot confine. `unit` names whose unit the block belongs to (the
+    scoped grant for its sandboxes/<unit> folder comes from scoped_grants)."""
+    R = os.path.realpath(str(run_dir))
+    out = {"permissions": {"deny": ["Edit(/%s/%s/**)" % (R, d) for d in _DENY_DIRS]}}
+    if sandbox:
+        out = {"sandbox": {"enabled": True, "allowUnsandboxedCommands": False,
+                           "autoAllowBashIfSandboxed": True},
+               "permissions": out["permissions"]}
+    return out
+
+
+def scoped_grants(grants, run_dir, unit):
+    """`grants` (a comma list) with every bare `Edit` and `Write` entry replaced by the
+    ONE rule `Edit(//<R without leading slash>/sandboxes/<unit>/**)` at the first of their
+    places; every other entry keeps its order. A list without Edit/Write is returned
+    unchanged. One Edit rule covers the Write tool too (spec 13)."""
+    R = os.path.realpath(str(run_dir))
+    rule = "Edit(/%s/sandboxes/%s/**)" % (R, unit)
+    out = []
+    replaced = False
+    for entry in (grants or "").split(","):
+        if entry in ("Edit", "Write"):
+            if not replaced:
+                out.append(rule)
+                replaced = True
+        else:
+            out.append(entry)
+    return ",".join(out) if replaced else grants
+
+
+def _probe_run(argv):
+    """Run one sandboxed command with a 10 s leash: None when it ran, else the reason --
+    `sandbox probe failed: ` plus its first stderr line (200 chars at most). Never
+    `claude -p`: the probe is the sandbox itself, not a model call."""
+    try:
+        p = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE, timeout=10)
+    except Exception as e:            # the program vanished between PATH and exec, or hung
+        return "sandbox probe failed: %s" % ((str(e).splitlines() or [""])[0][:200])
+    if p.returncode != 0:
+        first = (p.stderr or b"").decode("utf-8", "replace").splitlines()
+        return "sandbox probe failed: %s" % ((first or [""])[0][:200])
+    return None
+
+
+def confine_probe(run_dir):
+    """Can this host confine a Bash unit of a run at `run_dir`? None = yes; else the
+    reason, checked in this order: no Bash sandbox on Windows (deny rules only there), a
+    run folder inside the temp folder (the sandbox always lets a unit write there, so a
+    note file written through TMPDIR is no longer confined), and on Linux the bwrap/socat
+    availability plus one sandboxed `true`. Called once per run, before the first confined
+    unit (api.Workflow); any other platform gets no sandbox."""
+    if os.name == "nt":
+        return "no bash sandbox on this platform"
+    R = os.path.realpath(str(run_dir))
+    tmp = os.path.realpath(tempfile.gettempdir())
+    # rstrip keeps the test right for the degenerate TMPDIR=/ (every run folder IS
+    # under it); a realpath'd temp dir otherwise carries no trailing separator
+    if R == tmp or R.startswith(tmp.rstrip(os.sep) + os.sep):
+        return "run folder under TMPDIR"
+    if sys.platform.startswith("linux"):
+        # bwrap is the sandbox, socat the proxy Claude Code's sandbox needs for any
+        # network-visible command: one missing, and the functional probe below would
+        # only say what this line already knows (this host's bwrap has failed under
+        # AppArmor userns limits before, which is why the probe runs one command).
+        if shutil.which("bwrap") is None or shutil.which("socat") is None:
+            return "sandbox probe failed: bwrap or socat missing"
+        return _probe_run(["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "true"])
+    if sys.platform == "darwin":
+        return _probe_run(["sandbox-exec", "-p", "(version 1)(allow default)", "true"])
+    return "no bash sandbox on this platform"
 
 
 def mcp_config(run):

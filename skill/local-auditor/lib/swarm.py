@@ -172,7 +172,7 @@ class Unit:
                  mcp_config=None, parse=extract_json, cache=True, timeout=None, retries=0,
                  effort=None, ignore_deadline=False, cwd=None, key_extra="", setup=None,
                  teardown=None, deep=(), browser=False, env=None, repair_text=None,
-                 browser_eval=False, claude=None):
+                 browser_eval=False, claude=None, settings_extra=None):
         # fullmatch, not match: "a\n" must not pass on the strength of the trailing $.
         if not _SAFE_NAME.fullmatch(name or ""):
             raise ValueError("unit name must match %s (got %r)" % (_SAFE_NAME.pattern, name))
@@ -211,6 +211,12 @@ class Unit:
         # "plan" key is present only for a role that can write. None = not given (the child
         # qwen-agent would then read the config file itself, so a swarm always gives it).
         self.claude = dict(claude) if claude else None
+        # this unit's extra Claude Code settings (the Bash-confinement block of spec 13,
+        # from lib/swarm_engine/fences.py confine_settings): _argv writes it into the run
+        # folder and names it to qwen-agent's internal --settings-extra, which merges it
+        # into the session's ONE --settings file. Not in the cache key: confinement must
+        # not invalidate a cached answer.
+        self.settings_extra = dict(settings_extra) if settings_extra else None
         # extra environment variables for this unit's session ({NAME: VALUE}, both str);
         # None = the inherited environment alone
         self.env = env
@@ -314,6 +320,22 @@ class Swarm:
             argv.append("--browser-eval")
         if u.mcp_config:
             argv += ["--mcp-config", str(u.mcp_config)]
+        if u.settings_extra:
+            # the confinement block, beside the unit's other files (0600, like everything
+            # the run leaves) and named to qwen-agent's --settings-extra: it merges them
+            # into the session's ONE --settings file. A repair call resumes the same
+            # session and gets the same file: the deny rules and the sandbox must hold
+            # across the repair round too.
+            sfile = self.agents_dir / ("%s.settings.json" % u.name)
+            blob = json.dumps(u.settings_extra, ensure_ascii=False,
+                              indent=1).encode("utf-8")
+            # created 0600 outright (the umask can only strip from it): like every file
+            # the run leaves, the settings a unit could read are not world- or
+            # sibling-readable
+            fd = os.open(str(sfile), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(blob)
+            argv += ["--settings-extra", str(sfile)]
         # always explicit, "off" included: the child reads the config file on its own and
         # must not find a default the launch did not choose (a skipped config value would
         # even print `claude: ... skipped` as its first stderr line, the failure reason).

@@ -1126,6 +1126,16 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
                     except Exception as e:
                         err("the report's shared-findings section could not be "
                             "written (%s)" % e)
+            # the confinement line (spec 13): a host that could not confine the run's
+            # Bash units says so in report.md, a line of its own at the same append point
+            # as the shared findings -- whatever the streaming state, and never the
+            # run's failure
+            if wf is not None and wf.confine_reason and wf.report_path is not None \
+                    and os.path.isfile(str(wf.report_path)):
+                try:
+                    _append_confine_line(wf.report_path, wf.confine_reason)
+                except Exception as e:
+                    err("the report's confinement line could not be written (%s)" % e)
             try:
                 from lib import supervisor            # the one .ended stamp rule
                 supervisor._write_ended(str(run))
@@ -1164,6 +1174,21 @@ def _append_shared_findings(run, report_path):
         old = fh.read()
     if old and not old.endswith(b"\n"):
         blob = os.linesep.encode() + blob    # the section starts on a line of its own
+    api.atomic_write(path, old + blob)
+
+
+def _append_confine_line(report_path, reason):
+    """`bash not confined: <reason>` as one line at the end of report.md (spec 13) -- the
+    host could not confine the run's Bash units; they ran with the scoped grants and the
+    deny rules only. Written as wf.report writes: the bytes a text-mode write produced
+    (newlines as os.linesep), atomically; the workflow's own text stays byte-for-byte in
+    front, and the line opens one of its own when the report ends without a newline."""
+    path = pathlib.Path(report_path)
+    with open(path, "rb") as fh:
+        old = fh.read()
+    blob = ("bash not confined: %s\n" % reason).replace("\n", os.linesep).encode("utf-8")
+    if old and not old.endswith(b"\n"):
+        blob = os.linesep.encode() + blob
     api.atomic_write(path, old + blob)
 
 

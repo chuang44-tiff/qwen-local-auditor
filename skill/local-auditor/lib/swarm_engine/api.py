@@ -12,6 +12,7 @@ import math
 import os
 import pathlib
 import re
+import sys
 import threading
 import time
 
@@ -178,6 +179,12 @@ class Workflow:
         # run(wf) is replayed from the start on a resume, so the same calls repeating
         # in the same order lands every phase on the same id it had before.
         self._share_seq = 0
+        # the Bash-unit confinement state (spec 13): the host is probed once, on the first
+        # unit whose grants include Bash; confine_reason is then the probe's reason -- None
+        # when this run confines its Bash units, or ran none (and --check never probes)
+        self._confine_probed = False
+        self._confine_state = None
+        self.confine_reason = None
         totals = self._load_path(self.run_dir / "totals.json")
         self._baseline = totals if isinstance(totals, dict) else {}
         self._target_fp = None
@@ -338,6 +345,10 @@ class Workflow:
             # Env-gated (the swarm drops ask_main from QWEN_MSG_TOOLS on this flag),
             # so it moves no unit's cache key.
             u.ask_main = False
+        if "Bash" in (u.grants or "").split(","):
+            # confinement follows the tool, not the fence (spec 13): today the sandbox
+            # fence is the only one whose grants hold Bash
+            self._confine(u)
         if r.fence == "read":
             u.cwd = self.target
             u.key_extra = "target:%s" % self._fingerprint()
@@ -716,6 +727,34 @@ class Workflow:
             self._converged = str(reason)
 
     # ------------------------------------------------------------ sandboxes and commands
+    def _confine(self, u):
+        """Scope one Bash unit's edit grants and hand it the sandbox settings block
+        (spec 13): fences.confine_probe says whether THIS host can confine, once per run,
+        on the first unit whose grants include Bash -- the answer is memoised, its reason
+        kept on the Workflow, and the first such unit says it once on stderr. A host that
+        cannot confine still gets the scoped grants and the deny rules (its Bash runs
+        unsandboxed, and its Edit/Write grant covers only sandboxes/<unit>);
+        report.md's `bash not confined` line is the runner's append. The toolset keeps
+        Edit/Write: the tools stay available, only the GRANT is scoped. The scoped grant
+        changes u.grants, and the grants ride in the cache key: sandbox-fence keys move
+        once. A --check dry run probes nothing (the reason is written, not probed) and its
+        units spawn nothing, so this writes no file."""
+        if not self._confine_probed:
+            self._confine_probed = True
+            if self.check is not None:
+                # the dry run reports "not probed", says nothing on stderr and writes
+                # nothing: its run folder is a temp one that would fail the TMPDIR rule
+                self._confine_state = self.confine_reason = "not probed (--check)"
+            else:
+                self._confine_state = fences.confine_probe(str(self.run_dir))
+                if self._confine_state is not None:
+                    self.confine_reason = self._confine_state
+                    print("swarm: bash not confined: %s" % self._confine_state,
+                          file=sys.stderr)
+        u.grants = fences.scoped_grants(u.grants, str(self.run_dir), u.name)
+        u.settings_extra = fences.confine_settings(
+            str(self.run_dir), u.name, sandbox=self._confine_state is None)
+
     def _fingerprint(self):
         if self._target_fp is None:
             if self.check is not None or self.target is None:
