@@ -20,9 +20,10 @@ and registration cannot race a relay iteration):
 * ADMISSION, per sender per phase: at most ``share_max()``
   (``QWEN_SHARE_MAX``, default 3, clamped 0..5, non-integer -> 3) distinct
   findings; a finding is admitted only when it is 1..1500 characters after
-  strip, its paths are at most 10 strings of at most 200 characters, and
-  neither the finding nor any path imitates a note header
-  (``notes.imitates_header``). An admitted finding lands as one line in
+  strip, its paths are at most 10 strings of at most 200 characters that each
+  hold one line and no control or format character
+  (``notes.path_on_one_line``), and neither the finding nor any path imitates
+  a note header (``notes.imitates_header``). An admitted finding lands as one line in
   ``RUN/msg/_phases/<pid>/findings.jsonl`` (``msgdir.findings_append``) with
   {"id","sender","role","t","text","paths"}; the id is
   ``notes.new_note_id()``-shaped. Drops log ``share_dropped`` with a reason:
@@ -41,11 +42,13 @@ and registration cannot race a relay iteration):
   retry attempt gets the backlog again under a fresh budget, skipping every
   finding still pending in its inbox ``new/`` (the relay tracks its own
   ``note_id -> finding id`` map) or already queued in THIS attempt.
-* Questions are addressed ``"<run_id>/<unit>"``. Without ``asks_ready`` the
-  question is dropped ``no_listener``; otherwise ``asks.admit_question``
-  decides, and a ``run_limit``/``no_listener`` refusal answers the unit with
-  a harness note (``open_question`` sends nothing). The ``close()`` drain
-  drops what is left as ``run_ended`` instead of admitting it (spec 12.3).
+* Questions are addressed ``"<run_id>/<unit>"``. A question read from a unit
+  that no longer runs is dropped ``unit_ended`` (nobody is left to answer
+  back); without ``asks_ready`` the question is dropped ``no_listener``;
+  otherwise ``asks.admit_question`` decides, and a ``run_limit``/``no_listener``
+  refusal answers the unit with a harness note (``open_question`` sends
+  nothing). The ``close()`` drain drops what is left as ``run_ended`` instead
+  of admitting it (spec 12.3).
 
 ``start_phase(pid)`` (re)loads a phase from disk -- its findings, every
 sender's admitted count and its seen-text hashes -- so a resumed run keeps
@@ -239,15 +242,19 @@ class RunRelay:
         attempt number resets it; a repeat for the CURRENT attempt is
         idempotent), the unit runs again, and every finding of its phase from
         another sender that is neither pending in its inbox ``new/`` nor
-        already queued in THIS attempt is re-queued (spec 12.5)."""
+        already queued in THIS attempt is re-queued (spec 12.5). The new
+        attempt's budget starts at the number of our share notes still pending
+        in the unit's ``new/``: they already spent delivery on this receiver,
+        and a fresh cap must count them."""
         with self._lock:
             u = self._units.get(unit)
             if u is None:
                 return
             attempt = int(attempt)
             if attempt != u["attempt"]:
+                pending = len(self._pending(u))
                 u["attempt"] = attempt
-                u["budget"] = 0
+                u["budget"] = pending
                 u["delivered"] = set()
             u["running"] = True
             u["rescan"] = False
@@ -366,7 +373,8 @@ class RunRelay:
                 or not isinstance(paths, list)
                 or len(paths) > notes.MAX_PATHS
                 or any(not isinstance(p, str)
-                       or len(p) > notes.MAX_PATH_CHARS for p in paths)
+                       or len(p) > notes.MAX_PATH_CHARS
+                       or not notes.path_on_one_line(p) for p in paths)
                 or not 1 <= len(finding.strip()) <= FINDING_MAX_CHARS
                 or notes.imitates_header(finding)
                 or any(notes.imitates_header(p) for p in paths)):
@@ -414,6 +422,13 @@ class RunRelay:
             asks.drop_question(self._run_dir, address, u["M"], rec,
                                "run_ended")    # passes True; every poll_once
             return                             # (then or later) admits
+        if not u["running"]:
+            # the unit has ended: a question it planted on its way out (or a
+            # late file a poll still finds) has no asker left to answer back
+            # to -- never admitted, only dropped
+            asks.drop_question(self._run_dir, address, u["M"], rec,
+                               "unit_ended")
+            return
         if not self._asks_ready:
             asks.drop_question(self._run_dir, address, u["M"], rec,
                                "no_listener")
@@ -550,7 +565,9 @@ def _relay_records(run_dir):
     except OSError:
         return []
     out = []
-    for raw in data.decode("utf-8", "replace").splitlines():
+    # split on b"\\n" alone (the findings_read rule): one record is one line, and
+    # a text carrying an unescaped U+2028/U+2029/U+0085 survives the read whole
+    for raw in data.split(b"\n"):
         raw = raw.strip()
         if not raw:
             continue
@@ -615,7 +632,8 @@ def shared_findings_lines(run_dir):
             lines.extend("> " + one
                          for one in notes._strip_controls(text).split("\n"))
             paths = f.get("paths")
-            paths = [notes._strip_controls(p) for p in paths if isinstance(p, str)] \
+            paths = [notes._strip_controls(notes._spaces_for_breaks(p))
+                     for p in paths if isinstance(p, str)] \
                 if isinstance(paths, (list, tuple)) else []
             if paths:
                 lines.append("Paths: %s" % ", ".join(paths))

@@ -87,7 +87,8 @@ def test_confine_settings_shape(tmp_path):
     run.mkdir(parents=True)
     R = os.path.realpath(str(run))
     cfg = fences.confine_settings(str(run), "u1")
-    assert cfg["sandbox"] == {"enabled": True, "allowUnsandboxedCommands": False,
+    assert cfg["sandbox"] == {"enabled": True, "failIfUnavailable": True,
+                              "allowUnsandboxedCommands": False,
                               "autoAllowBashIfSandboxed": True}
     assert cfg["permissions"] == {"deny": _deny_list(R)}
     assert list(cfg) == ["sandbox", "permissions"]
@@ -166,7 +167,8 @@ def test_settings_merged_into_one_file(tmp_path, fake_claude):
     settings = test_cli.flag(argv, "--settings")
     assert settings
     cfg = json.loads(pathlib.Path(test_cli.same_path(settings)).read_text(encoding="utf-8"))
-    assert cfg["sandbox"] == {"enabled": True, "allowUnsandboxedCommands": False,
+    assert cfg["sandbox"] == {"enabled": True, "failIfUnavailable": True,
+                              "allowUnsandboxedCommands": False,
                               "autoAllowBashIfSandboxed": True}
     assert cfg["permissions"]["deny"] == conf["permissions"]["deny"]
     hooks = cfg.get("hooks")

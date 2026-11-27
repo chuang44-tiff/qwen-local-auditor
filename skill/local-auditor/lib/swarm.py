@@ -27,13 +27,16 @@ through the shared console.
 """
 import contextlib
 import hashlib
+import itertools
 import json
 import os
 import pathlib
 import queue
 import re
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -254,6 +257,104 @@ def reason_line(text, default=""):
     return default
 
 
+def _relay_role(stem):
+    """The role a unit registers with the share relay (lib/share_relay.py): the
+    role file's stem shaped to always match notes.ROLE_RE -- lowercased, every
+    character outside [a-z0-9_-] replaced by `_`, a leading non-letter prefixed
+    with `r`, cut to 32 characters. A built-in role name (already lowercase and
+    plain) comes back unchanged; `Prober.v2` registers as `prober_v2` so its
+    share notes always pass the reader's role validation."""
+    role = re.sub(r"[^a-z0-9_-]", "_", (stem or "").lower())
+    if not role or not ("a" <= role[0] <= "z"):
+        role = "r" + role
+    return role[:32]
+
+
+# The private Claude temp dir of a confined unit (spec 13, run_unit): its prefix,
+# and the age past which a leftover of an interrupted run is swept at swarm start.
+_PRIVATE_TMP_PREFIX = "qla-u-"
+_PRIVATE_TMP_MAX_AGE = 48 * 3600     # seconds; younger dirs may belong to a live unit
+
+
+def _private_tmp_base():
+    """Where a confined unit's private Claude temp dir is made (and where the
+    run-start sweep looks): /tmp when it is a writable directory, the system temp
+    folder otherwise. The path must stay SHORT -- the sandbox's bridge sockets fail
+    on long ones (spec 13)."""
+    return "/tmp" if (os.path.isdir("/tmp") and os.access("/tmp", os.W_OK)) \
+        else tempfile.gettempdir()
+
+
+def _sweep_private_tmps():
+    """Remove the private Claude temp dirs a killed confined unit left behind: every
+    `_PRIVATE_TMP_PREFIX` DIRECTORY in the base whose mtime is older than
+    _PRIVATE_TMP_MAX_AGE and that the current uid owns (the ownership check is
+    POSIX's; Windows has none here). Best effort, and no name outside the prefix
+    is ever touched."""
+    base = _private_tmp_base()
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return
+    cutoff = time.time() - _PRIVATE_TMP_MAX_AGE
+    for name in names:
+        if not name.startswith(_PRIVATE_TMP_PREFIX):
+            continue
+        path = os.path.join(base, name)
+        try:
+            if not os.path.isdir(path):
+                continue
+            st = os.stat(path)
+        except OSError:
+            continue
+        if st.st_mtime >= cutoff:
+            continue                                   # young: some unit is using it
+        if os.name == "posix" and st.st_uid != os.getuid():
+            continue                                   # not ours to remove
+        shutil.rmtree(path, ignore_errors=True)
+
+
+_SETTINGS_SEQ = itertools.count()
+_SW_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) \
+    | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _write_settings_file(path, blob):
+    """Land the confinement settings block atomically at 0600: a unique tmp in the
+    destination's own directory written O_EXCL|O_NOFOLLOW, then os.replace'd onto
+    the target -- which REPLACES a planted symlink at the path, never follows it
+    (rename over the symlink itself; msgdir.safe_write's pattern without its
+    refusal of a symlinked target, because the file belongs to the run and must
+    overwrite whatever sits there). The tmp is 0600 from creation (the umask can
+    only strip from it) and the mode survives the rename: the settings a unit
+    could read are never world- or sibling-readable."""
+    parent = os.path.dirname(path) or "."
+    tmp = os.path.join(parent, ".%s.%d.%d.tmp" % (os.path.basename(path),
+                                                  os.getpid(), next(_SETTINGS_SEQ)))
+    fd = os.open(tmp, _SW_FLAGS, 0o600)
+    closed = False
+    try:
+        os.write(fd, blob)
+    except OSError:
+        # the fd closes BEFORE the unlink: Windows cannot unlink a file an open
+        # handle still names, so the failed tmp would leak in the run folder
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        closed = True
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    finally:
+        if not closed:
+            os.close(fd)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 class Swarm:
     def __init__(self, agent_cmd, run_dir, seats, timeout, backoff=30,
                  max_unit_seconds=MAX_UNIT_SECONDS, deadline=None):
@@ -267,6 +368,11 @@ class Swarm:
         self.deadline = deadline
         self.agents_dir = self.run_dir / "agents"
         self.agents_dir.mkdir(parents=True, exist_ok=True)
+        # a confined unit killed mid-run left its private Claude temp dir behind
+        # (spec 13, run_unit): the stale ones go before this run's units start,
+        # once per run. Best effort -- a sweep that cannot run never fails a run.
+        with contextlib.suppress(Exception):
+            _sweep_private_tmps()
         # where each unit's activity lines go (lib/watch_hook.py, one file per unit name)
         # for the watch page. Only the folder, never the file: it is made by run_unit, and
         # only for a run the page actually knows about -- a swarm that nobody is watching
@@ -329,12 +435,10 @@ class Swarm:
             sfile = self.agents_dir / ("%s.settings.json" % u.name)
             blob = json.dumps(u.settings_extra, ensure_ascii=False,
                               indent=1).encode("utf-8")
-            # created 0600 outright (the umask can only strip from it): like every file
-            # the run leaves, the settings a unit could read are not world- or
-            # sibling-readable
-            fd = os.open(str(sfile), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(blob)
+            # landed through a 0600 tmp + os.replace (like every file the run
+            # leaves, not world- or sibling-readable): a symlink planted at the
+            # path is replaced, never followed
+            _write_settings_file(str(sfile), blob)
             argv += ["--settings-extra", str(sfile)]
         # always explicit, "off" included: the child reads the config file on its own and
         # must not find a default the launch did not choose (a skipped config value would
@@ -586,8 +690,9 @@ class Swarm:
             candidate = msgdir.unit_msgdir(str(self.run_dir), u.name)
             try:
                 msgdir.init_msgdir(candidate)
-                self.relay.register(u.name, pathlib.Path(u.role_file).stem,
-                                    unit_inbox, pid=u.share_phase)
+                self.relay.register(u.name, _relay_role(
+                    pathlib.Path(u.role_file).stem), unit_inbox,
+                    pid=u.share_phase)
                 msg_dir = candidate
             except Exception:
                 msg_dir = None
@@ -634,6 +739,25 @@ class Swarm:
                 extra["QWEN_MSG_PHASE"] = u.share_phase
                 tools.append("share")
             extra["QWEN_MSG_TOOLS"] = ",".join(tools)
+        # A confined unit (its settings carry the sandbox block, spec 13) gets a
+        # Claude temp dir of its own: the Bash sandbox always lets a sandboxed
+        # command write Claude's per-user temp dir, so naming a private one in
+        # CLAUDE_CODE_TMPDIR moves that writable dir inside the unit's own -- and
+        # the default one turns read-only to the unit. It is made under _private_tmp_base()
+        # with the sweep's prefix, and CLAUDE_CODE_TMPDIR names its REALPATH (on
+        # macOS /tmp is a symlink to /private/tmp: the unit gets the path the
+        # sandbox really sees). Never TMPDIR itself, never the cache key, and a
+        # repair call gets the same dir (it rides `extra`, which env_repair keeps).
+        private_tmp = None
+        tmp_error = None
+        if u.settings_extra and "sandbox" in u.settings_extra:
+            try:
+                private_tmp = os.path.realpath(tempfile.mkdtemp(
+                    prefix=_PRIVATE_TMP_PREFIX, dir=_private_tmp_base()))
+            except OSError as e:
+                tmp_error = e
+        if private_tmp is not None:
+            extra["CLAUDE_CODE_TMPDIR"] = private_tmp
         env = None if not extra else dict(os.environ, **extra)
         # REPAIR runs get no inbox (spec 4.6) and none of the messaging env (the matrix's
         # repair row: no share, no ask_main, no reply -- the repair only re-asks for an
@@ -645,6 +769,22 @@ class Swarm:
         env_repair = None if not _repair_extra else dict(os.environ, **_repair_extra)
         set_up = False
         try:
+            if tmp_error is not None:
+                # a confined unit that could not get its private Claude temp dir
+                # never spawns: sharing the per-user one leaves it unconfined (the
+                # sandbox always lets a sandboxed command write there, spec 13).
+                # It fails the way a unit that cannot start fails -- once, with no
+                # retry -- and the finally below closes its inbox and emits the
+                # ok: false unit_done. Stopped mid-anything is an interruption,
+                # not a drop (the loop's failure path judges it the same way).
+                res["why"] = "private temp dir could not be made: %s" % tmp_error
+                if self._stopping.is_set():
+                    status = "interrupted"
+                else:
+                    with self._lock:
+                        self.dropped += 1
+                    self._event("unit_dropped", u, why=res["why"])
+                return res
             (self.agents_dir / u.name).mkdir(parents=True, exist_ok=True)
             if u.setup is not None:
                 u.setup()
@@ -805,6 +945,10 @@ class Swarm:
             if set_up and u.teardown is not None:
                 with contextlib.suppress(Exception):     # cleanup must not mask the result
                     u.teardown()
+            if private_tmp is not None:
+                # the confined unit's private Claude temp dir goes with the unit
+                # (every attempt and the repair ran under this same dir)
+                shutil.rmtree(private_tmp, ignore_errors=True)
             # Tokens already spent by this unit reach self.tokens on every exit path,
             # including one where u.parse raises a non-ValueError. Its log line reports
             # only the last attempt — the earlier ones wrote their own retry lines, so

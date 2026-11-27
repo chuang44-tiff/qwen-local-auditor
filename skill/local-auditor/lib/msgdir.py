@@ -629,7 +629,9 @@ def findings_read(run_dir: str, pid: str) -> list[dict]:
     except OSError:
         return []
     out = []
-    for raw in data.decode("utf-8", "replace").splitlines():
+    # split on b"\\n" alone, never str.splitlines(): a finding may carry an
+    # unescaped U+2028/U+2029/U+0085 and must survive the read whole
+    for raw in data.split(b"\n"):
         raw = raw.strip()
         if not raw:
             continue

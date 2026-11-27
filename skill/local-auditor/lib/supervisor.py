@@ -1003,7 +1003,9 @@ def _close_run_inbox(inbox):
     place `.closed` is written and it is idempotent, so every reporting exit, the
     finally and the os._exit path all call it and only the first one sweeps. The
     question relay goes FIRST (spec 12.3): it is stopped, joined and drained before
-    the sweep, so no pass queues a note the closed inbox will never deliver."""
+    the sweep, so no pass queues a note the closed inbox will never deliver. The
+    loop's msg dir (RUN/msg, beside the inbox) has its stale replies/*.tmp swept
+    with the run too (spec 12.2); errors there are ignored."""
     _stop_relay()
     if inbox is None:
         return
@@ -1011,6 +1013,11 @@ def _close_run_inbox(inbox):
         notes.close_inbox(inbox, "loop_ended")
     except (notes.NotesError, OSError):
         pass
+    try:
+        msgdir.sweep_stale_tmp(msgdir.loop_msgdir(
+            os.path.dirname(os.path.abspath(str(inbox)))))
+    except Exception:
+        pass                                           # housekeeping, never the loop
 
 
 def _steering_rows(inbox):

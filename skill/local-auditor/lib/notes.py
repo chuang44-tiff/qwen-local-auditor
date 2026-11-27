@@ -337,6 +337,14 @@ def validate_note_body(body, stem):
                     raise NotesError("share path %r is not a string of at most %d "
                                      "characters" % (path, MAX_PATH_CHARS),
                                      EXIT_UNAVAILABLE)
+                if not path:
+                    # str.splitlines() of "" is [] -- path_on_one_line's one-line
+                    # rule is not the refusal an empty path deserves
+                    raise NotesError("a path may not be empty", EXIT_UNAVAILABLE)
+                if not path_on_one_line(path):
+                    raise NotesError("share path %r spans lines or carries a "
+                                     "control character" % (path,),
+                                     EXIT_UNAVAILABLE)
     reply_to = body.get("reply_to")
     if reply_to is not None and (not isinstance(reply_to, str)
                                  or not NOTE_ID_RE.fullmatch(reply_to)):
@@ -353,6 +361,32 @@ def _strip_controls(s):
     first, so a share's quoting sees every line a reader would see."""
     s = "".join("\n" if unicodedata.category(ch) in ("Zl", "Zp") else ch for ch in s)
     return "".join(ch for ch in s if ch == "\n" or unicodedata.category(ch) != "Cc")
+
+
+_LINE_BREAKS = ("\r", "\n", "\N{LINE SEPARATOR}", "\N{PARAGRAPH SEPARATOR}",
+                "\u0085")
+
+
+def _spaces_for_breaks(s):
+    """Every line break becomes a space: the renderer's backstop for a field the
+    join puts on ONE line (a share's paths). The tool, the relay and the reader
+    validator refuse a path that spans lines; a body that bypasses them still
+    renders with every path on its "> " line."""
+    for ch in _LINE_BREAKS:
+        s = s.replace(ch, " ")
+    return s
+
+
+def path_on_one_line(path):
+    """True when a share `paths` entry can ride the one rendered line it is joined
+    onto: exactly one line by str.splitlines(), and no character of the control or
+    format categories (Cc, Cf, Zl, Zp). The share tool, the relay and
+    validate_note_body refuse anything else, so no path can carry its own header
+    onto a line of the quoted block or break the JSON-RPC line framing."""
+    if len(path.splitlines()) != 1:
+        return False
+    return all(unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp")
+               for ch in path)
 
 
 def _field(body, key):
@@ -401,8 +435,8 @@ def render_note(body, now_t=None):
     lines.extend("> " + line for line in text.split("\n"))
     paths = body.get("paths")
     if isinstance(paths, (list, tuple)) and paths:
-        quoted = [_strip_controls(path) if isinstance(path, str) else ""
-                  for path in paths]
+        quoted = [_strip_controls(_spaces_for_breaks(path))
+                  if isinstance(path, str) else "" for path in paths]
         lines.append("> paths: %s" % ", ".join(quoted))
     return "\n".join(lines)
 
@@ -842,10 +876,15 @@ def _read_text_source(spec):
     return data.decode("utf-8", "replace")
 
 
-def _parse_send(argv):
+def _parse_send(argv, allow_trailing_wait=False):
     """The K9 grammar, hand-rolled so every wrong shape exits 2 with a reason:
     ADDRESS, then options (--wait SECONDS, -f FILE|-), then at most one TEXT (a `--`
-    lets TEXT start with a dash, and options must come before it)."""
+    lets TEXT start with a dash, and options must come before it). With
+    `allow_trailing_wait` (the --ask path, spec 4.3) --wait SECONDS is accepted
+    after TEXT as well -- even after the `--`, where an option otherwise never
+    parses: when the LAST two tokens of argv are `--wait` and an integer they are
+    the wait (`--ask ADDR -- -TEXT --wait 30` asks, and waits). A non-integer there
+    is TEXT, not a broken wait; every other option still has to come before it."""
     wait = None
     file_spec = None
     positional = []
@@ -858,7 +897,7 @@ def _parse_send(argv):
         elif token == "--":
             rest = True
         elif token == "--wait":
-            if len(positional) > 1:              # options must come before TEXT (K9)
+            if len(positional) > 1 and not allow_trailing_wait:
                 raise NotesError("--wait must come before TEXT", EXIT_USAGE)
             if i + 1 >= len(argv) or wait is not None:
                 raise NotesError("--wait needs its seconds, once", EXIT_USAGE)
@@ -870,7 +909,8 @@ def _parse_send(argv):
                 raise NotesError("--wait SECONDS must be 1..3600", EXIT_USAGE)
             i += 1
         elif token.startswith("--wait="):
-            return _parse_send(argv[:i] + ["--wait", token[len("--wait="):]] + argv[i + 1:])
+            return _parse_send(argv[:i] + ["--wait", token[len("--wait="):]] + argv[i + 1:],
+                               allow_trailing_wait)
         elif token == "-f" or token.startswith("-f") and len(token) > 2:
             if len(positional) > 1:              # options must come before TEXT (K9)
                 raise NotesError("-f must come before TEXT", EXIT_USAGE)
@@ -889,6 +929,23 @@ def _parse_send(argv):
         else:
             positional.append(token)
         i += 1
+    if allow_trailing_wait and len(positional) >= 2 and positional[-2] == "--wait":
+        # the tail's --wait SECONDS, whatever the `--` before it: the LAST two
+        # positionals (which are the last two argv tokens) are the wait when the
+        # second is --wait and the last is an integer -- a non-integer there leaves
+        # both as TEXT. The same rules the in-place option enforces, including
+        # that a second --wait is a second one here too.
+        try:
+            trailing_wait = int(positional[-1])
+        except ValueError:
+            trailing_wait = None
+        if trailing_wait is not None:
+            if wait is not None:
+                raise NotesError("--wait needs its seconds, once", EXIT_USAGE)
+            if not 1 <= trailing_wait <= 3600:
+                raise NotesError("--wait SECONDS must be 1..3600", EXIT_USAGE)
+            wait = trailing_wait
+            positional = positional[:-2]
     if not 1 <= len(positional) <= 2:
         raise NotesError("ADDRESS and at most one TEXT after the options "
                          "(got %d positional(s))" % len(positional), EXIT_USAGE)
@@ -1055,6 +1112,13 @@ def _wait_for_reply(msg_dir, inbox, address, note_id, seconds):
             _print_reply(address, reply)
             return EXIT_OK
         if is_closed(inbox):
+            # The agent can publish its reply and close its inbox in one breath:
+            # the read above may have caught the dir a moment before the reply
+            # landed, so look once more before reporting the end without an answer.
+            reply = msgdir.read_reply(msg_dir, note_id)
+            if reply is not None:
+                _print_reply(address, reply)
+                return EXIT_OK
             sys.stderr.write("the agent ended without answering\n")
             return EXIT_UNDELIVERED
         if time.time() >= deadline:
@@ -1066,8 +1130,9 @@ def _wait_for_reply(msg_dir, inbox, address, note_id, seconds):
 def cmd_ask(argv):
     """The `--ask` mode (11.2): `send`'s grammar and refusals (require_running=True),
     but the note is kind `ask` and the wait is for the agent's `reply` tool answer
-    in its msg dir -- default 600 s, no `--wait` given."""
-    address, wait, text = _parse_send(argv)
+    in its msg dir -- default 600 s, no `--wait` given. `--wait SECONDS` is also
+    accepted after TEXT here (4.3); `--send` keeps its before-TEXT-only grammar."""
+    address, wait, text = _parse_send(argv, allow_trailing_wait=True)
     if not valid_address(address):
         raise NotesError("malformed address: %r" % address, EXIT_USAGE)
     inbox, pointer, unit = resolve_address(address, require_running=True)

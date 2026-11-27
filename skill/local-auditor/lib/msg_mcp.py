@@ -43,7 +43,7 @@ if __package__ in (None, ""):
 
 from lib import asks, msgdir  # noqa: E402
 from lib.notes import (MAX_PATH_CHARS, MAX_PATHS, append_jsonl,  # noqa: E402
-                       imitates_header)
+                       imitates_header, path_on_one_line)
 
 SERVER_NAME = "qla_msg"
 TOOL_ORDER = ("share", "reply", "ask_main")
@@ -182,9 +182,15 @@ def _tool_share(args, env, M):
     if len(paths) > MAX_PATHS:
         raise Refused("attach at most %d paths (got %d)" % (MAX_PATHS, len(paths)))
     for p in paths:
+        if not p:
+            # an empty name is no path to attach (and str.splitlines() of ""
+            # would fail path_on_one_line's one-line rule for the wrong reason)
+            raise Refused("a path may not be empty")
         if len(p) > MAX_PATH_CHARS:
             raise Refused("a path is %d characters; the limit is %d"
                           % (len(p), MAX_PATH_CHARS))
+        if not path_on_one_line(p):
+            raise Refused("a path may not hold a line break or a control character")
     if imitates_header(finding) or any(imitates_header(p) for p in paths):
         raise Refused(NO_HEADER)
     phase = env.get("QWEN_MSG_PHASE") or ""
@@ -204,11 +210,17 @@ def _tool_share(args, env, M):
     digest = hashlib.sha256(finding.encode("utf-8")).hexdigest()
     if digest in seen:
         raise Refused("you already shared this finding")
-    note_id = msgdir.write_out(M, "share",
-                               {"phase": phase, "finding": finding, "paths": paths})
+    # the state first (spec 11.4): the count and the duplicate hash are this
+    # sender's durable budget, and the share becomes visible only once they are
+    # on disk -- a crash after write_out must never leave a finding in the
+    # outbox that its sender's state does not know about. A state-save failure
+    # is an error that writes nothing; a write_out failure after the save
+    # reports the error as today.
     counts[phase] = count + 1
     seen_map[phase] = seen + [digest]
     msgdir.save_share_state(M, {"count": counts, "seen_texts": seen_map})
+    note_id = msgdir.write_out(M, "share",
+                               {"phase": phase, "finding": finding, "paths": paths})
     _log(env, M, "share", {"share_id": note_id, "phase": phase,
                            "len": len(finding), "paths": len(paths)})
     return SHARE_QUEUED

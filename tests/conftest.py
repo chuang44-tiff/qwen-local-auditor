@@ -220,6 +220,16 @@ def _no_ask_lease_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_fake_agent_script_leak():
+    """test_supervisor.script() names its step file in os.environ (FAKE_AGENT_SCRIPT)
+    for the spawned fake to inherit: the entry belongs to the test that set it and
+    goes after every test, so no later test's fake agent ever reads a finished
+    run's script."""
+    yield
+    os.environ.pop("FAKE_AGENT_SCRIPT", None)
+
+
+@pytest.fixture(autouse=True)
 def _claude_probe_off(monkeypatch):
     """The claude availability probe (claude_check.probe, and with it ui-test's run-start
     notice) never runs against this machine's real claude or network from a test. Probe

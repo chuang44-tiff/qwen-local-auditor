@@ -2440,6 +2440,20 @@ except Exception as e:
     sys.stderr.write("watch: the inbox could not be closed (%s)\n" % e)
 PY
   fi
+  # spec 12.2 run-end sweep, the same ownership rule as the inbox close above: a
+  # crashed reply publish left a replies/.<id>.<pid>.tmp in this run's own message
+  # dir; the stale ones (older than 1 h) go with the run. A message dir a parent
+  # handed down is that parent's to sweep; best effort either way.
+  if [ "${INBOX_OWN:-0}" = 1 ] && [ "${MSG_DIR_READY:-0}" = 1 ] && [ -n "${QWEN_MSG_DIR:-}" ]; then
+    PYTHONPATH="$(native_path "$SKILL_DIR")" "$QA_PY" - "$QWEN_MSG_DIR" <<'PY' || true
+import sys
+try:
+    from lib import msgdir
+    msgdir.sweep_stale_tmp(sys.argv[1])
+except Exception:
+    pass
+PY
+  fi
   # only a directory this run created: with --advisor-state the supervisor owns it and
   # every other round is still using it. (ADVISOR_DIR_OWN guards the second, unconditional
   # `trap cleanup EXIT` further down, which fires even when the mktemp branch never ran.)
@@ -3605,9 +3619,13 @@ fi
 # unstreamed or interactive run gets today's argv byte for byte and nothing on
 # disk beyond the run's own folder.
 # A failure here costs the run only qla_msg: one warning on stderr, no server.
+# Without an explicit QWEN_MSG_DIR from a parent there is exactly one derivable
+# shape -- the folder beside the inbox whose .inbox suffix becomes .msg -- so an
+# inbox named otherwise runs inbox-only: no server, no mcp__qla_msg__ grants.
 MSG_MCP=""
 MSG_DIR_READY=0
-if [ "${QWEN_STREAM:-1}" != 0 ] && [ -n "${QWEN_INBOX:-}" ] && [ "$INTERACTIVE" -eq 0 ]; then
+if [ "${QWEN_STREAM:-1}" != 0 ] && [ -n "${QWEN_INBOX:-}" ] && [ "$INTERACTIVE" -eq 0 ] \
+   && { [ -n "${QWEN_MSG_DIR:-}" ] || [ "$QWEN_INBOX" != "${QWEN_INBOX%.inbox}" ]; }; then
   # A real run installs the cleanup trap here: this block can die (the clash below,
   # a failed mktemp) AFTER the watch registration -- the finished pointer is the
   # same cleanup the runner's own trap at the bottom takes care of. A --dry-run

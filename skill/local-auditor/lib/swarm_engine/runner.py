@@ -27,7 +27,7 @@ import time
 import traceback
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from lib import asks, search_mcp, share_relay, swarm, watch  # noqa: E402
+from lib import asks, msgdir, search_mcp, share_relay, swarm, watch  # noqa: E402
 from lib.swarm_engine import api, events, fences, manifest, runlock, steps  # noqa: E402
 
 EXIT_OK, EXIT_USAGE, EXIT_PREFLIGHT, EXIT_PARTIAL, EXIT_EMPTY = 0, 2, 3, 4, 5
@@ -1136,6 +1136,16 @@ def _start(o, m, mod, cfg, run, seats, web_seats, max_unit, new, locked=False):
                     _append_confine_line(wf.report_path, wf.confine_reason)
                 except Exception as e:
                     err("the report's confinement line could not be written (%s)" % e)
+            # spec 12.2 run-end sweep: a crashed reply publish leaves a
+            # replies/.<id>.<pid>.tmp in a unit's msg dir; the stale ones
+            # (older than 1 h) go with the run. Best effort, never the run.
+            try:
+                units_dir = run / msgdir.MSG_DIR / msgdir.UNITS_DIR
+                for name in sorted(os.listdir(str(units_dir))):
+                    with contextlib.suppress(Exception):
+                        msgdir.sweep_stale_tmp(str(units_dir / name))
+            except Exception:
+                pass                                  # never the run's problem
             try:
                 from lib import supervisor            # the one .ended stamp rule
                 supervisor._write_ended(str(run))
@@ -1156,8 +1166,10 @@ def _append_shared_findings(run, report_path):
     `## Shared findings` section with one entry per admitted finding (the sender,
     its phase, its receivers off the relay's own log, the finding quoted line by
     line, its paths), then the ask-main rows -- the questions line among them
-    (lib/supervisor.py, the until-done report's own rows). A run with no findings
-    and no ask events gets NO section at all. Written as wf.report writes: the
+    (lib/supervisor.py, the until-done report's own rows). The heading appears
+    ONLY with at least one finding; questions run by themselves, one blank line
+    ahead, when there were none. A run with no findings and no ask events gets
+    NO section at all. Written as wf.report writes: the
     bytes a text-mode write produced (newlines as os.linesep), atomically; the
     workflow's own text stays byte-for-byte in front."""
     entries = share_relay.shared_findings_lines(str(run))
@@ -1165,9 +1177,11 @@ def _append_shared_findings(run, report_path):
     ask_rows = supervisor._ask_lines(str(run))
     if not entries and not ask_rows:
         return
-    lines = ["", "## Shared findings", ""] + list(entries)
-    if ask_rows:
-        lines += [""] + list(ask_rows)
+    lines = []
+    if entries:                                        # the heading belongs to
+        lines = ["", "## Shared findings", ""] + list(entries)   # the findings
+    if ask_rows:                                       # only: questions alone
+        lines += [""] + list(ask_rows)                 # need no heading
     blob = ("\n".join(lines) + "\n").replace("\n", os.linesep).encode("utf-8")
     path = pathlib.Path(report_path)
     with open(path, "rb") as fh:

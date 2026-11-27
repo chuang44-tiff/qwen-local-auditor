@@ -108,18 +108,34 @@ def needs_search(manifest):
 _DENY_DIRS = ("inbox", "msg", "asks", "agents")   # the run's coordination files
 
 
+def rule_path(path):
+    """The path part of a confinement rule: what sits between `Edit(` and `/**)`.
+    POSIX: the realpath with the rule grammar's absolute `//` prefix
+    (`/srv/run` -> `//srv/run`). Windows (os.name == "nt"): the launcher's
+    rule_path() form -- forward slashes, the lowercase drive letter without its
+    colon, the `//` prefix (`C:\\work\\run` -> `//c/work/run`)."""
+    p = os.path.realpath(str(path))
+    if os.name == "nt":
+        p = p.replace("\\", "/")
+        if len(p) > 2 and p[0].isalpha() and p[1] == ":":
+            p = p[0].lower() + p[2:]
+    return "//" + p.lstrip("/")
+
+
 def confine_settings(run_dir, unit, sandbox=True):
     """The Claude Code settings block a Bash unit's session merges into its ONE --settings
-    file (qwen-agent --settings-extra). `R` is the run folder's real path; every deny rule
-    is an `Edit(//...)` absolute rule for one of the run's coordination dirs, so a confined
-    unit edits none of them (`Write(...)` path rules do not match -- Edit covers both
-    tools). sandbox=False drops the sandbox block: the deny rules and, with them, the run
-    of a host that cannot confine. `unit` names whose unit the block belongs to (the
-    scoped grant for its sandboxes/<unit> folder comes from scoped_grants)."""
-    R = os.path.realpath(str(run_dir))
-    out = {"permissions": {"deny": ["Edit(/%s/%s/**)" % (R, d) for d in _DENY_DIRS]}}
+    file (qwen-agent --settings-extra). Every deny rule is an `Edit(<rule_path(R)>/...)`
+    absolute rule for one of the run's coordination dirs, so a confined unit edits none of
+    them (`Write(...)` path rules do not match -- Edit covers both tools). sandbox=False
+    drops the sandbox block: the deny rules and, with them, the run of a host that cannot
+    confine; failIfUnavailable makes a sandbox that cannot come up a refusal, never an
+    unsandboxed session (`unit` names whose unit the block belongs to -- the scoped grant
+    for its sandboxes/<unit> folder comes from scoped_grants)."""
+    R = rule_path(run_dir)
+    out = {"permissions": {"deny": ["Edit(%s/%s/**)" % (R, d) for d in _DENY_DIRS]}}
     if sandbox:
-        out = {"sandbox": {"enabled": True, "allowUnsandboxedCommands": False,
+        out = {"sandbox": {"enabled": True, "failIfUnavailable": True,
+                           "allowUnsandboxedCommands": False,
                            "autoAllowBashIfSandboxed": True},
                "permissions": out["permissions"]}
     return out
@@ -127,11 +143,13 @@ def confine_settings(run_dir, unit, sandbox=True):
 
 def scoped_grants(grants, run_dir, unit):
     """`grants` (a comma list) with every bare `Edit` and `Write` entry replaced by the
-    ONE rule `Edit(//<R without leading slash>/sandboxes/<unit>/**)` at the first of their
-    places; every other entry keeps its order. A list without Edit/Write is returned
-    unchanged. One Edit rule covers the Write tool too (spec 13)."""
-    R = os.path.realpath(str(run_dir))
-    rule = "Edit(/%s/sandboxes/%s/**)" % (R, unit)
+    ONE rule `Edit(<rule_path(R)>/sandboxes/<unit>/**)` at the first of their places;
+    every other entry keeps its order. A list without Edit/Write is returned unchanged.
+    One Edit rule covers the Write tool too (spec 13). The scoping happens on every
+    platform, Windows included (spec 13: deny rules and scoped grants only there): a
+    bare grant fails OPEN -- the Write tool then reaches anywhere no deny rule names --
+    while a rule spelled wrong fails CLOSED, so the rule is always the safer entry."""
+    rule = "Edit(%s/sandboxes/%s/**)" % (rule_path(run_dir), unit)
     out = []
     replaced = False
     for entry in (grants or "").split(","):
@@ -161,11 +179,12 @@ def _probe_run(argv):
 
 def confine_probe(run_dir):
     """Can this host confine a Bash unit of a run at `run_dir`? None = yes; else the
-    reason, checked in this order: no Bash sandbox on Windows (deny rules only there), a
-    run folder inside the temp folder (the sandbox always lets a unit write there, so a
-    note file written through TMPDIR is no longer confined), and on Linux the bwrap/socat
-    availability plus one sandboxed `true`. Called once per run, before the first confined
-    unit (api.Workflow); any other platform gets no sandbox."""
+    reason, checked in this order: no Bash sandbox on Windows (deny rules and scoped
+    grants only there), a run folder inside the temp folder (the sandbox always lets a
+    unit write there, so a note file written through TMPDIR is no longer confined), and
+    on Linux the bwrap/socat availability plus one sandboxed `true`. Called once per
+    run, before the first confined unit (api.Workflow); any other platform gets no
+    sandbox."""
     if os.name == "nt":
         return "no bash sandbox on this platform"
     R = os.path.realpath(str(run_dir))
@@ -179,9 +198,13 @@ def confine_probe(run_dir):
         # network-visible command: one missing, and the functional probe below would
         # only say what this line already knows (this host's bwrap has failed under
         # AppArmor userns limits before, which is why the probe runs one command).
+        # --unshare-net rides the probe because the network namespace is the step
+        # that has failed on hosts with userns limits: probing without it would
+        # call a host confining that cannot actually isolate the unit's network.
         if shutil.which("bwrap") is None or shutil.which("socat") is None:
             return "sandbox probe failed: bwrap or socat missing"
-        return _probe_run(["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "true"])
+        return _probe_run(["bwrap", "--ro-bind", "/", "/", "--dev", "/dev",
+                           "--unshare-net", "true"])
     if sys.platform == "darwin":
         return _probe_run(["sandbox-exec", "-p", "(version 1)(allow default)", "true"])
     return "no bash sandbox on this platform"
