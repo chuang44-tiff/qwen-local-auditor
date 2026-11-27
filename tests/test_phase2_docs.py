@@ -3,12 +3,15 @@ gain from shared findings pass share=True, reference/messaging.md carries every
 channel, and the two SKILL.md pages grew only within their budgets."""
 import ast
 import pathlib
-import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / "skill" / "local-auditor" / "lib" / "workflows"
 MESSAGING = ROOT / "skill" / "local-auditor" / "reference" / "messaging.md"
-BASE = "26f995f"
+# line counts of the two SKILL.md pages at the last release
+BASE_LINES = {
+    "skill/local-auditor/SKILL.md": 195,
+    "skill/local-swarm/SKILL.md": 199,
+}
 ALL_WFS = ("debug", "optimize", "research", "ui-test")
 OPTED_PHASES = ("probe", "implement", "fetch")
 
@@ -57,19 +60,12 @@ def test_messaging_doc_mentions():
         assert needle in text, needle
 
 
-def _base_lines(rel_path):
-    r = subprocess.run(["git", "show", "%s:%s" % (BASE, rel_path)], cwd=str(ROOT),
-                       capture_output=True)
-    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
-    return len(r.stdout.decode("utf-8").splitlines())
-
-
 def test_skill_docs_within_limits():
     for rel, limit, needles in (
             ("skill/local-auditor/SKILL.md", 4, ("--ask", "--answer")),
             ("skill/local-swarm/SKILL.md", 6, ("share", "messaging.md"))):
         cur = (ROOT / rel).read_text(encoding="utf-8")
-        grew = len(cur.splitlines()) - _base_lines(rel)
+        grew = len(cur.splitlines()) - BASE_LINES[rel]
         assert grew <= limit, "%s grew by %d lines (limit %d)" % (rel, grew, limit)
         for needle in needles:
             assert needle in cur, "%s never mentions %s" % (rel, needle)
