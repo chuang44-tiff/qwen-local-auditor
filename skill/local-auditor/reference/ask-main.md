@@ -22,7 +22,7 @@ the lease, the rescue call is skipped, and the report notes
 | 0 | an ask was claimed; its path is on stdout | start a helper subagent with the brief below and that path, then run `--next-ask` again |
 | 10 | `no ask yet`: the wait ran out, or the lease was released | run `--next-ask` again, or stop with `--next-ask ID --release` |
 | 11 | `run ended` | stop |
-| 3 | no such until-done run, or it runs with messaging off (`QWEN_STREAM=0`) | stop |
+| 3 | no such run, a run that holds no asks (a single-shot agent), or messaging off (`QWEN_STREAM=0`, so no `asks/` folder) | stop |
 | 2 | usage error | fix the command |
 
 `--wait SECONDS` (1..3600, default 3600) caps one wait. `qwen-agent --next-ask ID --release`
@@ -79,7 +79,7 @@ ends first.
 | exit | meaning |
 |---|---|
 | 0 | `amend queued` |
-| 2 | the file does not parse (an empty checklist counts), is over 256 KiB, has a `test` check in a run with no test command, or the command is wrong |
+| 2 | usage error (run id not 12 lowercase hex characters, missing or doubled `-f`, unknown option, unreadable file), or the file does not parse (an empty checklist counts; a `cmd` check that needs a shell, such as a leading `cd`, `export` or `NAME=`, or an unquoted `\|`, `;` or `>`), is over 256 KiB, or has a `test` check in a run with no test command |
 | 3 | the run has ended, its inbox is closed, or it has no amend folder |
 
 The loop rejects an amendment that is identical to the current task or no longer parses.
@@ -89,21 +89,26 @@ full under `## Checklist amendments`.
 
 ## Questions from agents
 
-A running agent can also ask the main session a question of its own (the `ask_main`
-tool). Question asks are `q<N>.md` files, and they arrive through the very same
+A running agent can also ask the main session a question of its own (the `ask_main` tool, when
+messaging is on): until-done coder rounds, and swarm or research units whose fence is not
+`search`, `web` or `browser`/`browser-probe` (a session that reads web pages or drives a browser
+never asks). Question asks are `q<N>.md` files, and they arrive through the very same
 `qwen-agent --next-ask ID` as failing-round asks: it claims whichever ask is older
 (a tie goes to the failing round) and prints its path. `--next-ask` covers until-done
 loops and swarm/research runs alike.
 
 Open the claimed file. It carries the question, the options the agent offered, and the
 one command that answers the asker directly: `qwen-agent --send <address> -f - <<'EOF'`.
-Answer with it — or don't answer: the agent was told to decide for itself and keep
-working, so an unanswered question blocks nothing.
+Answer with it — or don't answer: the agent was told to decide for itself and keep working, so an
+unanswered question never holds up the run. It does keep that agent from asking another until a
+note from you reaches it (a dropped question also frees it), so even a quick `--send` saying
+"decide yourself" lets it ask again.
 
 A question is never a failing round: `--amend` does not apply to `q<N>.md`. A run allows
-`QWEN_ASK_MAIN_MAX` questions in total (default 5); later ones are dropped and the agent
-is told to decide itself. The report counts them on the
-`questions: admitted N, dropped N, answered N` line.
+`QWEN_ASK_MAIN_MAX` questions in total (default 5, clamped to 0..20); later ones are dropped and
+the agent is told to decide itself. The report counts them on the
+`questions: admitted N, dropped N, answered N` line; `answered` counts questions you claimed
+with `--next-ask`, whether or not you then sent an answer.
 
 ## What this does not protect against
 
@@ -112,3 +117,10 @@ lease or an amendment: under `--probe` it has a shell in the sandbox, and in eve
 checks run repository code. The safeguards detect instead of prevent. Every amendment is
 printed and diffed in the report, the helper treats the ask as data and re-checks the failure
 itself, and every new file path refuses symlinks.
+
+Swarm and research units that run Bash are confined where the host can confine them, which keeps
+them from writing into the run's `inbox/`, `msg/`, `asks/` and `agents/` folders. Where it cannot
+(Windows, a run folder under the temp dir, no `bwrap` or `socat`), the unit keeps only the folder
+deny rules and its scoped file grants, the same forgery risk applies, and the run says
+`swarm: bash not confined: <reason>` on stderr and `bash not confined: <reason>` at the end of
+report.md (`reference/messaging.md`).

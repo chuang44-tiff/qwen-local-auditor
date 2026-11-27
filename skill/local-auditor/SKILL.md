@@ -36,9 +36,9 @@ They show which failure modes exist; the rates on your setup will differ.)
 qwen-agent --preflight-only
 ```
 
-Exit 0 means the server is up, a model is actually served (the configured one, or the
-only one), and a working python and `claude` were found by RUNNING them. Exit 3 means
-it is not usable — the message names what failed and lists the models that ARE served.
+Exit 0 means the server is up, a model is actually served (the configured one, or the only one), a working
+python was found by RUNNING it, and a `claude` binary is on `PATH`. Exit 3 means the server, key or model check
+failed (the message names what and lists the models that ARE served); 8 is a missing claude or python, 2 a bad flag.
 The endpoint lives in `~/.config/qwen-agent/config` (`QWEN_BASE_URL`, optionally
 `QWEN_MODEL`).
 
@@ -70,15 +70,15 @@ qwen-agent -r auditor -C <dir> -f brief.md -o out.md
   four switches at once with their refusals
   (`reference/qwen-agent.md`, "Depth: the default").
 
-Every `qwen-agent` or `qwen-swarm` run prints one more line, `watch: <url>`: the run's live
-page — phases with seat usage, agents with state and timings, the last events. The page shows
-names, roles, states and timings, the goal or title, the coder report's one-line stop reason
-and the events' why/attention text, and per agent the tool it is on right now with a trimmed
-INPUT (a path, a pattern, or the start of its command) — never prompts, transcripts, model
-reasoning or what a tool returned. Pass that link to the user when the run starts. The
-viewer keeps running between runs; run `python lib/watch.py stop` only when the user asks.
-`QWEN_WATCH_HOST` (e.g. your Tailscale address) and `QWEN_WATCH_PORT` move the page off its
-local-only default so another machine can view it; `QWEN_WATCH=0` switches the page off.
+Every foreground `qwen-agent` run (not `-w`, `--dry-run`, `--interactive`, `--preflight-only`, `--show-claude`)
+and every `qwen-swarm` run prints one more line, `watch: <url>`: the run's live page — phases with
+seat usage, agents with state and timings, the last events. The page shows names, roles, states and
+timings, the goal or title, the coder report's one-line stop reason and the events' why/attention text,
+and per agent the tool it is on right now with a trimmed INPUT (a path, a pattern, or the start of
+its command) — never prompts, transcripts, model reasoning or what a tool returned. Pass that link to
+the user when the run starts. The viewer keeps running between runs; run `python lib/watch.py stop`
+only when the user asks. `QWEN_WATCH_HOST` (e.g. your Tailscale address) and `QWEN_WATCH_PORT` move
+the page off its local-only default so another machine can view it; `QWEN_WATCH=0` switches the page off.
 
 ## Steer a running agent
 
@@ -94,19 +94,19 @@ A note reaches one running agent as a plain user message at its next model call;
 context and its work. ADDRESS is the 12-hex id the run's `watch:` line prints (sweep batch ids
 live in each batch's `bNN/stderr.txt`); swarm/research units are `<id>/<unit>`. Options come
 before TEXT, and `--` allows a text starting with a dash. Exit 0 queued; with `--wait` it also
-prints `delivered at HH:MM:SS` (0), `still queued` (10), `undelivered: <reason>` (11) or
-`deferred to the next round` (12); exit 2 usage, 3 unavailable. A note never grants anything:
-no permissions, budget or tools, and it never ends a run early. An until-done loop carries a
-missed note into the next round's prompt, and pending notes end up in report.md under
-`## Steering notes`. `QWEN_STREAM=0` restores the old launch, creates no inbox, and such runs
-refuse `--send` (`reference/qwen-agent.md`, "Steer a running agent").
+prints `delivered at HH:MM:SS` (0), `still queued` (10), `undelivered: <reason>` (11) or `deferred to the next round` (12);
+exit 2 usage, 3 unavailable. A note never grants anything: no permissions, budget or tools, and it never ends a run early;
+at most `QWEN_NOTE_MAX_PER_RUN` (20) notes per agent attempt are delivered, the rest report `undelivered: cap`. An until-done
+loop carries a missed note into the next round's prompt, and report.md lists every note sent to the loop under `## Steering notes`.
+`QWEN_STREAM=0` restores the old launch and creates no inbox: `--send` and `--ask` are refused (exit 3), `--next-ask` and
+`--amend` exit 3 against such a loop, and swarm units lose share/reply/ask_main (`reference/qwen-agent.md`, "Steer a running agent").
 
 An `--until-done` loop can ask the main session when a round fails, and it keeps looping while it
 does. Run `qwen-agent --next-ask ID` in the background; on exit 0 it prints the claimed ask's
 path — hand that file to a helper subagent on any model you pick. `--amend ID -f FILE` sends a
 corrected task file. The recipe and the helper brief are in `reference/ask-main.md`.
-The units of a running swarm or research run may ask the main session too: the same `--next-ask`
-claims their question asks (`reference/ask-main.md`).
+Units of a running swarm or research run may ask too (not when fenced to search, the web or a browser), but a
+question is only heard while a `--next-ask` is running: start it in the background first, or the unit is told to decide for itself (`reference/ask-main.md`).
 
 ## Running tests and reproduction tests
 
@@ -116,7 +116,7 @@ qwen-agent -r auditor --test -C <repo> "Does retry() handle a 503? Prove it with
 
 `--test` grants `qwen-test` (the project's configured test command, in a throwaway git
 worktree) and nothing else, under `claude --restricted`; it refuses `-w`, `--all-tools`,
-`--toolset`, `--read-only` and any `--permission-mode`. The tests it runs are code that runs as
+`--toolset`, `--read-only`, `-t/--tools` and any `--permission-mode`. The tests it runs are code that runs as
 the user, so use it only on code you would run. The auditor may write ONLY
 inside that worktree; files it writes come back under `## REPRO FILES` in the result,
 for you or local-coder to adopt. That is why a `--test` run gets no implied sandbox

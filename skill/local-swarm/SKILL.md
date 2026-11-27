@@ -30,7 +30,7 @@ is checked in a fresh copy (repro, then tests), a patch that edits test files ca
 root cause vs symptom suppression. Patches land in `RUN/patches/<n>.diff`; the user applies one with `git apply`.
 
 For a UI suite the scenario file is the `scenarios` knob (the same `# Suite:` markdown `qwen-agent
---scenarios` takes; its format is in `reference/qwen-agent.md`), and the goal only names the run:
+--scenarios` takes; its format is in `skill/local-auditor/reference/qwen-agent.md`), and the goal only names the run:
 
     qwen-swarm ui-test "RUN NAME" --set scenarios=SUITE.md --out RUN_DIR [--set base=URL] \
       [--set confirm=claude|local|none]
@@ -64,8 +64,8 @@ Rules that keep a workflow resumable:
   no randomness, no environment, no file reads outside `wf.load`. `wf.rounds()` owns time.
 - Choose tools only through each role's `fence`: `none`, `browser` (a real browser through
   qwen-agent `--browser`, for a local UI suite; its screenshots land in
-  `RUN/browser/<unit>`, and it can open any URL it is told to), `search`, `web`, `read`
-  (the target, read-only) or `sandbox` (edit + Bash in a throwaway copy of the target).
+  `RUN/browser/<unit>`, and it can open any URL it is told to), `browser-probe` (`browser` plus scripted
+  probes: `browser_evaluate` and a network-request read), `search`, `web`, `read` or `sandbox` (edit + Bash in a throwaway copy of the target).
 - Commands run only through `wf.steps.run_cmd`: `bash -c CMD` in a fresh sandbox of the
   target, with the result logged in `run.log`. Where a command comes from is the run's
   business — the user's `--set`, the workflow's own code, or an agent's proposal (with no
@@ -80,11 +80,11 @@ Rules that keep a workflow resumable:
 Before launching (step 3), run `qwen-swarm --check ./my-workflow` until it passes: it validates the manifest
 and dry-runs `run(wf)` twice against fake agents (a `check.py` beside the workflow can supply realistic fake answers).
 
-Debug's `probe`, optimize's `implement` and research's `fetch` units share findings with their
-phase siblings (a custom workflow opts in with `share=True` on `wf.fan_out`); report.md lists them
-under `## Shared findings`. Units may also ask the main session: run `qwen-agent --next-ask ID` to
-claim their questions. Bash units are confined (sandbox plus edit grants scoped to the unit's
-sandbox); when the host cannot, the report says `bash not confined: <reason>`; more in `skill/local-auditor/reference/messaging.md`.
+Debug's `probe`, optimize's `implement` and research's `fetch` units share findings with their phase siblings (a custom workflow opts in with `share=True` on `wf.fan_out`; `QWEN_SHARE_MAX` 3 findings per sender, `QWEN_SHARE_IN_MAX` 10 per receiver); report.md lists them under `## Shared findings`, and a unit that received one is never cached.
+Units not fenced to search, the web or a browser may also ask the main session (`QWEN_ASK_MAIN_MAX`, default 5 per run), but only while `qwen-agent --next-ask ID` runs in the background (ID = the 12-hex id in the `watch:` line);
+with none running the unit is told to decide for itself and the question is not counted. Bash units are confined (sandbox plus edit grants scoped to the unit's sandbox, no outbound network);
+when the host cannot confine (Windows, run folder under TMPDIR, `bwrap`/`socat` missing), the report says `bash not confined: <reason>`;
+more in `skill/local-auditor/reference/messaging.md`.
 
 ## 3. Show the manifest, sign off Claude, then run in the background
 
@@ -134,8 +134,8 @@ Then watch the run's events, not the process:
    Each event arrives as `<line number>: <json>`; only whole lines are read, and the command exits
    by itself after `run_end`. A monitor expires after at most 30 minutes: re-arm the same command
    with N = the last line number you were shown (0 if none) until `run_end` has arrived.
-3. When the background task itself exits, the run is over even without `run_end` (a killed
-   runner never writes it): stop the monitor with TaskStop and go to step 4.
+3. When the background task itself exits, the run is over even without `run_end` (a SIGKILLed or crashed runner
+   never writes it; Ctrl-C and TERM write it with exit 130): stop the monitor with TaskStop and go to step 4.
 4. Handle each `attention` event as it arrives (section 4, "Report back"): its `reason` is
    `confirmed failure`, `needs human` or `false alarm on a tester FAIL`; `unit_dropped`
    names a unit and why. Read `RUN/run.log` (one line per agent attempt) only for detail.
@@ -162,9 +162,9 @@ applied by `qwen-swarm --resume RUN`. Its exit 8 means the verdict was saved but
 Gate on the process exit code (or the exit of the last `--record-verdict`), never on the
 `exit` in `run_end`: a verdict that lands at the very end can change the exit after `run_end` was written.
 
-Offline, or with the claude login unusable, the first failed confirm call (a connection error included) trips the breaker:
-the remaining rows are NEEDS_HUMAN with no further call, and the run's local half is unaffected. That breaker trips
-only on claude's own login/network failures; words from the page under test fail only that row. Settle those rows yourself as above.
+Offline, or with the claude login unusable, the first confirm call that finds claude itself unavailable (login or network failure, `claude` not executable, no readable answer on the very first call) trips the breaker:
+the remaining uncached rows are NEEDS_HUMAN with no further call, and the run's local half is unaffected. A per-item failure
+(a timeout, the turn or budget cap, an unusable answer, a 429) and words from the page under test fail only that row. Settle those rows yourself as above.
 
 | Exit | Meaning |
 |---|---|
@@ -179,7 +179,7 @@ only on claude's own login/network failures; words from the page under test fail
 A dropped agent keeps exit 4 whatever verdict its row gets. After an exit 8 in your own workflow, fix
 `workflow.py` and continue with `qwen-swarm --resume RUN`: finished agents are reused from the cache. Exit
 130 or a crash: `qwen-swarm --resume RUN` too. On resume only `--seats`, `--web-seats`, `--timeout`,
-`--retries`, `--rounds`, `--hours`, `--effort`, `--role-effort`, `--deep`, `--shallow` and `--keep-sandboxes` may change.
+`--retries`, `--rounds`, `--hours`, `--effort`, `--role-effort`, `--claude`, `--deep`, `--shallow` and `--keep-sandboxes` may change.
 
 ## Optimize: write and check the bench before you hand over
 

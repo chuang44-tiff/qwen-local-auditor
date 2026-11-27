@@ -67,8 +67,9 @@ Unknown keys are rejected; every error names its field and exits 2.
 
 ### Fences
 
-A role's fence is the only way a workflow chooses tools. Every agent also gets
-`--permission-mode dontAsk` and `--warn-denials`.
+A role's fence is the only way a workflow chooses tools, apart from the `share` tool a
+`fan_out` opts into with `share=True` (below); qwen-agent adds `reply`/`ask_main` itself.
+Every agent also gets `--permission-mode dontAsk` and `--warn-denials`.
 
 | fence | tools | working directory | runs at |
 |---|---|---|---|
@@ -78,7 +79,13 @@ A role's fence is the only way a workflow chooses tools. Every agent also gets
 | `search` | the `search` MCP tool | its own empty folder | `--web-seats` |
 | `web` | `search` + `page` + `WebFetch` | its own empty folder | `--web-seats` |
 | `read` | Read, Glob, Grep | `--target` | `--seats` |
-| `sandbox` | Read, Edit, Write, Bash, Glob, Grep | a fresh copy of `--target` per agent | `--seats` |
+| `sandbox` | Read, Edit, Write, Bash, Glob, Grep; Edit/Write are scoped to the agent's own copy, Bash runs in Claude Code's Bash sandbox where the host can confine it | a fresh copy of `--target` per agent | `--seats` |
+
+A unit whose fence is not `search`, `web`, `browser` or `browser-probe` also gets the `ask_main`
+tool (with the watch page on, the default): one open question at a time, at most
+`QWEN_ASK_MAIN_MAX` (default 5) per run, heard only while a `qwen-agent --next-ask ID` holds the
+lease (otherwise the unit is told to decide for itself); the report's `questions:` line counts them
+([`messaging.md`](messaging.md), [`ask-main.md`](ask-main.md)).
 
 A `web` role gets the search MCP server's second tool as well: `page` fetches a known
 url once and answers with its title plus up to 5 passages of about 600 characters around
@@ -134,10 +141,15 @@ HEAD, with the link to the target removed again (`git remote remove origin`, so 
 cannot reach the target) and every git hook switched off (an empty template,
 `core.hooksPath` pointed at a path that does not exist, so no hook can fire). Sandboxes
 are NOT git worktrees: a worktree shares the target's `.git`, and edits an agent makes
-there (`git stash`, `git branch`) land in the target. A sandbox isolates an agent against
-ACCIDENTS, not against a hostile agent — it has a shell, and a shell can `cd` elsewhere.
-Bash in a sandbox is not a security boundary: it runs as you, with your network; use
-sandbox workflows only on code you would run yourself. A `--shared` clone borrows the
+there (`git stash`, `git branch`) land in the target. A sandbox copy isolates an agent against
+ACCIDENTS. Where the host can confine (Linux with `bwrap` and `socat`, macOS), a `sandbox` agent's
+Bash also runs inside Claude Code's Bash sandbox: no outbound network, writes outside its own
+folders blocked, its Edit/Write grants scoped to `RUN/sandboxes/<unit>`, and Edit/Write denied in
+the run's `inbox/`, `msg/`, `asks/` and `agents/`. It still runs as you and can read what you can
+read. Where the host cannot confine (Windows, a run folder under TMPDIR, `bwrap` or `socat` missing)
+only the scoped grants and deny rules apply, the Bash is your shell with your network, and the run
+says `bash not confined: <reason>`; use sandbox workflows only on code you would run yourself.
+A `--shared` clone borrows the
 target's objects, so do not `git gc`/`prune` the target while a run is going.
 Uncommitted target changes are NOT in a sandbox (the run's summary says so when the target
 is dirty); a target that is not the top of a git repository is copied whole without
@@ -149,6 +161,13 @@ its patch. `--target` itself is never an agent's working directory unless the fe
 `read`. Sandboxes live in `RUN/sandboxes/` and are removed when the agent ends, unless
 `--keep-sandboxes` — which also keeps the sandboxes on an interrupt, for inspection.
 
+Confinement is probed once per run, at the first Bash unit. A host that cannot confine says so with
+`swarm: bash not confined: <reason>` on stderr, and `bash not confined: <reason>` at the end of
+report.md. Reasons: `no bash sandbox on this platform` (Windows and any platform other than
+Linux/macOS), `run folder under TMPDIR`, `sandbox probe failed: bwrap or socat missing`, or the
+probe's own error; `--check` probes nothing. A confined unit that cannot get its private Claude temp
+folder is dropped (`private temp dir could not be made: ...`).
+
 ### workflow.py: the `wf` object
 
 | call | does |
@@ -156,8 +175,8 @@ its patch. `--target` itself is never an agent's working directory unless the fe
 | `wf.goal` | the goal text |
 | `wf.knob(name)` | a knob (preset, then `--set`); also `budget`, `retries`, `rounds`, `hours` |
 | `wf.target` | the target directory (a `pathlib.Path`) or `None` |
-| `wf.agent(name, role, prompt, parse)` | one agent, unit `name-1`; returns `parse(text)`, or `None` when it failed (then `wf.last_unit` has `ok`, `why`, `deadline`). Options: `cache=False`, `always=True` (runs past the deadline), `item="goal"` (the deadline log label), `stage=DIR` (below), `label=NAME` (this phase's name on the watch page; `phase N` when left out) |
-| `wf.fan_out(name, role, items, prompt, parse)` | deals `items` in groups of <= `--max-agents` units holding <= `--max-items` items each and runs every unit of the call in ONE phase (`--seats` alone limits concurrency; the group number only names units); `prompt(batch)` -> str, `parse(text, batch)` -> list of rows. Returns `Result`: `.rows`, `.dropped_items`, `.not_run_items`, `.units`, `.ok`. Options: `item_id=`, `max_items=` (e.g. 1 = one item per agent), `stage=DIR` (a fresh copy of DIR in each unit's folder as `fixtures/`, made once per unit and kept for its retries and repair round; DIR's content hash joins the unit's cache key), `repair=TEXT` (this call's repair-round prompt; `{why}` is filled in), `unit_ids=True` (units named `name-<item id>` instead of by position, so skipping an item does not move another unit's cache key; needs `item_id=` and `max_items=1`), `label=NAME` (this phase's name on the watch page; `phase N` when left out) |
+| `wf.agent(name, role, prompt, parse)` | one agent, unit `name-1`; returns `parse(text)`, or `None` when it failed (then `wf.last_unit` has `ok`, `why`, `deadline`). Options: `cache=False`, `always=True` (runs past the deadline), `item="goal"` (the deadline log label), `stage=DIR` (below), `repair=TEXT` (this unit's repair-round prompt; `{why}` is filled in), `label=NAME` (this phase's name on the watch page; `phase N` when left out) |
+| `wf.fan_out(name, role, items, prompt, parse)` | deals `items` in groups of <= `--max-agents` units holding <= `--max-items` items each and runs every unit of the call in ONE phase (`--seats` alone limits concurrency; the group number only names units); `prompt(batch)` -> str, `parse(text, batch)` -> list of rows. Returns `Result`: `.rows`, `.dropped_items`, `.not_run_items`, `.units`, `.ok`. Options: `item_id=`, `max_items=` (e.g. 1 = one item per agent), `stage=DIR` (a fresh copy of DIR in each unit's folder as `fixtures/`, made once per unit and kept for its retries and repair round; DIR's content hash joins the unit's cache key), `repair=TEXT` (this call's repair-round prompt; `{why}` is filled in), `unit_ids=True` (units named `name-<item id>` instead of by position, so skipping an item does not move another unit's cache key; one item per agent is enforced, `item_id=` is optional and defaults to the item's `id`; ids must be `[A-Za-z0-9._-]+`, must not end in `.` and must differ by more than case, else `ValueError`), `share=True` (opts the call's phase into the run's share relay: each unit gets the `share` tool and a share rule appended to its prompt, both part of the cache key; findings reach the phase's running siblings as notes and later units as backlog, and appear in report.md under `## Shared findings`; caps `QWEN_SHARE_MAX` 3 and `QWEN_SHARE_IN_MAX` 10; the built-ins that opt in are debug's `probe`, optimize's `implement` and research's `fetch`), `label=NAME` (this phase's name on the watch page; `phase N` when left out) |
 | `wf.claude_check(name, items, prompt, parse, model=M, max_calls=N)` | one `claude -p` per item through the user's claude login (below); returns one `{item, state, data, why}` per item, in order. Options: `budget_usd=2.0`, `browser=False`, `stage=DIR`, `read_dirs=()`, `item_id=`, `timeout=600`, `max_turns=40`. Refused (every item `unavailable`, no process) unless the config's `QWEN_CONFIRM` names a model or `--set confirm=claude` is typed |
 | `wf.event(kind, **fields)` | one line in `RUN/events.jsonl` (below); an engine kind is a `ValueError` |
 | `wf.vote(name, role, claims, voters, prompt, parse)` | claim-major vote slots — `(claim, k)` with `k` = 0..`voters`-1, dealt so no agent holds two slots of one claim (`voters` above `--max-agents` is an error). `prompt(batch)` and `parse(text, batch)` get the batch as that list of `(claim, k)` tuples; `parse` returns rows with `claim` (a claim id) and `verdict` (`supported`, `refuted`, `unclear`) — a row naming a claim this vote never asked about, or whose `verdict` is not a string, is ignored. `claim_id=fn` says how a claim is identified (default `c["id"]`); it also labels `run.log`'s deadline lines. Returns `{claim_id: verdict}` (majority of the votes requested) with `.cast`, `.requested`, `.result`. Options: `label=NAME` (this phase's name on the watch page; `phase N` when left out) |
@@ -169,7 +188,7 @@ its patch. `--target` itself is never an agent's working directory unless the fe
 | `wf.save(key, data)` / `wf.load(key)` / `wf.exists(key)` / `wf.forget(*keys)` | JSON artifacts `<key>.json` in the run folder (`round-<r>/` from round 2), written to a temporary file and renamed into place, so a reader never sees half of one |
 | `wf.write(relpath, text)` | a text file in the run folder, e.g. `patches/1.diff` |
 | `wf.browser_dir(unit)` | the `RUN/browser/<unit>` folder a browser-fenced unit's session was given as its `QWEN_BROWSER_DIR`: qwen-agent's timestamped folders of screenshots and page snapshots are made inside it, so a report names this path as the unit's evidence |
-| `wf.report(markdown)` | writes `report.md` (and `report-round-<r>.md` in a multi-round run) |
+| `wf.report(markdown)` | writes `report.md` (and `report-round-<r>.md` in a multi-round run). After the run the runner appends, when there is something to say: a `## Shared findings` section (sender, phase, receivers and the quoted text of each admitted finding), the `ask-main:` and `questions: admitted N, dropped N, answered N` lines when the run logged question asks, and, if the host could not confine its Bash units, a last line `bash not confined: <reason>`. None of it fails the run |
 | `wf.totals()` | the run's cumulative `agents_run`, `tokens`, `seconds`, `invocations`, `claude_calls`, `claude_cost_usd` (for a Run table) |
 | `wf.fail(message)` | stop: nothing usable, exit 5 |
 | `wf.goal_unmet(reason)` | the run ends with exit 4 once its report is written |
@@ -184,8 +203,8 @@ with a plain text-mode write.
 
 A round in which any unit was dropped is not resumable from where it stopped, so
 `research` ends its rounds loop then (`wf.converged`, and `stop_reason` reads
-`converged: units dropped in round <r>`): no later round is built on ids that `--resume`
-will renumber when it retries the dropped units.
+`converged: units dropped in round <r>: --resume retries them`): no later round is built on
+ids that `--resume` will renumber when it retries the dropped units.
 
 Unit names: `name-<k>` for a call's first deal group, `name-w<n>-<k>` for its later groups
 (the grouping only names units; all of them run in one phase), prefixed `r<r>-` from
@@ -193,8 +212,10 @@ round 2. A `parse` that raises `ValueError` makes the answer unusable: one repai
 then the unit's retries.
 
 Determinism: resume re-runs `run(wf)` from the start and every finished unit returns its
-cached answer, so the script must make the same calls in the same order given the same
-answers. Never read the clock, randomness, the environment or files outside `wf.load`.
+cached answer (except a unit that received a shared finding, or a `--send` note or `--ask`
+question, in its attempt: its answer was steered, so it is rerun; see
+[`messaging.md`](messaging.md)), so the script must make the same calls in the same order
+given the same answers. Never read the clock, randomness, the environment or files outside `wf.load`.
 An exception in `workflow.py` is exit 8 with the traceback in `RUN/error.log`; fix the
 script and `--resume`: the cache key holds the role text, prompt, fence flags, effort and
 depth switches, not the script.
@@ -297,7 +318,7 @@ qwen-swarm WORKFLOW "GOAL" [--depth NAME] [--set KNOB=VALUE]... [--target DIR]
 qwen-swarm WORKFLOW --stdin [...]
 qwen-swarm --resume RUN_DIR [--seats N] [--web-seats N] [--timeout S] [--retries N]
            [--rounds N|until] [--hours H] [--effort LEVEL] [--role-effort ...] [--deep ...]
-           [--shallow ...] [--keep-sandboxes]
+           [--shallow ...] [--claude ROLE:KEY=MODEL,...] [--show-claude] [--keep-sandboxes]
 qwen-swarm --check WORKFLOW | --preflight [WORKFLOW] | --list
 qwen-swarm --record-verdict RUN --id ID --verdict CONFIRMED|FALSE_ALARM|NEEDS_HUMAN --evidence TEXT [--evidence TEXT ...]
 ```
@@ -318,6 +339,9 @@ is a built-in name (`qwen-swarm --list`), so a folder must be given as `./my-wor
 Precedence: a flag, then `--set`, then the environment (`QWEN_SWARM_MAX_AGENTS`,
 `_MAX_ITEMS`, `_SEATS`, `_WEB_SEATS`, `_TIMEOUT`, `_RETRIES`, `_HOURS`, `_MAX_UNIT_SECONDS`,
 `_BACKOFF`; the research workflow also reads the `QWEN_DR_*` names), then the preset.
+Messaging limits are environment only: `QWEN_SHARE_MAX` (default 3, max 5),
+`QWEN_SHARE_IN_MAX` (default 10, max 15), `QWEN_ASK_MAIN_MAX` (default 5, max 20);
+`QWEN_STREAM=0` turns messaging off ([`configuration.md`](configuration.md)).
 `--timeout` is the per-item budget: an agent holding k items gets
 max(300, weight x k x budget) seconds, one `wf.agent` counts as 2 items. `--hours` is a
 hard deadline stored in `config.json`: no new uncached unit starts after it (a cached
@@ -351,7 +375,9 @@ earlier version re-runs, on resume, the tool-less roles that used to get the rev
 (research's scoper, planner when its plan is missing, and synthesizer; debug's planner
 and writer), the roles whose default effort changed (research's searcher, reader and
 verifier; optimize's checker and reviewer; debug's triager and reviewer; ui-test's
-tester), and every web-fence unit (its grants now include the `page` tool).
+tester), every web-fence unit (its grants now include the `page` tool), every `sandbox`-fence unit
+(its Edit/Write grants are now one scoped rule) and every phase that shares (its units' grants and
+prompts carry the share tool and rule).
 
 ### Claude calls in a swarm
 
@@ -378,7 +404,9 @@ current directory; the `research` workflow keeps its own root, `deep-research/..
 The run folder must be OUTSIDE `--target`: a run writes its prompts, patches, logs and
 sandboxes into the run folder, and one inside the target (or a target inside it) would put
 them in the user's tree. The runner refuses either nesting before it creates anything
-(exit 2, naming both paths), so pass `--out DIR` outside the target.
+(exit 2, naming both paths), so pass `--out DIR` outside the target. Keep it outside the system
+temp folder (`TMPDIR`) too: the Bash sandbox always lets a unit write there, so a run folder under
+it cannot be confined and report.md ends with `bash not confined: run folder under TMPDIR`.
 
 The folder holds `config.json` (the resolved settings and the manifest summary), the goal file
 (`goal.md`; `question.md` for research), `run.log`, `totals.json` (cumulative; with
@@ -398,7 +426,13 @@ once the agent has answered some call and started a new one, so a lost post -- a
 a dropped hook -- never pins the card on "waiting"; a subagent call (Task/Agent) is exempt
 only from that abandon rule -- the calls running inside it are its own doing -- and it closes
 on its own post, or on a `stop` when the round ends first. `activity/<unit>.jsonl` is written
-only for a run the page shows: with `QWEN_WATCH=0` the `activity/` folder is never made.
+only for a run the page shows: with `QWEN_WATCH=0` the `activity/` folder is never made. On a
+streaming run (`QWEN_STREAM` not `0`) the folder also holds `inbox/<unit>/` (steering notes),
+`msg/` (per-unit outboxes, replies and seen markers under `msg/units/<unit>/`, the phases'
+`_phases/<id>/findings.jsonl`, the relay's `relay.jsonl`) and, when the watch page is on,
+`asks/` (question asks, lease, log, `.ended`); a Bash unit has `agents/<unit>.settings.json`
+(mode 0600, its confinement block). `QWEN_STREAM=0` turns messaging off: no `inbox/`, `msg/` or
+`asks/`, and no `share`, `reply` or `ask_main` tools; the units run as before.
 `rounds.json` (the rounds started, so a resume finishes the
 interrupted one), the `round-<r>/` directories (round 2 onwards; round 1 writes at the top
 level) and `report-round-<r>.md` are a multi-round run's: they appear only when `rounds` is
@@ -408,8 +442,9 @@ loop (`research` reports per round, `debug` once after it). `cmds/<hash>.json` (
 `run_cmd` results) appears as soon as a workflow runs a command, and, while agents run,
 `sandboxes/`.
 A one-round `research` run's folder is byte-identical to what the released
-`qwen-deep-research` wrote on Linux and macOS (Windows writes LF), apart from
-`events.jsonl`.
+`qwen-deep-research` wrote on Linux and macOS (Windows writes LF), apart from `events.jsonl`
+and the messaging folders above (`QWEN_STREAM=0` removes them; the share grant and rule the
+research `fetch` prompts carry stay whatever the streaming state).
 
 ## Progress events: `RUN/events.jsonl`
 
@@ -424,15 +459,18 @@ written.
 |---|---|---|
 | `run_start` | `workflow`, `goal`, `run` (absolute path), `resumed`, `depth`, `knobs` | the run folder exists |
 | `phase_plan` | `phases` (each `label`, `n`: the manifest's outline, `n` resolved from its knob, `null` when unknown) | right after `run_start`, only when workflow.json has a `phases` outline |
-| `phase_start` | `label`, `n`, `seats`, `units` (each `unit`, `name`, `role`) | when the phase begins, before any of its units spawns. It is written even when no unit spawns (all cached). A phase no workflow named is labelled `phase N`. A roster too wide for one 4 KB line is announced without it -- `label`, `seats`, `truncated` -- because a unit name cut short stops matching that unit's own lines, and a part-roster would leave the progress bar stuck below 100% |
+| `phase_start` | `label`, `n`, `seats`, `units` (each `unit`, `name`, `role`) | when the phase begins, before any of its units spawns. It is written even when no unit spawns (all cached). A phase no workflow named is labelled `phase N`. A roster too wide for one 4 KB line is announced without it -- `label`, `n`, `seats`, `truncated` -- because a unit name cut short stops matching that unit's own lines, and a part-roster would leave the progress bar stuck below 100% |
 | `unit_start` | `unit`, `role`, `timeout` (the seconds budget that call is spawned with -- the halved one for a review-round unit; the per-agent bar divides by it) | every unit that really spawns: not a cache hit, not one the deadline stopped |
 | `unit_done` | `unit`, `role`, `ok`, `cached`, `seconds`, `why` (on failure only) | every unit, cached ones included |
 | `unit_dropped` | `unit`, `role`, `why` | a unit is dropped |
+| `share` | `unit`, `role`, `share_id`, `to_count`, `len` | one per finding a sharing phase admits (streaming run; see [`messaging.md`](messaging.md)) |
 | `claude_call` | `name`, `item`, `state`, `seconds`, `cost_usd` | every `wf.claude_check` item |
 | `claude_probe` | `name`, `state`, `why` | a `wf.claude_check` run's pre-call probe says claude is not available (below) |
-| `run_end` | `exit`, `report` (path or `null`) | every exit once the folder exists: 0, 4, 5, 8, 130 |
+| `run_end` | `exit`, `report` (path or `null`) | every exit once `run_start` is written: 0, 2 (a usage error raised inside `run(wf)`), 4, 5, 8, 130 (Ctrl-C, TERM and HUP too) |
 
-Exits 2 and 3 come before any folder and write no event. A `--resume` appends to the same
+Preflight (3) and usage errors found before the run folder is made (2) write no event; neither
+does the exit 2 of a `--resume` of a run that is still live. A usage error raised inside `run(wf)`
+is exit 2 and does write `run_end`. A `--resume` appends to the same
 file, its `run_start` with `resumed: true`. A runner that is killed outright writes no
 `run_end`, so a watcher also watches the process. `run_end.exit` is the exit when the
 runner finished: a session verdict that lands at the very end can change the process exit

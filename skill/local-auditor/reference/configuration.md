@@ -15,7 +15,8 @@ are the authoritative texts; this page arranges the same facts for lookup.
 | Python 3.8+ | stdlib only; used to parse results, build sweeps and run the swarm engine (the test suite needs 3.10+) |
 | curl >= 7.55, git | curl 7.55 is the floor because preflight hands its headers to curl on stdin (`-H @-`), so the key never appears on an argv; `git` for `qwen-sweep --builder diff`, for the throwaway worktrees `--test` uses, for `--until-done`'s clean-tree check, and for the sandbox copies a `qwen-swarm` workflow runs in |
 | tmux | only for `qwen-cc` (interactive sessions); Windows has none: run `qwen-agent --interactive` in a terminal there |
-| internet | needed by the Claude calls if you turn any on (plan, advisor, rescue, confirm: they use your `claude` login), and by research (a search backend and pages to fetch): `qwen-deep-research`, `qwen-swarm research`, or a workflow with a `search` or `web` fence; and a browser's first run needs it too, for the `@playwright/mcp` npm package and the Playwright browser install it drives (`npx -y @playwright/mcp@0.0.83 --help` fetches the package, `npx playwright install chromium` the browser; [`qwen-agent.md`](qwen-agent.md) "Scripted UI suites"). No other fence adds a search or fetch tool, but a `browser` role drives a real browser, which opens whatever URL it is told to, and a `sandbox` agent's Bash is your shell, with your network ([`swarm.md`](swarm.md)) |
+| bwrap, socat | Linux only, and only to confine a swarm run's Bash units (debug's `prober`, optimize's `implementer`). Without them the units run with deny rules and scoped file grants only, and report.md ends with `bash not confined: sandbox probe failed: bwrap or socat missing` |
+| internet | needed by the Claude calls if you turn any on (plan, advisor, rescue, confirm: they use your `claude` login), and by research (a search backend and pages to fetch): `qwen-deep-research`, `qwen-swarm research`, or a workflow with a `search` or `web` fence; and a browser's first run needs it too, for the `@playwright/mcp` npm package and the Playwright browser install it drives (`npx -y @playwright/mcp@0.0.83 --help` fetches the package, `npx playwright install chromium` the browser; [`qwen-agent.md`](qwen-agent.md) "Scripted UI suites"). No other fence adds a search or fetch tool, but a `browser` role drives a real browser, which opens whatever URL it is told to, and a `sandbox` agent's Bash has your network only where the host cannot confine it: a swarm Bash unit runs in Claude Code's Bash sandbox with no outbound network on Linux (with `bwrap` and `socat`) and macOS, and falls back to your shell, with your network, on Windows or when the probe fails (`bash not confined: <reason>`; [`messaging.md`](messaging.md), [`swarm.md`](swarm.md)) |
 
 CI runs the whole suite on Linux, macOS (including `/bin/bash` 3.2) and Windows Git Bash.
 
@@ -159,7 +160,7 @@ overrides: every model alias is pointed at the served model.
 | `QWEN_CONFIRM` | `local` | `qwen-swarm ui-test` double-check: a model, `local`, `none`, or `off` (= `local`). Config file, or a typed `--set confirm=...`; a workflow preset cannot enable Claude |
 | `QWEN_CLAUDE_TOOLS` | on | `0` (config or environment) takes the read tools (Read, Grep, Glob) away from plan, advisor and rescue calls; confirm's tools are unchanged |
 | `QWEN_ADVISOR_MAX_CALLS` | `4` | the agent's ask budget per run; `0` is refused (use `--advisor off`) |
-| `QWEN_ADVISOR_TIMEOUT` | `600` | seconds per call, every kind |
+| `QWEN_ADVISOR_TIMEOUT` | `600` | seconds per plan, advisor or rescue call (`0` = default); the `qwen-swarm ui-test` confirm check keeps its own fixed 600 s per call, which this variable does not reach |
 | `QWEN_ADVISOR_CLAUDE` | `QWEN_CLAUDE_BIN` | the claude executable these calls run |
 | `QWEN_ADVISOR_TOOLS` | *(default scope)* | bench-only: a comma list scoping the advisor's read tools; empty means the default |
 | `QWEN_NO_NOTICE` | | `1` suppresses the one-time notice about these settings, shown on the first run |
@@ -214,6 +215,25 @@ See [`sweep.md`](sweep.md).
 The `QWEN_SEARCH_*` variables above are what a workflow with a `search` or `web` fence
 searches through.
 
+A swarm's Bash units are confined only when the run folder is outside the system temp folder (`TMPDIR`):
+the Bash sandbox always lets a unit write there. A run folder under it, Windows, or a missing
+`bwrap`/`socat` leaves the units with deny rules and scoped file grants only; the run prints
+`swarm: bash not confined: <reason>` on stderr, and report.md closes with `bash not confined: <reason>`.
+A confined unit whose private temp folder cannot be made is dropped, never run unconfined.
+
+### Messaging (`qwen-agent`, `qwen-swarm`, `--until-done`)
+
+| variable | default | meaning |
+|---|---|---|
+| `QWEN_STREAM` | `1` | `0` turns messaging off: no inbox, no `share`/`reply`/`ask_main` tools, no `asks/` folder (so `--send`/`--ask` and `--next-ask`/`--amend` exit 3 against such a run) |
+| `QWEN_NOTE_MAX_PER_RUN` | `20` | notes delivered to one agent attempt, all kinds together; later notes are swept as `undelivered: cap` |
+| `QWEN_SHARE_MAX` | `3` | findings one unit may share per phase, clamped 0..5, a non-integer means 3 |
+| `QWEN_SHARE_IN_MAX` | `10` | share notes one unit receives per attempt, clamped 0..15, a non-integer means 10 |
+| `QWEN_ASK_MAIN_MAX` | `5` | questions from agents admitted per run, clamped 0..20; later ones are dropped and the agent decides for itself |
+| `QWEN_ASK_LEASE` | `600` | seconds a `--next-ask` lease holds without a refresh, 60..3600; a bad value warns once and uses 600 |
+
+Details: [`messaging.md`](messaging.md), [`ask-main.md`](ask-main.md).
+
 ### Watch page (every command)
 
 Each run prints `watch: <url>` on stderr, which links to a live, read-only page of that run.
@@ -223,7 +243,9 @@ The page shows:
 - its context use;
 - for `--until-done`, the round and the checklist.
 
-The page never shows tool output, prompts, transcripts or model reasoning. One viewer process
+The page never shows tool output, transcripts or model reasoning; a `qwen-agent` run's title is its
+role plus the first 60 characters of the prompt (with `-f FILE`, a one-line reading of the file
+plus its name). One viewer process
 serves every run and keeps running between runs. `python lib/watch.py stop` ends it, and
 `python lib/watch.py dismiss <id>` clears a finished run's card.
 

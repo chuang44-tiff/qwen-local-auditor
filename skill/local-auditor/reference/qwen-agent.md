@@ -749,7 +749,8 @@ blocks has been seen at both rc=0 and rc=8 (see [`limits.md`](limits.md)).
 | 7 | a tool call was blocked by the permission system (see `--warn-denials`). On a probe run, file-tool calls blocked only because they reached outside the sandbox are a note on stderr, not exit 7 |
 | 8 | harness failure (claude or python missing, or unparseable output) |
 | 9 | `--scenarios`: at least one scripted scenario ended FAIL or BLOCKED; `--replay`: at least one recorded script ended FAIL or ERROR, or the folder kept no script |
-| 11-14 | `--until-done` outcomes; see [`coding.md`](coding.md) |
+| 10 | `--send`/`--ask` with `--wait`: `still queued` / `no answer yet` |
+| 11-14 | `--until-done` outcomes (see [`coding.md`](coding.md)); `--send --wait` also uses 11 (`undelivered`) and 12 (`deferred to the next round`), `--ask` 11 (the agent ended without answering) |
 
 ## Examples
 
@@ -786,16 +787,33 @@ start with a dash. `--send` returns at once; with `--wait SECONDS` (1..3600) it 
 and prints the outcome after the id: `delivered at HH:MM:SS` (exit 0), `still queued` (10),
 `undelivered: <reason>` (11) or `deferred to the next round` (12). Exit 2 is usage (bad
 address; empty text; text over 8,000 characters or 32 KiB), exit 3 unavailable (no such
-run, not running, closed inbox, dead pid).
+run, not running, closed inbox, dead pid). `undelivered` reasons: `cap` (at most
+`QWEN_NOTE_MAX_PER_RUN` notes, default 20, are delivered per agent attempt and every kind
+counts), `crashed` (the agent process died), `invalid_note`, `marker_failed`, `closed` (the
+inbox was swept while waiting), `pid_dead`, and the end-of-run sweeps `loop_ended` and
+`run_ended`.
 
 `--notes ADDRESS` lists every note the agent received or missed, one row per note:
 `HH:MM:SS  state[: reason]  id  first 80 characters`.
 
 A note is text only: it never grants permissions, budget or tools, and never ends a run
 early. A note an until-done loop missed is carried into the next round's prompt ("Notes from
-the main session"); notes still pending when the loop ends are listed in report.md under
-`## Steering notes`. Note text never enters the note log (only ids, states and lengths), and
-the agent's raw thinking never reaches any file the main session reads.
+the main session"). report.md lists every note sent to the loop under `## Steering notes`: one
+row per note with its latest state (`delivered`, `deferred` or `undelivered`, with the reason),
+time, id and 80-character preview; a note still pending when the loop ends is swept as
+`undelivered: loop_ended`. The section is absent only if no note was ever sent. Note text never
+enters the note log (only ids, states and lengths), and the agent's raw thinking never reaches
+any file the main session reads.
 
 The streamed launch is the default for headless runs that own an inbox; `QWEN_STREAM=0`
 restores the old launch exactly and creates no inbox anywhere — such runs refuse `--send`.
+
+`qwen-agent --ask ADDRESS TEXT` queues a question and prints the agent's answer (`asked <id>`,
+then `answer from <address> (HH:MM:SS):` and the text). The agent answers with its `reply` tool;
+one that never calls it never answers. `--wait SECONDS` (1..3600, default 600) goes before or
+after the text. Exits: 0 answered, 10 no answer yet, 11 the agent ended without answering, 3
+unavailable, 2 usage. `qwen-agent --answer ADDRESS NOTE_ID` fetches that answer later, also after
+the run ended (unknown id exits 3). Agents can ask you too: `qwen-agent --next-ask ID` claims
+their questions and `--amend ID -f FILE` sends a corrected task file ([`ask-main.md`](ask-main.md)).
+The channel map, the share caps and the confinement of swarm Bash units are in
+[`messaging.md`](messaging.md).
