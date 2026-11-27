@@ -73,8 +73,9 @@ def _workflow(tmp_path, run_dir=None):
     return api.Workflow(m, cfg, run, sw, goal="g", mcp=mcp, web_seats=1)
 
 
-def _deny_list(R):
-    return ["Edit(/%s/%s/**)" % (R, d) for d in ("inbox", "msg", "asks", "agents")]
+def _deny_list(run):
+    return ["Edit(%s/%s/**)" % (fences.rule_path(run), d)
+            for d in ("inbox", "msg", "asks", "agents")]
 
 
 def _dry_argv(r):
@@ -85,12 +86,11 @@ def _dry_argv(r):
 def test_confine_settings_shape(tmp_path):
     run = tmp_path / "x" / "run"
     run.mkdir(parents=True)
-    R = os.path.realpath(str(run))
     cfg = fences.confine_settings(str(run), "u1")
     assert cfg["sandbox"] == {"enabled": True, "failIfUnavailable": True,
                               "allowUnsandboxedCommands": False,
                               "autoAllowBashIfSandboxed": True}
-    assert cfg["permissions"] == {"deny": _deny_list(R)}
+    assert cfg["permissions"] == {"deny": _deny_list(str(run))}
     assert list(cfg) == ["sandbox", "permissions"]
     for rule in cfg["permissions"]["deny"]:
         assert rule.startswith("Edit(//") and rule.endswith("/**)"), rule
@@ -99,14 +99,13 @@ def test_confine_settings_shape(tmp_path):
         assert "/%s/**)" % d in joined, d
     plain = fences.confine_settings(str(run), "u1", sandbox=False)
     assert "sandbox" not in plain
-    assert plain == {"permissions": {"deny": _deny_list(R)}}
+    assert plain == {"permissions": {"deny": _deny_list(str(run))}}
 
 
 def test_bash_unit_scoped_grants(tmp_path, fake, monkeypatch):
     monkeypatch.setattr(fences, "confine_probe", lambda run_dir: None)   # confined host
     wf = _workflow(tmp_path)
-    R = os.path.realpath(str(wf.run_dir))
-    scoped = "Edit(/%s/sandboxes/u1/**)" % R
+    scoped = "Edit(%s/sandboxes/u1/**)" % fences.rule_path(str(wf.run_dir))
     assert fences.scoped_grants("Read,Edit,Write,Bash,Glob,Grep", str(wf.run_dir),
                                 "u1") == "Read,%s,Bash,Glob,Grep" % scoped
     assert fences.scoped_grants("Read,Glob,Grep", str(wf.run_dir), "u1") == "Read,Glob,Grep"
@@ -206,10 +205,10 @@ def test_run_under_tmpdir_not_confined(tmp_path):
         assert fences.confine_probe(str(run)) == "run folder under TMPDIR"
         wf = _workflow(tmp_path, run_dir=run)
         u = wf._unit("u1", "prober", "p", 300, lambda text, batch, patch: [], None)
-        R = os.path.realpath(str(run))
-        assert u.settings_extra == {"permissions": {"deny": _deny_list(R)}}
+        assert u.settings_extra == {"permissions": {"deny": _deny_list(str(run))}}
         assert "sandbox" not in u.settings_extra
-        assert u.grants == "Read,Edit(/%s/sandboxes/u1/**),Bash,Glob,Grep" % R
+        assert u.grants == "Read,Edit(%s/sandboxes/u1/**),Bash,Glob,Grep" % \
+            fences.rule_path(str(run))
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

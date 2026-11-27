@@ -34,11 +34,12 @@ def _messaging_env(monkeypatch):
 
 # ----------------------------------------------------------------- item 1
 def test_windows_scoped_grants(tmp_path, monkeypatch):
-    # POSIX first, before anything is patched: its output is unchanged from before
-    run = str(tmp_path / "run")
-    R = os.path.realpath(run)
-    assert fences.scoped_grants("Read,Edit,Write,Bash", run, "u1") == \
-        "Read,Edit(//%s/sandboxes/u1/**),Bash" % R.lstrip("/")
+    if os.name != "nt":
+        # this block is the POSIX form of the rule path, asserted before any patch
+        run = str(tmp_path / "run")
+        R = os.path.realpath(run)
+        assert fences.scoped_grants("Read,Edit,Write,Bash", run, "u1") == \
+            "Read,Edit(//%s/sandboxes/u1/**),Bash" % R.lstrip("/")
 
     # Windows: no early return -- the bare Edit/Write become the ONE scoped rule in
     # the launcher's rule_path() spelling (a wrong path fails CLOSED, the refusal;

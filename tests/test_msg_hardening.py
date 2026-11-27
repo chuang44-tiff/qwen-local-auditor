@@ -120,15 +120,16 @@ def test_share_path_newline_refused(tmp_path, monkeypatch):
 
 # ----------------------------------------------------------------- item 2
 def test_rule_path_forms(tmp_path, monkeypatch):
-    run = str(tmp_path / "run")
-    R = os.path.realpath(run)
-    # POSIX: byte-identical to the pre-helper output
-    assert fences.rule_path(run) == "/" + R
-    assert fences.confine_settings(run, "u1")["permissions"]["deny"] == \
-        ["Edit(/%s/%s/**)" % (R, d) for d in ("inbox", "msg", "asks", "agents")]
-    assert fences.scoped_grants("Read,Edit,Write,Bash,Glob,Grep", run, "u1") == \
-        "Read,Edit(/%s/sandboxes/u1/**),Bash,Glob,Grep" % R
-    assert fences.scoped_grants("Read,Glob,Grep", run, "u1") == "Read,Glob,Grep"
+    if os.name != "nt":
+        # this block is the POSIX form: byte-identical to the pre-helper output
+        run = str(tmp_path / "run")
+        R = os.path.realpath(run)
+        assert fences.rule_path(run) == "/" + R
+        assert fences.confine_settings(run, "u1")["permissions"]["deny"] == \
+            ["Edit(/%s/%s/**)" % (R, d) for d in ("inbox", "msg", "asks", "agents")]
+        assert fences.scoped_grants("Read,Edit,Write,Bash,Glob,Grep", run, "u1") == \
+            "Read,Edit(/%s/sandboxes/u1/**),Bash,Glob,Grep" % R
+        assert fences.scoped_grants("Read,Glob,Grep", run, "u1") == "Read,Glob,Grep"
 
     # the launcher's rule_path() form on Windows, with a fake realpath (the
     # public-hygiene rule: no home-directory spelling in the repo, so the
